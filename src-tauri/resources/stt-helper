@@ -1,0 +1,28 @@
+#!/Users/alalei/.hermes/hermes-agent/venv/bin/python3
+"""stt-helper: uses faster_whisper for local STT. Returns JSON with text + detected language."""
+import sys
+import json
+from faster_whisper import WhisperModel
+
+if len(sys.argv) != 2:
+    print("Usage: stt-helper <wav_file>", file=sys.stderr)
+    sys.exit(1)
+
+wav_path = sys.argv[1]
+
+try:
+    model = WhisperModel("small", device="cpu", compute_type="int8")
+    # No language param — let Whisper auto-detect
+    segments, info = model.transcribe(wav_path, beam_size=5)
+    text = " ".join(seg.text.strip() for seg in segments).strip()
+    detected_lang = info.language
+
+    if text:
+        result = {"text": text, "language": detected_lang}
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print("Empty result", file=sys.stderr)
+        sys.exit(1)
+except Exception as e:
+    print(str(e), file=sys.stderr)
+    sys.exit(1)

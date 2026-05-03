@@ -1,0 +1,17 @@
+{
+  "identifier": "default",
+  "description": "Pocket Agent default capabilities",
+  "platforms": ["macOS", "windows", "linux"],
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-position",
+    "core:window:allow-outer-position",
+    "core:window:allow-set-size",
+    "core:window:allow-set-size-constraints",
+    "core:window:allow-set-background-color",
+    "core:tray:default",
+    "store:default"
+  ]
+}

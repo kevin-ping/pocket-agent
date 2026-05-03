@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Pocket Agent 需要访问麦克风来识别您的语音指令（按住 fn 键说话）</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Pocket Agent 使用语音识别将您的语音转换为文字指令</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Pocket Agent 需要辅助功能权限来监听 fn 键</string>
+</dict>
+</plist>

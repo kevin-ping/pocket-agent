@@ -1,0 +1,64 @@
+{
+  "productName": "Pocket Agent",
+  "version": "0.1.0",
+  "identifier": "com.hermes.pocket-agent",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "resources/stt-helper": "resources/stt-helper"
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.13",
+      "infoPlist": "Info.plist"
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Pocket Agent",
+        "width": 108,
+        "height": 188,
+        "minWidth": 108,
+        "minHeight": 126,
+        "maxWidth": 600,
+        "maxHeight": 600,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": true,
+        "visible": true,
+        "center": false,
+        "x": 60,
+        "y": 100,
+        "focus": false,
+        "shadow": false
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "trayIcon": {
+      "iconPath": "icons/tray.png",
+      "iconAsTemplate": true,
+      "menuOnLeftClick": false,
+      "tooltip": "Pocket Agent"
+    },
+    "macOSPrivateApi": true
+  }
+}
