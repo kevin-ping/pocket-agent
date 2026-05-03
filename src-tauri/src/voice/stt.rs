@@ -40,10 +40,18 @@ pub fn transcribe(wav_path: &str) -> Result<SttResult, String> {
         ));
     }
 
-    let output = Command::new(&helper)
-        .arg(wav_path)
-        .output()
-        .map_err(|e| format!("stt-helper 启动失败: {}", e))?;
+    let output = if let Ok(python) = std::env::var("STT_PYTHON") {
+        Command::new(python)
+            .arg(&helper)
+            .arg(wav_path)
+            .output()
+            .map_err(|e| format!("stt-helper 启动失败: {}", e))?
+    } else {
+        Command::new(&helper)
+            .arg(wav_path)
+            .output()
+            .map_err(|e| format!("stt-helper 启动失败: {}", e))?
+    };
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();

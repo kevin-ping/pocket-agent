@@ -109,12 +109,10 @@ You can use multiple [CMD:...] tags if needed. Available apps: Chrome, Safari, S
     )
 }
 
-// Hardcoded API key for localhost access to Hermes api_server.
-// API_SERVER_KEY is configured in ~/.hermes/.env — this must match.
-pub const API_SERVER_KEY: &str = "9ad8fac9ff86aaae0c7d5b4c6bf22d370f498f9ba03df405eac6c77c0fe5d5b5";
-
+/// Load API key from environment variable.
+/// Reads from .env file on startup, falls back to env var.
 pub fn get_api_key() -> Option<String> {
-    Some(API_SERVER_KEY.to_string())
+    std::env::var("API_SERVER_KEY").ok().filter(|s| !s.is_empty())
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

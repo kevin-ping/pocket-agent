@@ -1,4 +1,4 @@
-#!/Users/alalei/.hermes/hermes-agent/venv/bin/python3
+#!/usr/bin/env python3
 """stt-helper: uses faster_whisper for local STT. Returns JSON with text + detected language."""
 import sys
 import json

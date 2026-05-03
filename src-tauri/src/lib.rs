@@ -11,10 +11,13 @@ pub struct AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Load .env file from current directory (silent — no error if missing)
+    let _ = dotenvy::dotenv();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(AppState {
-            session_id: Mutex::new("pocket-agent-session".to_string()),
+            session_id: Mutex::new(std::env::var("SESSION_ID").unwrap_or_else(|_| "pocket-agent-session".to_string())),
         })
         .manage(commands::voice::RecordingState::default())
         .setup(|app| {

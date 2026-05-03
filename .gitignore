@@ -1,6 +1,18 @@
+# agent stuff
+.claude
+.codex
+.workflow
+CLAUDE.md
+AGENTS.md
+
+# project
 node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
+src-tauri/api-*
 .DS_Store
 *.log
+
+# settings
+.env

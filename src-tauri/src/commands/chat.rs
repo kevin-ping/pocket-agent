@@ -9,7 +9,10 @@ use tauri::{AppHandle, Emitter, State};
 
 static AUDIO_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-const EDGE_TTS_BIN: &str = "/Users/alalei/.hermes/hermes-agent/venv/bin/edge-tts";
+/// Get edge-tts binary path from env var, fallback to "edge-tts" (expect in PATH)
+fn edge_tts_bin() -> String {
+    std::env::var("EDGE_TTS_BIN").unwrap_or_else(|_| "edge-tts".to_string())
+}
 
 /// Detect language from text content using Unicode character ranges.
 /// Returns ISO 639-1 code: "zh", "ja", "ko", "en", or fallback "zh".
@@ -92,7 +95,7 @@ fn generate_tts(text: &str, format: &str, voice: &str) -> bool {
     if text.trim().is_empty() { return false; }
     let path = tts_path(format);
     eprintln!("[TTS] generating {} for {} chars with voice {}...", format.to_uppercase(), text.len(), voice);
-    let result = Command::new(EDGE_TTS_BIN)
+    let result = Command::new(edge_tts_bin())
         .args(["--voice", voice, "--text", text, "--write-media", &path])
         .output();
     match result {
@@ -217,6 +220,7 @@ pub async fn send_message(
         };
         let mut received_data = false;
 
+        let stream_ended_normally;
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(delta) => {
@@ -233,9 +237,11 @@ pub async fn send_message(
                 }
             }
         }
+        stream_ended_normally = true;
 
-        // If we received data (even partially), don't retry
-        if received_data { break; }
+        // If stream ended normally (not via error break), don't retry even if no data
+        // (LLM may have used tools — tool events are filtered out but stream completes fine)
+        if received_data || stream_ended_normally { break; }
     }
 
     // Extract and execute [CMD:...] tags from response

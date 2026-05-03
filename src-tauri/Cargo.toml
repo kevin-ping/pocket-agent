@@ -37,6 +37,9 @@ rodio = "0.19"
 # Regex for [CMD:...] tag parsing
 regex = "1"
 
+# Environment variables from .env
+dotenvy = "0.15"
+
 [profile.release]
 opt-level = "s"     # 优化体积（旧机器存储也紧张）
 lto = true
