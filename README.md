@@ -1,98 +1,282 @@
 # Pocket Agent
 
-桌面 AI 助手 — 电子宠物 Widget 形态，常驻桌面，通过 Hermes Agent API 对话，支持 fn 键语音输入。
+> A minimal desktop AI voice companion that lives on your screen — press a key, speak, get things done.
 
-## 快速开始
+Pocket Agent is a compact desktop widget built with **Tauri 2.0 + Svelte 5 + Rust**. It connects to a local [Hermes Agent](https://github.com/nousresearch/hermes) gateway via SSE streaming, providing real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
+
+**English Demo:**
+
+https://github.com/user-attachments/assets/bitcion_en.mp4
+
+**Chinese Demo:**
+
+https://github.com/user-attachments/assets/bitcoin_cn.mp4
+
+---
+
+## How It Works
+
+```
++-------------------------------------------------------------+
+|                      Pocket Agent                            |
+|  +----------+  +----------+  +---------------------------+  |
+|  |  Avatar   |  |  Chat    |  |  Dynamic Island           |  |
+|  |  Widget   |  |  Panel   |  |  (recording indicator)    |  |
+|  +----------+  +----------+  +---------------------------+  |
+|       |             |                                        |
+|  Svelte 5      Svelte 5                                     |
+|  (frontend)    (frontend)                                   |
+|       |             |                                        |
+|  +----+-------------+------------------------------------+  |
+|  |              Tauri 2.0 Bridge                          |  |
+|  |         (invoke / events / state)                      |  |
+|  +----+-------------+------------------------------------+  |
+|       |             |                                        |
+|  +----+------+  +---+-----------+                            |
+|  |  Voice    |  |    Chat       |                            |
+|  |  Pipeline |  |    Engine     |                            |
+|  |           |  |               |                            |
+|  | - hotkey  |  | - SSE stream  |                            |
+|  | - record  |  | - TTS play    |                            |
+|  | - STT     |  | - lang detect |                            |
+|  +----+------+  +---+-----------+                            |
++-------+-------------+----------------------------------------+
+        |             |
+   WAV audio     HTTP/SSE
+        |             |
+        v             v
+  +----------+   +--------------+
+  | Whisper  |   | Hermes Agent |---- LLM (GLM-5)
+  | (local)  |   | Gateway      |---- Tools (browser, search...)
+  +----------+   | :8642        |---- Session memory
+                 +--------------+
+```
+
+### Voice Pipeline
+
+1. **Press fn key** — macOS CGEventTap captures the global hotkey
+2. **Recording starts** — cpal captures audio via CoreAudio (pre-warmed for zero-latency)
+3. **Press fn again** — recording stops, WAV saved to temp file
+4. **STT** — faster-whisper transcribes locally (auto language detection)
+5. **Send to LLM** — text + voice hint streamed to Hermes gateway via SSE
+6. **TTS playback** — edge-tts generates audio, rodio plays it via system speakers
+
+Press **Escape** during recording to cancel. Minimum recording: 1.5s. Maximum: 30s (auto-cutoff).
+
+---
+
+## Features
+
+- **Voice-first interaction** — push-to-talk with local Whisper STT, no cloud dependency for speech recognition
+- **Real-time streaming** — SSE streaming from LLM with live text display
+- **TTS voice response** — edge-tts with automatic language detection (Chinese, English, Japanese, Korean + more)
+- **Session memory** — conversation context persists across interactions via Hermes gateway
+- **Local command execution** — LLM can trigger `[CMD:...]` for local automation tasks
+- **Multi-language voice** — configure primary + auxiliary TTS voices, auto-switch based on detected language
+- **Compact widget** — 220x360px always-on-top window, dark sci-fi aesthetic
+- **macOS native** — global hotkey via CGEventTap, CoreAudio recording, menu bar tray
+
+---
+
+## Tech Stack
+
+**Frontend (Svelte 5)**
+- Svelte 5 with runes (`$state`, `$derived`, `$effect`, `$props()`)
+- TypeScript
+- Vite 6
+
+**Desktop (Tauri 2.0)**
+- Rust backend with Tokio async runtime
+- reqwest for HTTP/SSE streaming
+- eventsource-stream for SSE parsing
+- cpal + hound for audio recording
+- rodio for audio playback
+- CGEventTap (macOS FFI) for global hotkey
+
+**AI / Voice**
+- [Hermes Agent](https://github.com/nousresearch/hermes) gateway (local, `localhost:8642`)
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for local speech-to-text
+- [edge-tts](https://github.com/rany2/edge-tts) for text-to-speech
+- Any OpenAI-compatible LLM via Hermes (tested with GLM-5)
+
+---
+
+## Backend Compatibility
+
+| Backend | Status | Notes |
+|---------|--------|-------|
+| **Hermes Agent** | Supported | Primary backend. Requires gateway running on `localhost:8642` |
+| **OpenClaw** | In development | Multi-agent orchestration support coming soon |
+
+Pocket Agent communicates with the backend via a simple OpenAI-compatible chat completions API (`/v1/chat/completions`) over SSE. Any server implementing this interface can be used as a drop-in replacement.
+
+---
+
+## Privacy and Security
+
+Pocket Agent connects to a **local gateway** on your machine. Be aware of the following:
+
+- **Local network access** — the gateway binds to `localhost:8642`. Any process on your machine can potentially access it if the API key is exposed.
+- **API key in .env** — your `API_SERVER_KEY` is stored in plaintext. Never commit `.env` to version control. The provided `.gitignore` excludes it by default.
+- **Global hotkey access** — the fn key listener uses macOS Accessibility APIs (CGEventTap). This grants the app system-level input monitoring capability. Only run builds you trust.
+- **Microphone access** — audio is captured via CoreAudio and processed **entirely locally** by faster-whisper. No audio data leaves your machine for STT.
+- **Conversation history** — sessions are stored in `~/.hermes/sessions/` by the Hermes gateway. These contain full conversation text including LLM tool call results. Consider disk encryption.
+- **Local command execution** — the `[CMD:...]` feature allows the LLM to execute shell commands on your machine. This is powerful but dangerous. Audit your LLM behavior before enabling tool-use heavy workflows.
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- **macOS** 12+ (Monterey or later)
+- **Rust** 1.70+ — [install](https://rustup.rs/)
+- **Node.js** 18+ and npm
+- **Python 3.10+** with `faster-whisper` and `edge-tts`
+- **Hermes Agent** gateway running on `localhost:8642`
+
+### Setup
+
+1. **Clone and install dependencies:**
 
 ```bash
-cd /var/www/pocket-agent
+git clone https://github.com/kevin-ping/pocket-agent.git
+cd pocket-agent
+npm install
+```
+
+2. **Configure environment:**
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your values:
+
+```bash
+# From ~/.hermes/config.yaml -> api_server.key
+API_SERVER_KEY=your-api-server-key-here
+
+# Path to edge-tts binary (pip install edge-tts)
+EDGE_TTS_BIN=/path/to/edge-tts
+
+# Hermes session ID for conversation context
+SESSION_ID=pocket-agent-session
+
+# Python with faster_whisper installed
+STT_PYTHON=/path/to/python3
+```
+
+3. **Run in development mode:**
+
+```bash
 npm run tauri dev
 ```
 
-首次编译 Rust 依赖约 3-5 分钟，之后增量编译约 20 秒。
+First build takes 3-5 minutes for Rust compilation. Subsequent builds are ~20 seconds.
 
-## 架构
+### macOS Permissions
 
-```
-Pocket Agent (Tauri 2.0 + Svelte 5)
-  → Rust: Hermes API 客户端 (reqwest + SSE 流式)
-    → Hermes Agent API (localhost:8642)
-      → LLM (GLM-5 via Z.AI)
-```
+On first launch, grant these permissions in **System Settings -> Privacy and Security**:
 
-## 核心功能
+1. **Accessibility** — required for global fn key capture. Add Pocket Agent, then **restart the app**.
+2. **Microphone** — prompted automatically on first recording.
+3. **Speech Recognition** — prompted automatically (only if using Apple SFSpeech; faster-whisper bypasses this).
 
-- **文字对话**：SSE 流式打字机效果
-- **fn 键语音输入**：按住 fn 录音，松开自动 STT → 发给 agent → TTS 播放回复
-- **Session 记忆**：固定 session ID，对话跨回合保持上下文
-- **TTS 语音**：edge-tts (zh-CN-XiaoxiaoNeural) + rodio 播放
-- **皮肤系统**：CSS 角色皮肤 + 对话框皮肤（bubble/tv/terminal）
+---
 
-## 语音输入（fn 键）
+## Configuration
 
-技术栈与 voice-input 相同：
+Open **Settings** from the menu bar tray icon. Available options:
 
-| 组件 | 实现 |
-|------|------|
-| fn 键捕获 | rdev（底层 CGEventTap，需 Accessibility 权限） |
-| 麦克风录音 | cpal + hound（底层 CoreAudio） |
-| 语音识别 STT | Swift helper CLI（SFSpeechRecognizer，离线可用） |
+- **API URL** — Hermes gateway address (default: `http://localhost:8642`)
+- **Avatar image** — upload a custom character avatar
+- **TTS voices** — primary, auxiliary 1, auxiliary 2 (grouped by language)
+- **Fixed language mode** — force LLM to always respond in a specific language
+- **Mute/unmute** — toggle TTS playback
 
-首次使用前需构建 Swift helper（在开发机执行一次即可）：
+Settings persist across restarts via Tauri plugin-store.
 
-```bash
-bash src-tauri/swift-stt/build.sh
-```
+---
 
-首次启动需授权三项权限：
-1. **辅助功能（Accessibility）** — 系统设置 → 隐私与安全性 → 辅助功能，添加 Pocket Agent 后**重启 app**
-2. **麦克风** — 系统自动弹窗，点允许
-3. **语音识别** — 系统自动弹窗，点允许
+## Airline Enquiry Demo
 
-## 配置
+Pocket Agent can search the web via Hermes tools. Here is an example of asking for cheap flights:
 
-- API 地址：`http://localhost:8642`（可在设置里改）
-- Session：自动维持，通过 `X-Hermes-Session-Id` header
-- 认证：携带 `Authorization: Bearer <API_SERVER_KEY>`（硬编码于源码）
+**Query:**
 
-## 项目结构
+![Airline Enquiry](assets/media/airline_enqiry.jpg)
+
+**Result:**
+
+![Airline Result](assets/media/airline_result.jpg)
+
+---
+
+## Project Structure
 
 ```
 pocket-agent/
-├── src-tauri/
-│   ├── swift-stt/
-│   │   ├── main.swift       # Swift STT helper CLI (SFSpeechRecognizer)
-│   │   └── build.sh         # 构建脚本 → resources/stt-helper
+├── src/                          # Svelte 5 frontend
+│   ├── App.svelte                # Main container + event orchestration
+│   ├── main.ts                   # Entry point
+│   └── lib/
+│       ├── components/
+│       │   ├── AvatarIcon.svelte  # Character avatar + expand button
+│       │   ├── ChatPanel.svelte   # Chat input + message display
+│       │   ├── ContextMenu.svelte # Right-click context menu
+│       │   ├── DialogBox.svelte   # Dialog bubble with typewriter effect
+│       │   ├── DynamicIsland.svelte # Recording indicator
+│       │   ├── Icon.svelte       # SVG inline icon component (Lucide style)
+│       │   ├── RecordingCapsule.svelte # Active recording timer
+│       │   └── SettingsPanel.svelte # Tabbed settings (General / Voice)
+│       ├── stores/
+│       │   ├── chat.ts           # Chat message store
+│       │   ├── character.ts      # Character animation state
+│       │   ├── layout.ts         # Window layout constants
+│       │   └── settings.ts       # Persistent settings store
+│       └── i18n.ts               # Language detection utilities
+├── src-tauri/                    # Rust backend
+│   ├── Cargo.toml                # Rust dependencies
+│   ├── tauri.conf.json           # Tauri window + tray config
 │   ├── resources/
-│   │   └── stt-helper       # 编译后的 STT 二进制（需先运行 build.sh）
+│   │   └── stt-helper            # Python STT script (faster-whisper)
 │   └── src/
-│       ├── lib.rs            # AppState + 窗口初始化 + 热键线程启动
-│       ├── api/client.rs     # Hermes API 客户端 (chat_stream)
+│       ├── main.rs               # App entry
+│       ├── lib.rs                # State, tray menu, plugin setup
+│       ├── api/
+│       │   └── client.rs         # Hermes SSE client
 │       ├── commands/
-│       │   ├── chat.rs       # send_message: API → TTS → SSE emit
-│       │   ├── config.rs     # 设置持久化 + API key
-│       │   └── voice.rs      # start/stop_voice_recording Tauri commands
+│       │   ├── chat.rs           # send_message: SSE -> TTS -> emit
+│       │   ├── config.rs         # Settings persistence + voice hints
+│       │   └── voice.rs          # Recording lifecycle commands
 │       └── voice/
-│           ├── hotkey.rs     # rdev 全局热键监听（独立 OS 线程）
-│           ├── record.rs     # cpal 录音（独立录音线程，mpsc channel 通信）
-│           └── stt.rs        # 调用 stt-helper CLI，返回识别文字
-├── src/
-│   ├── App.svelte            # 主容器 + 事件监听
-│   └── lib/components/
-│       ├── Character.svelte  # 角色动画 (idle/listening/thinking/speaking)
-│       └── DialogBox.svelte  # 对话框 (打字机效果)
-└── DESIGN.md                 # 技术方案 v2
+│           ├── hotkey.rs         # Global fn-key capture (CGEventTap)
+│           ├── record.rs         # Audio recording (cpal) + pre-warm
+│           └── stt.rs            # Whisper transcription wrapper
+├── assets/
+│   └── media/                    # Demo videos + screenshots
+├── .env.example                  # Environment template
+└── README.md
 ```
 
-## 开发
+---
+
+## Development
 
 ```bash
-# 编译检查
-cd src-tauri && cargo check 2>&1
+# Type check frontend
+npx svelte-check
 
-# 查看编译错误
-cargo build 2>&1
+# Check Rust compilation
+cd src-tauri && cargo check
 
-# 检查进程
-ps aux | grep pocket-agent
+# Build for production
+npm run tauri build
 ```
+
+---
+
+## License
+
+MIT
