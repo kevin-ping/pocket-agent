@@ -6,11 +6,11 @@ Pocket Agent is a compact desktop widget built with **Tauri 2.0 + Svelte 5 + Rus
 
 **English Demo:**
 
-https://github.com/user-attachments/assets/bitcion_en.mp4
+https://github.com/user-attachments/assets/e67eb2d7-48c4-4617-b9ad-5947cb5914fe
 
 **Chinese Demo:**
 
-https://github.com/user-attachments/assets/bitcoin_cn.mp4
+https://github.com/user-attachments/assets/bc815581-c662-4f24-979d-0ce5c672ae8c
 
 ---
 
