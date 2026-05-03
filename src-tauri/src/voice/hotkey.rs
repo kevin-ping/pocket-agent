@@ -179,6 +179,7 @@ mod macos_raw {
 
     struct CaptureCtx {
         tx: mpsc::Sender<i64>,
+        start_ms: u64,
     }
 
     unsafe extern "C" fn capture_callback(
@@ -190,8 +191,17 @@ mod macos_raw {
         if etype != KCG_EVENT_KEY_DOWN {
             return event;
         }
-        let keycode = CGEventGetIntegerValueField(event, KCG_KEYBOARD_EVENT_KEYCODE);
+        // Grace period: ignore events in first 300ms to skip stale/residual key events
         let ctx = &*(user_info as *const CaptureCtx);
+        let start = ctx.start_ms;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if now.saturating_sub(start) < 300 {
+            return event; // Too soon, skip
+        }
+        let keycode = CGEventGetIntegerValueField(event, KCG_KEYBOARD_EVENT_KEYCODE);
         let _ = ctx.tx.send(keycode);
         // Stop our own run loop
         CFRunLoopStop(CFRunLoopGetCurrent());
@@ -204,7 +214,11 @@ mod macos_raw {
         std::thread::Builder::new()
             .name("hotkey-capture".to_string())
             .spawn(move || {
-                let ctx = Box::new(CaptureCtx { tx });
+                let start_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let ctx = Box::new(CaptureCtx { tx, start_ms });
                 let ctx_ptr = Box::into_raw(ctx) as *mut c_void;
 
                 unsafe {
