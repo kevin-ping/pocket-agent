@@ -15,20 +15,47 @@ interface ChatState {
 
 // ── Emotion → ms per char ──
 const EMOTION_SPEEDS: Record<string, number> = {
-  friendly:  80,
-  cheerful:  65,
-  calm:     120,
-  serious:  100,
-  sad:      160,
-  whisper:  140,
-  excited:  45,
-  angry:     55,
+  friendly:  210,
+  cheerful:  192,
+  calm:  245,
+  serious:  232,
+  sad:  276,
+  whisper:  259,
+  excited:  192,
+  angry:  184,
 };
 
 let typewriterTimer: ReturnType<typeof setInterval> | null = null;
 let pendingChars: string[] = [];
 let currentSpeed: number = EMOTION_SPEEDS.friendly;
 let streamEnding = false;
+
+// Pull next display unit: one CJK/punct char, or one continuous ASCII word (including trailing space)
+function pullNextUnit(chars: string[]): string {
+  if (chars.length === 0) return '';
+  const first = chars[0];
+  // CJK or fullwidth or non-ASCII punctuation: single char
+  if (first.charCodeAt(0) > 0x2000) {
+    return chars.shift()!;
+  }
+  // ASCII: pull until we hit non-ASCII or space-after-word
+  let unit = '';
+  let gotLetter = false;
+  while (chars.length > 0) {
+    const ch = chars[0];
+    const code = ch.charCodeAt(0);
+    if (code > 0x2000) break; // hit CJK
+    if (ch === ' ' && gotLetter) {
+      unit += chars.shift()!;
+      break; // include trailing space, then stop
+    }
+    if (/[a-zA-Z0-9]/.test(ch)) gotLetter = true;
+    unit += chars.shift()!;
+    // stop at space if we've been collecting letters
+    if (gotLetter && ch === ' ') break;
+  }
+  return unit;
+}
 
 function createChatStore() {
   const { subscribe, update, set } = writable<ChatState>({
@@ -57,7 +84,6 @@ function createChatStore() {
     stopTypewriter();
     streamEnding = false;
     currentSpeed = EMOTION_SPEEDS[emotion] ?? EMOTION_SPEEDS.friendly;
-    const batch = currentSpeed < 50 ? 2 : 1;
     typewriterTimer = setInterval(() => {
       if (pendingChars.length === 0) {
         clearInterval(typewriterTimer!);
@@ -68,11 +94,8 @@ function createChatStore() {
         }
         return;
       }
-      let chunk = '';
-      for (let i = 0; i < batch && pendingChars.length > 0; i++) {
-        chunk += pendingChars.shift();
-      }
-      update((s) => ({ ...s, streamingContent: s.streamingContent + chunk }));
+      const chunk = pullNextUnit(pendingChars);
+      if (chunk) update((s) => ({ ...s, streamingContent: s.streamingContent + chunk }));
     }, currentSpeed);
   }
 
@@ -99,6 +122,13 @@ function createChatStore() {
         messages: [...s.messages, { role: 'user', content, timestamp: Date.now() }],
       })),
 
+    addBotMessage: (content: string) =>
+      update((s) => ({
+        ...s,
+        error: null,
+        messages: [...s.messages, { role: 'assistant', content, timestamp: Date.now() }],
+      })),
+
     startStream: () =>
       update((s) => ({ ...s, streamingContent: '', isStreaming: true, error: null })),
 
@@ -110,8 +140,7 @@ function createChatStore() {
       }
       // If timer isn't running but we have chars, start it
       if (!typewriterTimer && pendingChars.length > 0) {
-        const batch = currentSpeed < 50 ? 2 : 1;
-        typewriterTimer = setInterval(() => {
+            typewriterTimer = setInterval(() => {
           if (pendingChars.length === 0) {
             clearInterval(typewriterTimer!);
             typewriterTimer = null;
@@ -120,11 +149,8 @@ function createChatStore() {
             }
             return;
           }
-          let chunk = '';
-          for (let i = 0; i < batch && pendingChars.length > 0; i++) {
-            chunk += pendingChars.shift();
-          }
-          update((s) => ({ ...s, streamingContent: s.streamingContent + chunk }));
+          const chunk = pullNextUnit(pendingChars);
+          if (chunk) update((s) => ({ ...s, streamingContent: s.streamingContent + chunk }));
         }, currentSpeed);
       }
     },

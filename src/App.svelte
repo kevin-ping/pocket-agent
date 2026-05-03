@@ -83,6 +83,7 @@
       listen('chat-thinking-start', () => characterState.toThinking()),
       listen<{ emotion: string; total_chars: number; has_audio: boolean }>('chat-speaking-start', (e) => {
         characterState.toSpeaking();
+        chatStore.startStream();
         chatStore.startTypewriter(e.payload.emotion);
         if (!e.payload.has_audio && !$layoutStore.expanded) {
           layoutStore.toggle();
@@ -142,6 +143,24 @@
       }),
       listen('tray-open-settings', () => {
         openSettings();
+      }),
+
+      // API push: external message pushed to PA (e.g. from Hermes cron)
+      // Only call speak_text — text display is handled by the speak_text
+      // Rust side which emits chat-speaking-start (typewriter) + chat-stream (delta).
+      listen<{ text: string; emotion: string; voice: string | null }>("api-push", (e) => {
+        const { text, emotion, voice } = e.payload;
+        if (!text.trim()) return;
+        invoke("speak_text", {
+          text,
+          emotion,
+          overrideVoice: voice || undefined,
+          ttsFormat: get(settingsStore).tts_format,
+          ttsPrimaryVoice: get(settingsStore).tts_primary_voice,
+          ttsAux1Voice: get(settingsStore).tts_aux1_voice,
+          ttsAux2Voice: get(settingsStore).tts_aux2_voice,
+          ttsEnabled: get(settingsStore).tts_enabled,
+        }).catch(console.error);
       }),
     ]);
   }
@@ -291,7 +310,7 @@
   /* Vertical centering: avatar is 112px (incl. label), panel is 120px */
   .app-root.expanded .avatar-zone {
     align-self: flex-start;
-    margin-top: calc((120px - 126px) / 2);
+    /* margin-top: calc((120px - 126px) / 2); */
   }
 
   .gap {

@@ -35,6 +35,13 @@ pub fn run() {
             voice::hotkey::prewarm_capture();
             voice::record::prewarm();
 
+            // Start local API server for push notifications (port 8650)
+            {
+                let server_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::api::server::start_server(server_handle, 8650).await;
+                });
+            }
             // System tray menu (appears in macOS menu bar)
             let settings_item = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "Quit Pocket Agent").build(app)?;
@@ -64,7 +71,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::chat::send_message,
             commands::chat::speak,
-            commands::config::get_config,
+            commands::chat::speak_text,            commands::config::get_config,
             commands::config::save_config,
             commands::config::quit_app,
             commands::voice::start_voice_recording,

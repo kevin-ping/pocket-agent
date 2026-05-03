@@ -93,6 +93,7 @@ mod macos_raw {
         if keycode == ESC_KEYCODE && etype == KCG_EVENT_KEY_DOWN && active {
             if ctx.is_active.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
                 eprintln!("[hotkey] escape pressed, cancelling recording");
+                crate::commands::chat::stop_audio_queue();
                 let _ = ctx.app.emit("voice-cancel", ());
             }
             return event;
@@ -111,6 +112,7 @@ mod macos_raw {
         if !active {
             if ctx.is_active.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
                 crate::voice::record::pre_start();
+                crate::commands::chat::stop_audio_queue();
                 eprintln!("[hotkey] hotkey-down (toggle ON)");
                 let _ = ctx.app.emit("fn-key-down", ());
             }

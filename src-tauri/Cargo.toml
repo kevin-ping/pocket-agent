@@ -40,6 +40,9 @@ regex = "1"
 # Environment variables from .env
 dotenvy = "0.15"
 
+# HTTP API server for push notifications
+axum = { version = "0.8", features = ["json"] }
+tower-http = { version = "0.6", features = ["cors"] }
 [profile.release]
 opt-level = "s"     # 优化体积（旧机器存储也紧张）
 lto = true
