@@ -4,14 +4,6 @@
 
 Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust**. It connects to a local [Hermes Agent](https://github.com/nousresearch/hermes) gateway via SSE streaming for real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
 
-**English Demo:**
-
-https://github.com/user-attachments/assets/e67eb2d7-48c4-4617-b9ad-5947cb5914fe
-
-**Chinese Demo:**
-
-https://github.com/user-attachments/assets/bc815581-c662-4f24-979d-0ce5c672ae8c
-
 ---
 
 ## How It Works
@@ -306,6 +298,18 @@ cd src-tauri && cargo check
 # Production build
 npm run tauri build
 ```
+
+---
+
+## Demo
+
+**English Demo:**
+
+https://github.com/user-attachments/assets/e67eb2d7-48c4-4617-b9ad-5947cb5914fe
+
+**Chinese Demo:**
+
+https://github.com/user-attachments/assets/bc815581-c662-4f24-979d-0ce5c672ae8c
 
 ---
 

@@ -151,7 +151,8 @@ mod macos_raw {
 
                     if tap.is_null() {
                         eprintln!("[hotkey] CGEventTapCreate failed - is Accessibility enabled?");
-                        let _ = Box::from_raw(ctx_ptr as *mut HotkeyCtx);
+                        let recovered = Box::from_raw(ctx_ptr as *mut HotkeyCtx);
+                        let _ = recovered.app.emit("accessibility-permission-required", ());
                         return;
                     }
 
@@ -179,7 +180,9 @@ mod macos_raw {
 
     struct CaptureCtx {
         tx: mpsc::Sender<i64>,
-        start_ms: u64,
+        /// Tracks whether we've seen at least one KeyUp since capture started.
+        /// Prevents residual KeyDown events from the mouse click that triggered capture.
+        seen_first_key_up: AtomicBool,
     }
 
     unsafe extern "C" fn capture_callback(
@@ -188,19 +191,24 @@ mod macos_raw {
         event: CGEventRef,
         user_info: *mut c_void,
     ) -> CGEventRef {
+        let ctx = &*(user_info as *const CaptureCtx);
+
+        // Ignore KeyUp events but use them to signal "click is done"
+        if etype == KCG_EVENT_KEY_UP {
+            ctx.seen_first_key_up.store(true, Ordering::SeqCst);
+            return event;
+        }
+
         if etype != KCG_EVENT_KEY_DOWN {
             return event;
         }
-        // Grace period: ignore events in first 300ms to skip stale/residual key events
-        let ctx = &*(user_info as *const CaptureCtx);
-        let start = ctx.start_ms;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        if now.saturating_sub(start) < 300 {
-            return event; // Too soon, skip
+
+        // Only accept key presses after we've seen at least one release
+        // (the mouse click that started capture generates a key-down without a prior key-up)
+        if !ctx.seen_first_key_up.load(Ordering::SeqCst) {
+            return event; // Still in the click, skip this stale event
         }
+
         let keycode = CGEventGetIntegerValueField(event, KCG_KEYBOARD_EVENT_KEYCODE);
         let _ = ctx.tx.send(keycode);
         // Stop our own run loop
@@ -210,35 +218,38 @@ mod macos_raw {
 
     pub fn capture_one_key(timeout_secs: u64) -> Result<(i64, String), String> {
         let (tx, rx) = mpsc::channel();
+        let tx_err = tx.clone();
 
         std::thread::Builder::new()
             .name("hotkey-capture".to_string())
             .spawn(move || {
-                let start_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                let ctx = Box::new(CaptureCtx { tx, start_ms });
+                let ctx = Box::new(CaptureCtx {
+                    tx,
+                    seen_first_key_up: AtomicBool::new(false),
+                });
                 let ctx_ptr = Box::into_raw(ctx) as *mut c_void;
 
                 unsafe {
+                    let event_mask = (1u64 << KCG_EVENT_KEY_DOWN) | (1u64 << KCG_EVENT_KEY_UP);
                     let tap = CGEventTapCreate(
                         KCG_HID_EVENT_TAP,
                         KCG_HEAD_INSERT_EVENT_TAP,
                         KCG_EVENT_TAP_OPTION_LISTEN_ONLY,
-                        1u64 << KCG_EVENT_KEY_DOWN,
+                        event_mask,
                         capture_callback,
                         ctx_ptr,
                     );
 
                     if tap.is_null() {
                         let _ = Box::from_raw(ctx_ptr as *mut CaptureCtx);
+                        let _ = tx_err.send(-1);
                         return;
                     }
 
                     let source = CFMachPortCreateRunLoopSource(std::ptr::null_mut(), tap, 0);
                     if source.is_null() {
                         let _ = Box::from_raw(ctx_ptr as *mut CaptureCtx);
+                        let _ = tx_err.send(-1);
                         return;
                     }
 
@@ -252,6 +263,9 @@ mod macos_raw {
             .map_err(|e| format!("thread spawn: {}", e))?;
 
         match rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
+            Ok(keycode) if keycode < 0 => {
+                Err("accessibility_permission_required".to_string())
+            }
             Ok(keycode) => {
                 let name = keycode_to_name(keycode);
                 Ok((keycode, name))
@@ -328,6 +342,25 @@ mod macos_raw {
             _ => format!("Key({})", code),
         }
     }
+
+    /// Test if CGEventTap can be created (true = accessibility permission granted)
+    pub fn test_tap_available() -> bool {
+        unsafe {
+            extern "C" fn noop_cb(
+                _: *mut c_void, _: u32, e: CGEventRef, _: *mut c_void,
+            ) -> CGEventRef { e }
+
+            let tap = CGEventTapCreate(
+                KCG_HID_EVENT_TAP,
+                KCG_HEAD_INSERT_EVENT_TAP,
+                KCG_EVENT_TAP_OPTION_LISTEN_ONLY,
+                1u64 << KCG_EVENT_KEY_DOWN,
+                noop_cb,
+                std::ptr::null_mut(),
+            );
+            !tap.is_null()
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -359,15 +392,20 @@ pub fn update_hotkey(code: i64) {
 
 #[cfg(target_os = "macos")]
 pub fn check_accessibility(app: &AppHandle) {
-    let ok = std::process::Command::new("osascript")
-        .args(["-e", "tell application \"System Events\" to return true"])
-        .output()
-        .map(|o| o.status.success())
+    let tap_ok = std::thread::Builder::new()
+        .name("accessibility-check".to_string())
+        .spawn(|| macos_raw::test_tap_available())
+        .map(|h| h.join().unwrap_or(false))
         .unwrap_or(false);
 
-    if !ok {
-        eprintln!("[hotkey] Accessibility permission missing");
+    if !tap_ok {
+        eprintln!("[hotkey] Accessibility permission missing — CGEventTap test failed");
         let _ = app.emit("accessibility-permission-required", ());
+        let _ = std::process::Command::new("open")
+            .args(["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"])
+            .spawn();
+    } else {
+        eprintln!("[hotkey] Accessibility permission OK");
     }
 }
 

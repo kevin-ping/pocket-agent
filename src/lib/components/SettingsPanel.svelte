@@ -104,6 +104,11 @@
       await invoke('update_hotkey', { code: result[0] });
     } catch (e) {
       console.warn('[hotkey] capture failed:', e);
+      if (String(e).includes('accessibility')) {
+        saveError = '需要辅助功能权限：系统设置 → 隐私与安全性 → 辅助功能 → 允许此应用';
+      } else {
+        saveError = '按键捕获失败，请重试';
+      }
     }
     capturing = false;
   }
