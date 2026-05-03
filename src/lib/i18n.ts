@@ -45,7 +45,7 @@ interface Strings {
 
 const translations: Record<string, Strings> = {
   zh: {
-    hint: '按下 fn 说话，再按一次结束，或在下方输入文字',
+    hint: '按下 {key} 说话，再按一次结束，或在下方输入文字',
     inputPlaceholder: '输入消息…',
     inputBusy: '处理中…',
     settings: '设置',
@@ -85,7 +85,7 @@ const translations: Record<string, Strings> = {
     ariaVolume: '音量',
   },
   en: {
-    hint: 'Press fn to talk, press again to stop, or type below',
+    hint: 'Press {key} to talk, press again to stop, or type below',
     inputPlaceholder: 'Type a message…',
     inputBusy: 'Processing…',
     settings: 'Settings',
@@ -125,7 +125,7 @@ const translations: Record<string, Strings> = {
     ariaVolume: 'Volume',
   },
   ja: {
-    hint: 'fnキーで話す、もう一度で終了、または下に入力',
+    hint: '{key}キーで話す、もう一度で終了、または下に入力',
     inputPlaceholder: 'メッセージを入力…',
     inputBusy: '処理中…',
     settings: '設定',
@@ -165,7 +165,7 @@ const translations: Record<string, Strings> = {
     ariaVolume: '音量',
   },
   ko: {
-    hint: 'fn 키를 눌러 말하기, 다시 눌러 끝내기, 또는 아래에 입력',
+    hint: '{key} 키를 눌러 말하기, 다시 눌러 끝내기, 또는 아래에 입력',
     inputPlaceholder: '메시지 입력…',
     inputBusy: '처리 중…',
     settings: '설정',

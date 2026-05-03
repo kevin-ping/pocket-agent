@@ -2,6 +2,7 @@
   import { fly } from 'svelte/transition';
   import { settingsStore, type AppSettings } from '../stores/settings';
   import { t } from '../i18n';
+  import { invoke } from '@tauri-apps/api/core';
 
   const VOICE_OPTIONS = [
     { group: '🇨🇳 中文', voices: [
@@ -89,10 +90,36 @@
     if (fileInput) fileInput.value = '';
   }
 
+  let capturing = $state(false);
+
+  async function startCapture() {
+    capturing = true;
+    // Yield to let UI update before blocking invoke
+    await new Promise(r => requestAnimationFrame(r));
+    try {
+      const result = await invoke<[number, string]>('capture_hotkey');
+      local.hotkey_code = result[0];
+      local.hotkey_name = result[1];
+      // Apply immediately — no restart needed
+      await invoke('update_hotkey', { code: result[0] });
+    } catch (e) {
+      console.warn('[hotkey] capture failed:', e);
+    }
+    capturing = false;
+  }
+
+  let saveError = $state('');
+
   async function save() {
-    await settingsStore.save(local);
-    visible = false;
-    onclose?.();
+    saveError = '';
+    try {
+      await settingsStore.save(local);
+      visible = false;
+      onclose?.();
+    } catch (e) {
+      saveError = '保存失败，请重试';
+      console.error('[settings] save error:', e);
+    }
   }
 
   function cancel() {
@@ -174,6 +201,17 @@
           spellcheck="false"
           autocomplete="off"
         />
+      </div>
+
+      <!-- ── Hotkey section ── -->
+      <div class="section-label">Hotkey</div>
+      <div class="field-row">
+        <label class="field-label">Record Key</label>
+        {#if capturing}
+          <button class="capture-btn active" disabled>按下快捷键...</button>
+        {:else}
+          <button class="capture-btn" onclick={startCapture}>{local.hotkey_name || 'fn'}</button>
+        {/if}
       </div>
 
       <!-- ── Appearance section ── -->
@@ -267,12 +305,25 @@
         </select>
       </div>
 
+      <div class="field-row">
+        <label class="field-label">Voice Output</label>
+        <div class="toggle-wrap">
+          <input type="checkbox" id="tts-enabled" class="toggle-input" bind:checked={local.tts_enabled} />
+          <label for="tts-enabled" class="toggle-track">
+            <span class="toggle-thumb"></span>
+          </label>
+        </div>
+      </div>
+
       <p class="hint">{t($settingsStore.tts_primary_voice).autoDetectHint}</p>
 
     </div>
 
     <!-- Footer actions -->
     <div class="footer">
+      {#if saveError}
+        <span class="save-error">{saveError}</span>
+      {/if}
       <button class="btn" onclick={cancel}>{t($settingsStore.tts_primary_voice).cancel}</button>
       <button class="btn primary" onclick={save}>{t($settingsStore.tts_primary_voice).save}</button>
     </div>
@@ -628,4 +679,78 @@
     color: #c8d8ff;
   }
   .btn.primary:hover { background: rgba(124, 158, 255, 0.35); }
+
+  /* ── Capture button ── */
+  .capture-btn {
+    padding: 4px 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(160, 168, 255, 0.32);
+    background: rgba(160, 168, 255, 0.18);
+    color: #A0A8FF;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    min-width: 60px;
+    text-align: center;
+  }
+  .capture-btn:hover:not(:disabled) {
+    background: rgba(160, 168, 255, 0.32);
+  }
+  .capture-btn.active {
+    border-color: rgba(100, 255, 200, 0.5);
+    background: rgba(100, 255, 200, 0.12);
+    color: rgba(100, 255, 200, 0.9);
+    animation: capture-pulse 1s ease-in-out infinite;
+  }
+  .capture-btn:disabled {
+    cursor: default;
+  }
+  @keyframes capture-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  /* ── Toggle switch ── */
+  .toggle-wrap {
+    display: flex;
+    align-items: center;
+  }
+  .toggle-input { display: none; }
+  .toggle-track {
+    width: 36px;
+    height: 20px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    position: relative;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+  }
+  .toggle-input:checked + .toggle-track {
+    background: rgba(100, 255, 200, 0.25);
+    border-color: rgba(100, 255, 200, 0.5);
+  }
+  .toggle-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: rgba(232, 232, 240, 0.6);
+    transition: transform 0.2s, background 0.2s;
+  }
+  .toggle-input:checked + .toggle-track .toggle-thumb {
+    transform: translateX(16px);
+    background: rgba(100, 255, 200, 0.9);
+  }
+  .save-error {
+    color: rgba(255, 95, 86, 0.9);
+    font-size: 11px;
+    flex: 1;
+    text-align: left;
+    padding-left: 4px;
+  }
 </style>

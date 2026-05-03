@@ -188,15 +188,16 @@
   }
 
   .state-listening .wave-ring { display: block; }
-  .state-speaking  .wave-ring { display: block; animation-duration: 1.1s; }
+  .state-speaking  .wave-ring { display: block; animation-duration: 1.1s; border-width: 2px; }
 
   .wave-ring.w1 { animation-delay: 0s;    }
   .wave-ring.w2 { animation-delay: 0.55s; }
   .wave-ring.w3 { animation-delay: 1.10s; }
 
   @keyframes wave-expand {
-    0%   { transform: scale(0.9);  opacity: 0.75; }
-    100% { transform: scale(1.18); opacity: 0;    }
+    0%   { transform: scale(0.85);  opacity: 0.7; }
+    50%  { opacity: 0.4; }
+    100% { transform: scale(1.5);   opacity: 0;   }
   }
 
   /* ─── Thinking arc ─── */

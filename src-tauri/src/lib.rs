@@ -31,7 +31,8 @@ pub fn run() {
             }
 
             voice::hotkey::check_accessibility(handle);
-            voice::hotkey::spawn_hotkey_listener(handle.clone());
+            voice::hotkey::spawn_hotkey_listener(handle.clone(), config.hotkey_code);
+            voice::hotkey::prewarm_capture();
             voice::record::prewarm();
 
             // System tray menu (appears in macOS menu bar)
@@ -69,6 +70,8 @@ pub fn run() {
             commands::voice::start_voice_recording,
             commands::voice::stop_voice_recording,
             commands::voice::cancel_voice_recording,
+            voice::hotkey::capture_hotkey,
+            voice::hotkey::update_hotkey,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

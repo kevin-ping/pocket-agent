@@ -30,6 +30,7 @@
     chatStore.addUserMessage(text);
     chatStore.startStream();
     characterState.toThinking();
+    islandMode = 'thinking';
     try {
       await invoke('send_message', {
         text,
@@ -40,6 +41,7 @@
         ttsAux2Voice: get(settingsStore).tts_aux2_voice,
         userLanguage: userLanguage || 'zh',
         fixedLang: get(settingsStore).fixed_lang || '',
+        ttsEnabled: get(settingsStore).tts_enabled,
       });
     } catch (e) {
       chatStore.setError(`连接失败: ${e}`);
@@ -82,6 +84,9 @@
       listen<{ emotion: string; total_chars: number; has_audio: boolean }>('chat-speaking-start', (e) => {
         characterState.toSpeaking();
         chatStore.startTypewriter(e.payload.emotion);
+        if (!e.payload.has_audio && !$layoutStore.expanded) {
+          layoutStore.toggle();
+        }
       }),
       listen<{ delta: string }>('chat-stream', (e) => chatStore.appendDelta(e.payload.delta)),
       listen('chat-stream-end', () => {

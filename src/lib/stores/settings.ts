@@ -13,7 +13,10 @@ export interface AppSettings {
   window_x: number | null;
   window_y: number | null;
   avatar_image: string | null;
-  fixed_lang: string;  // "", "primary", "aux1", "aux2"
+  fixed_lang: string;
+  hotkey_code: number;
+  hotkey_name: string;
+  tts_enabled: boolean;
 }
 
 const defaults: AppSettings = {
@@ -29,6 +32,9 @@ const defaults: AppSettings = {
   window_y: null,
   avatar_image: null,
   fixed_lang: "",
+  hotkey_code: 179,
+  hotkey_name: "fn",
+  tts_enabled: true,
 };
 
 function createSettingsStore() {
@@ -47,14 +53,19 @@ function createSettingsStore() {
       }
     },
 
-    save: async (partial: Partial<AppSettings>) => {
-      update((s) => {
-        const next = { ...s, ...partial };
-        invoke('save_config', { config: next }).catch((e) =>
-          console.error('[settings] save failed:', e)
-        );
-        return next;
+    save: async (partial: Partial<AppSettings>): Promise<void> => {
+      let next: AppSettings = defaults;
+      update((current) => {
+        next = { ...current, ...partial };
+        return current; // Don't update store until save succeeds
       });
+      try {
+        await invoke('save_config', { config: next });
+        set(next); // Only update store after successful save
+      } catch (e) {
+        console.error('[settings] save failed:', e);
+        throw e; // Let caller handle (e.g., show error toast)
+      }
     },
   };
 }

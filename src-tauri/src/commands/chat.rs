@@ -85,16 +85,19 @@ struct TypewriterStartPayload {
 }
 
 fn tts_path(format: &str) -> String {
+    let id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     match format {
-        "mp3" => "/tmp/pocket-agent-tts.mp3".to_string(),
-        _ => "/tmp/pocket-agent-tts.wav".to_string(),
+        "mp3" => format!("/tmp/pocket-agent-tts-{}.mp3", id),
+        _ => format!("/tmp/pocket-agent-tts-{}.wav", id),
     }
 }
 
-fn generate_tts(text: &str, format: &str, voice: &str) -> bool {
+fn generate_tts_to(text: &str, path: &str, voice: &str) -> bool {
     if text.trim().is_empty() { return false; }
-    let path = tts_path(format);
-    eprintln!("[TTS] generating {} for {} chars with voice {}...", format.to_uppercase(), text.len(), voice);
+    eprintln!("[TTS] generating {} for {} chars with voice {}...", "audio", text.len(), voice);
     let result = Command::new(edge_tts_bin())
         .args(["--voice", voice, "--text", text, "--write-media", &path])
         .output();
@@ -112,8 +115,7 @@ fn generate_tts(text: &str, format: &str, voice: &str) -> bool {
     }
 }
 
-fn play_audio(format: &str, app: AppHandle, generation: u64) {
-    let path = tts_path(format);
+fn play_audio(path: String, app: AppHandle, generation: u64) {
     std::thread::spawn(move || {
         let emit_done = |app: &AppHandle, gen: u64| {
             if AUDIO_GENERATION.load(Ordering::SeqCst) == gen {
@@ -186,6 +188,7 @@ pub async fn send_message(
     tts_aux2_voice: Option<String>,
     user_language: Option<String>,
     fixed_lang: Option<String>,
+    tts_enabled: Option<bool>,
 ) -> Result<(), String> {
     let format = tts_format.unwrap_or_else(|| "wav".to_string());
     let primary = tts_primary_voice.unwrap_or_else(|| "zh-CN-XiaoxiaoNeural".to_string());
@@ -244,9 +247,13 @@ pub async fn send_message(
         if received_data || stream_ended_normally { break; }
     }
 
-    // Extract and execute [CMD:...] tags from response
-    let clean_text = execute_commands(&full_response);
-    let full_response = clean_text;
+    // Extract and execute [CMD:...] tags from response (only if explicitly enabled)
+    let full_response = if std::env::var("ENABLE_LOCAL_COMMANDS").as_deref() == Ok("true") {
+        execute_commands(&full_response)
+    } else {
+        // Strip [CMD:...] tags silently so TTS doesn't read them
+        strip_cmd_tags(&full_response)
+    };
 
     if full_response.trim().is_empty() {
         let _ = app.emit("chat-stream-end", ());
@@ -258,8 +265,15 @@ pub async fn send_message(
 
     let voice = select_voice(&full_response, &primary, &aux1, &aux2, &fixed);
     eprintln!("[TTS] selected voice: {}", voice);
-    let tts_ok = generate_tts(&full_response, &format, &voice);
-    if tts_ok { play_audio(&format, app.clone(), generation); }
+    let tts_file = tts_path(&format);
+    let use_tts = tts_enabled.unwrap_or(true);
+    let tts_ok = if use_tts {
+        generate_tts_to(&full_response, &tts_file, &voice)
+    } else {
+        eprintln!("[TTS] skipped (tts_enabled=false)");
+        false
+    };
+    if tts_ok { play_audio(tts_file.clone(), app.clone(), generation); }
 
     app.emit("chat-speaking-start", TypewriterStartPayload {
         emotion: emotion.clone(),
@@ -280,6 +294,14 @@ pub async fn send_message(
 
 #[tauri::command]
 pub async fn speak(_text: String) -> Result<(), String> { Ok(()) }
+
+/// Strip [CMD:...] tags from text without executing them.
+fn strip_cmd_tags(text: &str) -> String {
+    let re = regex::Regex::new(r#"\[CMD:[^\]]+\]"#).unwrap();
+    let clean = re.replace_all(text, "").to_string();
+    let space_re = regex::Regex::new(r"  +").unwrap();
+    space_re.replace_all(&clean.trim(), " ").to_string()
+}
 
 /// Extract [CMD:...] tags from text, execute them, return text with tags removed.
 fn execute_commands(text: &str) -> String {

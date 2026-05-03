@@ -75,6 +75,18 @@ pub fn build_voice_hint(primary_voice: &str, aux1_voice: &str, aux2_voice: &str,
         _ => primary_lang,
     };
 
+    let local_cmd_section = if std::env::var("ENABLE_LOCAL_COMMANDS").as_deref() == Ok("true") {
+        r#"LOCAL COMMANDS:
+You can control the user\'s Mac by embedding command tags in your response.
+Format: [CMD:shell_command]
+Examples: [CMD:open -a "Google Chrome"], [CMD:open https://google.com], [CMD:open -a "Spotify"], [CMD:osascript -e 'tell application "Finder" to empty trash']
+The command will be executed silently. Write your natural spoken response AROUND the tag.
+Example response: 好的，帮你打开浏览器！[CMD:open -a "Google Chrome"]已经打开了哦。
+You can use multiple [CMD:...] tags if needed. Available apps: Chrome, Safari, Spotify, Finder, Terminal, VS Code ("Visual Studio Code"), Notes, Calendar, Messages, Mail, etc."#
+    } else {
+        ""
+    };
+
     format!(r#"[SYSTEM INSTRUCTION - MANDATORY]
 You are speaking to the user through a text-to-speech voice. Your response will be CONVERTED TO SPEECH and played aloud.
 
@@ -95,17 +107,13 @@ Do NOT switch to the user's actual language. Even if they write in Chinese, resp
 
 VIOLATION OF ANY RULE ABOVE will cause the voice output to sound broken. Always obey.
 
-LOCAL COMMANDS:
-You can control the user's Mac by embedding command tags in your response.
-Format: [CMD:shell_command]
-Examples: [CMD:open -a "Google Chrome"], [CMD:open https://google.com], [CMD:open -a "Spotify"], [CMD:osascript -e 'tell application "Finder" to empty trash']
-The command will be executed silently. Write your natural spoken response AROUND the tag.
-Example response: 好的，帮你打开浏览器！[CMD:open -a "Google Chrome"]已经打开了哦。
-You can use multiple [CMD:...] tags if needed. Available apps: Chrome, Safari, Spotify, Finder, Terminal, VS Code ("Visual Studio Code"), Notes, Calendar, Messages, Mail, etc."#,
+
+{local_cmd_section}"#,
         lang_list = lang_list,
         primary_lang = primary_lang,
         user_lang_name = user_lang_name,
         forced_instruction = forced_instruction,
+        local_cmd_section = local_cmd_section,
     )
 }
 
@@ -128,7 +136,10 @@ pub struct AppConfig {
     pub window_x: Option<f64>,
     pub window_y: Option<f64>,
     pub avatar_image: Option<String>,
-    pub fixed_lang: String,  // "", "primary", "aux1", "aux2"
+    pub fixed_lang: String,
+    pub hotkey_code: i64,
+    pub hotkey_name: String,
+    pub tts_enabled: bool,
 }
 
 impl Default for AppConfig {
@@ -146,6 +157,9 @@ impl Default for AppConfig {
             window_y: None,
             avatar_image: None,
             fixed_lang: String::new(),
+            hotkey_code: 179,
+            hotkey_name: "fn".to_string(),
+            tts_enabled: true,
         }
     }
 }
@@ -168,6 +182,9 @@ pub fn load_config(app: &AppHandle) -> AppConfig {
         window_y: store.get("window_y").and_then(|v| v.as_f64()),
         avatar_image: store.get("avatar_image").and_then(|v| v.as_str().map(String::from)),
         fixed_lang: store.get("fixed_lang").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
+        hotkey_code: store.get("hotkey_code").and_then(|v| v.as_i64()).unwrap_or(179),
+        hotkey_name: store.get("hotkey_name").and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "fn".to_string()),
+        tts_enabled: store.get("tts_enabled").and_then(|v| v.as_bool()).unwrap_or(true),
     }
 }
 
@@ -192,6 +209,9 @@ pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String
     if let Some(img) = &config.avatar_image { store.set("avatar_image", serde_json::json!(img)); }
     else { store.set("avatar_image", serde_json::json!(null)); }
     store.set("fixed_lang", serde_json::json!(config.fixed_lang));
+    store.set("hotkey_code", serde_json::json!(config.hotkey_code));
+    store.set("hotkey_name", serde_json::json!(config.hotkey_name));
+    store.set("tts_enabled", serde_json::json!(config.tts_enabled));
     store.save().map_err(|e| e.to_string())?;
     Ok(())
 }

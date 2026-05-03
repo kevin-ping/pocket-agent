@@ -12,7 +12,7 @@
 
   let displayContent = $derived($chatStore.isStreaming
     ? $chatStore.streamingContent
-    : ($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? t($settingsStore.tts_primary_voice).hint));
+    : ($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? t($settingsStore.tts_primary_voice).hint.replace("{key}", $settingsStore.hotkey_name)));
 
   // Auto-scroll to bottom when streaming
   $effect(() => {
