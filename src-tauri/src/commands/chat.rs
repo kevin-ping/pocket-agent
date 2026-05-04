@@ -4,174 +4,169 @@ use crate::AppState;
 use futures_util::StreamExt;
 use std::process::Command;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
 
+/// Maximum concurrent audio items in the pipeline.
+const MAX_AUDIO_QUEUE: usize = 3;
 
-/// Commands sent to the dedicated audio thread.
+/// Jobs sent to the dedicated speak thread.
+/// The thread processes them sequentially: TTS generate -> emit events -> play audio.
 enum AudioCmd {
-    Play { path: String, app: AppHandle, generation: u64 },
+    Speak {
+        text: String,
+        emotion: String,
+        voice: String,
+        format: String,
+        app: AppHandle,
+        generation: u64,
+    },
     Stop,
 }
 
 static AUDIO_SENDER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<AudioCmd>>> = std::sync::OnceLock::new();
 
+static AUDIO_GENERATION: AtomicU64 = AtomicU64::new(0);
+static AUDIO_QUEUE_DEPTH: AtomicUsize = AtomicUsize::new(0);
+
 fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
     AUDIO_SENDER.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::channel::<AudioCmd>();
         std::thread::Builder::new()
-            .name("audio-player".to_string())
+            .name("speak-pipeline".to_string())
             .spawn(move || {
-                let mut sink: Option<rodio::Sink> = None;
-                let mut _stream: Option<rodio::OutputStream> = None;
-                let mut queued = 0usize;
-
                 for cmd in rx {
                     match cmd {
                         AudioCmd::Stop => {
-                            if let Some(s) = sink.take() {
-                                s.stop();
-                                s.detach();
-                            }
-                            _stream = None;
-                            queued = 0;
+                            eprintln!("[AUDIO] stop requested");
                             crate::commands::chat::audio_queue_reset();
-                            eprintln!("[AUDIO] queue cleared");
                         }
-                        AudioCmd::Play { path, app, generation } => {
+                        AudioCmd::Speak { text, emotion, voice, format, app, generation } => {
+                            let (rate, volume) = emotion_to_prosody(&emotion);
+                            let char_count = text.chars().count();
 
-                            if sink.is_none() {
+                            // 1. Emit text events (typewriter starts immediately)
+                            let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
+                                emotion: emotion.clone(),
+                                total_chars: char_count,
+                                has_audio: true,
+                            });
+                            let _ = app.emit("chat-stream", ChatStreamPayload { delta: text.clone() });
+                            let _ = app.emit("chat-stream-end", ());
+
+                            // 2. Generate TTS
+                            let tts_file = tts_path(&format);
+                            let tts_ok = generate_tts_to(&text, &tts_file, &voice, rate, volume);
+                            eprintln!("[SPEAK] emotion={} voice={} rate={} vol={} chars={} audio={}",
+                                emotion, voice, rate, volume, char_count, tts_ok);
+
+                            // 3. Play audio
+                            if tts_ok {
                                 match rodio::OutputStream::try_default() {
-                                    Ok((s, sh)) => {
-                                        match rodio::Sink::try_new(&sh) {
-                                            Ok(sk) => { _stream = Some(s); sink = Some(sk); }
-                                            Err(e) => { eprintln!("[AUDIO] sink failed: {}", e); continue; }
+                                    Ok((stream, stream_handle)) => {
+                                        match rodio::Sink::try_new(&stream_handle) {
+                                            Ok(sink) => {
+                                                if let Ok(file) = std::fs::File::open(&tts_file) {
+                                                    match rodio::Decoder::new(std::io::BufReader::new(file)) {
+                                                        Ok(source) => {
+                                                            sink.append(source);
+                                                            sink.sleep_until_end();
+                                                        }
+                                                        Err(e) => eprintln!("[AUDIO] decode: {}", e),
+                                                    }
+                                                }
+                                                sink.detach();
+                                                drop(stream); // release audio device
+                                            }
+                                            Err(e) => { eprintln!("[AUDIO] sink: {}", e); drop(stream); }
                                         }
                                     }
-                                    Err(e) => { eprintln!("[AUDIO] no output: {}", e); continue; }
+                                    Err(e) => eprintln!("[AUDIO] no output: {}", e),
                                 }
                             }
-                            let file = match std::fs::File::open(&path) {
-                                Ok(f) => f,
-                                Err(e) => { eprintln!("[AUDIO] open failed: {}", e); continue; }
-                            };
-                            match rodio::Decoder::new(std::io::BufReader::new(file)) {
-                                Ok(source) => {
-                                    if let Some(ref s) = sink {
-                                        s.append(source);
-                                        queued += 1;
-                                        eprintln!("[AUDIO] queued");
-                                    }
-                                }
-                                Err(e) => { eprintln!("[AUDIO] decode failed: {}", e); continue; }
-                            }
-                            // Wait for all audio to finish on this sink
-                            if let Some(ref s) = sink {
-                                s.sleep_until_end();
-                            }
-                            queued = queued.saturating_sub(1);
-                            crate::commands::chat::audio_queue_release();
-                            eprintln!("[AUDIO] done, queue: {}", queued);
-                            if queued == 0 && AUDIO_GENERATION.load(Ordering::SeqCst) == generation {
-                                let _ = app.emit("chat-audio-done", ());
-                            }
-                            // After all audio finishes, drop sink so next play gets fresh one
-                            if queued == 0 {
-                                if let Some(s) = sink.take() { s.detach(); }
-                                _stream = None;
-                            }
+
+                            // 4. Release queue slot
+                            audio_queue_release();
+                            eprintln!("[AUDIO] done (gen={})", generation);
+
+                            // 5. Notify frontend
+                            let _ = app.emit("chat-audio-done", ());
                         }
                     }
                 }
             })
-            .expect("failed to spawn audio-player thread");
+            .expect("failed to spawn speak-pipeline thread");
         Mutex::new(tx)
     })
 }
 
-/// Stop and clear the audio queue. Called when user starts a new recording.
+/// Stop the pipeline and reset queue counter. Called on fn-key press.
 pub fn stop_audio_queue() {
     let _ = audio_sender().lock().unwrap().send(AudioCmd::Stop);
 }
 
-/// Check if queue is full (read-only).
+/// Check if queue is full (read-only, for API layer).
 pub fn is_queue_full() -> bool {
     AUDIO_QUEUE_DEPTH.load(Ordering::SeqCst) >= MAX_AUDIO_QUEUE
 }
 
-/// Try to reserve a queue slot (atomic CAS). Returns false if queue full.
+/// Reserve a queue slot (atomic CAS). Returns false if full.
 fn audio_queue_reserve() -> bool {
-    use std::sync::atomic::Ordering::SeqCst;
     loop {
-        let current = AUDIO_QUEUE_DEPTH.load(SeqCst);
+        let current = AUDIO_QUEUE_DEPTH.load(Ordering::SeqCst);
         if current >= MAX_AUDIO_QUEUE { return false; }
-        if AUDIO_QUEUE_DEPTH.compare_exchange(current, current + 1, SeqCst, SeqCst).is_ok() {
+        if AUDIO_QUEUE_DEPTH.compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
             return true;
         }
     }
 }
 
-/// Release a queue slot after audio finishes.
+/// Release a slot after playback finishes.
 fn audio_queue_release() {
     AUDIO_QUEUE_DEPTH.fetch_sub(1, Ordering::SeqCst);
 }
 
-/// Reset queue counter (on stop/cancel).
+/// Reset counter on stop/cancel.
 pub fn audio_queue_reset() {
     AUDIO_QUEUE_DEPTH.store(0, Ordering::SeqCst);
 }
 
-
-/// Maximum concurrent audio items.
-const MAX_AUDIO_QUEUE: usize = 3;
-
-static AUDIO_GENERATION: AtomicU64 = AtomicU64::new(0);
-static AUDIO_QUEUE_DEPTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Get edge-tts binary path from env var, fallback to "edge-tts" (expect in PATH)
+/// Get edge-tts binary path from env var, fallback to "edge-tts"
 fn edge_tts_bin() -> String {
     std::env::var("EDGE_TTS_BIN").unwrap_or_else(|_| "edge-tts".to_string())
 }
 
 /// Detect language from text content using Unicode character ranges.
-/// Returns ISO 639-1 code: "zh", "ja", "ko", "en", or fallback "zh".
 fn detect_language(text: &str) -> &'static str {
-    let mut ja = 0u32; // hiragana + katakana
-    let mut ko = 0u32; // hangul
-    let mut zh = 0u32; // CJK unified ideographs
-    let mut en = 0u32; // latin letters
+    let mut ja = 0u32;
+    let mut ko = 0u32;
+    let mut zh = 0u32;
+    let mut en = 0u32;
 
     for ch in text.chars() {
         match ch {
-            '\u{3040}'..='\u{309F}' | // Hiragana
-            '\u{30A0}'..='\u{30FF}' => ja += 1,  // Katakana
-            '\u{AC00}'..='\u{D7AF}' => ko += 1,   // Hangul syllables
-            '\u{4E00}'..='\u{9FFF}' => zh += 1,    // CJK Unified Ideographs
-            '\u{FF00}'..='\u{FFEF}' => {}          // Fullwidth forms — skip
+            '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}' => ja += 1,
+            '\u{AC00}'..='\u{D7AF}' => ko += 1,
+            '\u{4E00}'..='\u{9FFF}' => zh += 1,
+            '\u{FF00}'..='\u{FFEF}' => {}
             'a'..='z' | 'A'..='Z' => en += 1,
             _ => {}
         }
     }
 
-    // Japanese text always contains hiragana/katakana (particles, okurigana)
     if ja > 0 { return "ja"; }
     if ko > 0 { return "ko"; }
     if zh > en && zh > 0 { return "zh"; }
     if en > 0 { return "en"; }
-    "zh" // fallback
+    "zh"
 }
 
-/// Extract language prefix from voice name: "zh-CN-XiaoxiaoNeural" -> "zh"
 fn voice_lang(voice: &str) -> &str {
     voice.split('-').next().unwrap_or("zh")
 }
 
-/// Pick the right voice for the detected language.
-/// When fixed_lang is set (e.g. "aux1"), forces that voice regardless of detected language.
-/// Falls back to primary if no auxiliary voice matches.
 fn select_voice(text: &str, primary: &str, aux1: &str, aux2: &str, fixed_lang: &str) -> String {
-    // If fixed language mode is set, force the corresponding voice
     if !fixed_lang.is_empty() {
         let forced_voice = match fixed_lang {
             "aux1" if !aux1.is_empty() => aux1,
@@ -181,7 +176,6 @@ fn select_voice(text: &str, primary: &str, aux1: &str, aux2: &str, fixed_lang: &
         eprintln!("[TTS] fixed_lang={}, forcing voice: {}", fixed_lang, forced_voice);
         return forced_voice.to_string();
     }
-
     let detected = detect_language(text);
     eprintln!("[TTS] detected language: {}", detected);
     for v in &[primary, aux1, aux2] {
@@ -215,10 +209,6 @@ fn tts_path(format: &str) -> String {
     }
 }
 
-/// rate: "+0%" default, range "-50%" to "+100%"
-/// Map emotion name to (rate, volume) prosody adjustments for Edge TTS.
-/// Map emotion name to (rate, volume) prosody adjustments for Edge TTS.
-/// Pitch is NOT changed — only rate and volume, as confirmed by testing.
 fn emotion_to_prosody(emotion: &str) -> (&'static str, &'static str) {
     match emotion {
         "cheerful" => ("+15%", "+30%"),
@@ -235,7 +225,7 @@ fn emotion_to_prosody(emotion: &str) -> (&'static str, &'static str) {
 
 fn generate_tts_to(text: &str, path: &str, voice: &str, rate: &str, volume: &str) -> bool {
     if text.trim().is_empty() { return false; }
-    eprintln!("[TTS] generating {} for {} chars with voice {} rate={} volume={}...", "audio", text.len(), voice, rate, volume);
+    eprintln!("[TTS] generating for {} chars voice={} rate={} vol={}...", text.len(), voice, rate, volume);
     let rate_arg = format!("--rate={}", rate);
     let volume_arg = format!("--volume={}", volume);
     let result = Command::new(edge_tts_bin())
@@ -243,12 +233,12 @@ fn generate_tts_to(text: &str, path: &str, voice: &str, rate: &str, volume: &str
         .arg("--text").arg(text)
         .arg(&rate_arg)
         .arg(&volume_arg)
-        .arg("--write-media").arg(&path)
+        .arg("--write-media").arg(path)
         .output();
     match result {
         Ok(output) => {
-            if output.status.success() && Path::new(&path).exists() {
-                eprintln!("[TTS] OK, {} bytes", std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0));
+            if output.status.success() && Path::new(path).exists() {
+                eprintln!("[TTS] OK, {} bytes", std::fs::metadata(path).map(|m| m.len()).unwrap_or(0));
                 true
             } else {
                 eprintln!("[TTS] failed: {}", String::from_utf8_lossy(&output.stderr));
@@ -259,17 +249,6 @@ fn generate_tts_to(text: &str, path: &str, voice: &str, rate: &str, volume: &str
     }
 }
 
-/// Send audio to the dedicated player thread. Dropped if queue is full.
-fn play_audio(path: String, app: AppHandle, generation: u64) {
-    let _ = audio_sender().lock().unwrap().send(AudioCmd::Play {
-        path,
-        app,
-        generation,
-    });
-}
-
-/// Simple keyword-based emotion detection for display speed mapping.
-/// Returns one of: friendly, cheerful, calm, serious, sad, whisper, excited, angry
 fn detect_emotion(text: &str) -> String {
     let t = text.to_lowercase();
     let t_chars: Vec<char> = t.chars().collect();
@@ -298,57 +277,32 @@ fn detect_emotion(text: &str) -> String {
     "friendly".to_string()
 }
 
-
-/// Shared playback pipeline: TTS generation -> typewriter events -> audio playback.
-/// Used by both send_message (voice chat) and speak_text (API push).
+/// Shared entry point: reserve queue slot + send to pipeline.
+/// The speak-pipeline thread handles TTS generation, events, and playback in order.
 fn speak_internal(
     app: &AppHandle,
     text: &str,
     emotion: &str,
     voice: &str,
     format: &str,
-    tts_enabled: bool,
     generation: u64,
 ) -> bool {
-    // Reserve queue slot — max MAX_AUDIO_QUEUE concurrent
     if !audio_queue_reserve() {
         eprintln!("[SPEAK] queue full, dropping {} chars", text.chars().count());
         return false;
     }
-
-    let (rate, volume) = emotion_to_prosody(emotion);
-    let tts_file = tts_path(format);
-    let tts_ok = if tts_enabled {
-        generate_tts_to(text, &tts_file, voice, rate, volume)
-    } else {
-        eprintln!("[SPEAK] TTS skipped (tts_enabled=false)");
-        false
-    };
-
-    let char_count = text.chars().count();
-    eprintln!("[SPEAK] emotion={} voice={} rate={} vol={} chars={} audio={}",
-        emotion, voice, rate, volume, char_count, tts_ok);
-
-    let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
+    let _ = audio_sender().lock().unwrap().send(AudioCmd::Speak {
+        text: text.to_string(),
         emotion: emotion.to_string(),
-        total_chars: char_count,
-        has_audio: tts_ok,
+        voice: voice.to_string(),
+        format: format.to_string(),
+        app: app.clone(),
+        generation,
     });
-    let _ = app.emit("chat-stream", ChatStreamPayload { delta: text.to_string() });
-    let _ = app.emit("chat-stream-end", ());
-
-    if tts_ok {
-        play_audio(tts_file, app.clone(), generation);
-    } else {
-        // No audio — release the slot we reserved
-        audio_queue_release();
-        let _ = app.emit("chat-audio-done", ());
-    }
-
-    tts_ok
+    true
 }
 
-/// POST to internal /push API so voice chat goes through the same queue as external push.
+/// POST to internal /push API so voice chat goes through the same pipeline.
 fn push_to_self(text: &str, emotion: &str, voice: &str) {
     let api_key = std::env::var("API_SERVER_KEY").unwrap_or_default();
     let port = std::env::var("PA_PORT").unwrap_or_else(|_| "8650".to_string());
@@ -436,16 +390,12 @@ pub async fn send_message(
         }
         stream_ended_normally = true;
 
-        // If stream ended normally (not via error break), don't retry even if no data
-        // (LLM may have used tools — tool events are filtered out but stream completes fine)
         if received_data || stream_ended_normally { break; }
     }
 
-    // Extract and execute [CMD:...] tags from response (only if explicitly enabled)
     let full_response = if std::env::var("ENABLE_LOCAL_COMMANDS").as_deref() == Ok("true") {
         execute_commands(&full_response)
     } else {
-        // Strip [CMD:...] tags silently so TTS doesn't read them
         strip_cmd_tags(&full_response)
     };
 
@@ -454,7 +404,6 @@ pub async fn send_message(
         return Ok(());
     }
 
-    // Route through internal push API — same queue as external push
     let emotion = detect_emotion(&full_response);
     let voice = select_voice(&full_response, &primary, &aux1, &aux2, &fixed);
     push_to_self(&full_response, &emotion, &voice);
@@ -464,7 +413,6 @@ pub async fn send_message(
 
 #[tauri::command]
 pub async fn speak(_text: String) -> Result<(), String> { Ok(()) }
-
 
 /// Direct TTS: speak given text without calling LLM.
 /// Used by the API push endpoint to play pushed messages.
@@ -478,7 +426,7 @@ pub async fn speak_text(
     tts_primary_voice: Option<String>,
     tts_aux1_voice: Option<String>,
     tts_aux2_voice: Option<String>,
-    tts_enabled: Option<bool>,
+    _tts_enabled: Option<bool>,
 ) -> Result<(), String> {
     if text.trim().is_empty() { return Ok(()); }
 
@@ -490,9 +438,8 @@ pub async fn speak_text(
 
     let voice = override_voice.unwrap_or_else(|| select_voice(&text, &primary, &aux1, &aux2, ""));
     let emotion_str = emotion.unwrap_or_else(|| detect_emotion(&text));
-    let use_tts = tts_enabled.unwrap_or(true);
 
-    speak_internal(&app, &text, &emotion_str, &voice, &format, use_tts, generation);
+    speak_internal(&app, &text, &emotion_str, &voice, &format, generation);
 
     Ok(())
 }
@@ -513,7 +460,6 @@ fn execute_commands(text: &str) -> String {
         let cmd_str = &cap[1];
         eprintln!("[LOCAL_CMD] executing: {}", cmd_str);
 
-        // Use sh -c for all commands to handle quotes and complex args
         let result = std::process::Command::new("sh")
             .arg("-c")
             .arg(cmd_str)
@@ -531,9 +477,7 @@ fn execute_commands(text: &str) -> String {
         }
     }
 
-    // Remove all [CMD:...] tags from text (so TTS doesn't read them)
     let clean = re.replace_all(text, "").to_string();
-    // Clean up extra whitespace left by removed tags
     let space_re = regex::Regex::new(r"  +").unwrap();
     space_re.replace_all(&clean.trim(), " ").to_string()
 }
