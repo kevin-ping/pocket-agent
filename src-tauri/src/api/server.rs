@@ -9,7 +9,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
-use crate::commands::chat::audio_queue_reserve;
 use tower_http::cors::CorsLayer;
 
 pub struct ServerState {
@@ -110,32 +109,12 @@ async fn push_handler(
         );
     }
 
-    // Atomically reserve a queue slot — return 429 if queue full
-    if !audio_queue_reserve() {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(PushResponse { ok: false, message: "audio queue full".into() }),
-        );
-    }
-
     let emotion = body.emotion.as_ref()
         .map(|e| e.as_str())
         .unwrap_or("friendly")
         .to_string();
 
-    // typewriter speed: match EMOTION_SPEEDS in chat.ts
-    let tw = match emotion.as_str() {
-        "excited" => (1, 192),
-        "angry" => (1, 184),
-        "cheerful" => (1, 192),
-        "friendly" => (1, 210),
-        "serious" => (1, 232),
-        "calm" => (1, 245),
-        "whisper" => (1, 259),
-        "sad" => (1, 276),
-        _ => (1, 210),
-    };
-    eprintln!("[API] push: {} chars, emotion={}, typewriter={}/{}ms", text.len(), emotion, tw.0, tw.1);
+    eprintln!("[API] push: {} chars, emotion={}", text.len(), emotion);
 
     let _ = state.app.emit("api-push", ApiPayload {
         text: text.clone(),

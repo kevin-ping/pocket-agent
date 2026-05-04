@@ -38,7 +38,6 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                             }
                             _stream = None;
                             queued = 0;
-                            crate::commands::chat::audio_queue_reset();
                             eprintln!("[AUDIO] queue cleared");
                         }
                         AudioCmd::Play { path, app, generation } => {
@@ -76,7 +75,6 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                                 s.sleep_until_end();
                             }
                             queued = queued.saturating_sub(1);
-                            crate::commands::chat::audio_queue_release();
                             eprintln!("[AUDIO] done, queue: {}", queued);
                             if queued == 0 && AUDIO_GENERATION.load(Ordering::SeqCst) == generation {
                                 let _ = app.emit("chat-audio-done", ());
@@ -100,30 +98,8 @@ pub fn stop_audio_queue() {
     let _ = audio_sender().lock().unwrap().send(AudioCmd::Stop);
 }
 
-/// Try to reserve a queue slot (atomic CAS). Returns false if queue full.
-pub fn audio_queue_reserve() -> bool {
-    use std::sync::atomic::Ordering::SeqCst;
-    loop {
-        let current = AUDIO_QUEUE_DEPTH.load(SeqCst);
-        if current >= MAX_AUDIO_QUEUE { return false; }
-        if AUDIO_QUEUE_DEPTH.compare_exchange(current, current + 1, SeqCst, SeqCst).is_ok() {
-            return true;
-        }
-    }
-}
-
-/// Release a queue slot after audio finishes.
-pub fn audio_queue_release() {
-    AUDIO_QUEUE_DEPTH.fetch_sub(1, Ordering::SeqCst);
-}
-
-/// Reset queue counter (on stop/cancel).
-pub fn audio_queue_reset() {
-    AUDIO_QUEUE_DEPTH.store(0, Ordering::SeqCst);
-}
 
 static AUDIO_GENERATION: AtomicU64 = AtomicU64::new(0);
-static AUDIO_QUEUE_DEPTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Get edge-tts binary path from env var, fallback to "edge-tts" (expect in PATH)
 fn edge_tts_bin() -> String {
