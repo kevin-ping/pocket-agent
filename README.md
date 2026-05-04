@@ -1,6 +1,8 @@
 # Pocket Agent
 
 > A minimal desktop AI voice companion that lives on your screen — press a key, speak, get things done.
+>
+> **v0.2.0** — see [releases/0.2.0.md](releases/0.2.0.md) for changelog
 
 Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust**. It connects to a local [Hermes Agent](https://github.com/nousresearch/hermes) gateway via SSE streaming for real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
 
@@ -47,7 +49,7 @@ Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust*
 ### Voice Pipeline
 
 1. **Press hotkey** (default: `fn`) — macOS CGEventTap captures the global hotkey
-2. **Recording starts** — cpal captures audio via CoreAudio (pre-warmed for zero-latency)
+2. **Recording starts** — pre-warmed cpal Stream Daemon activates instantly (~11ms latency)
 3. **Press hotkey again** — recording stops, WAV saved to temp file
 4. **STT** — faster-whisper transcribes locally (auto language detection)
 5. **Send to backend** — text + voice hint streamed to Hermes gateway via `/v1/chat/completions`
@@ -62,13 +64,26 @@ Press **Escape** during recording to cancel. Minimum recording: 1.5s. Maximum: 3
 - **Voice-first interaction** — push-to-talk with local Whisper STT, no cloud dependency for speech recognition
 - **Real-time streaming** — SSE streaming from LLM with live text display
 - **TTS voice response** — edge-tts with automatic language detection (Chinese, English, Japanese, Korean + more)
-- **Session memory** — conversation context persists across interactions via Hermes gateway
+- **Session memory** — daily auto-rotating sessions with compressed context summaries
+- **Language tracking** — auto-detects user language per message, follows user's language seamlessly
 - **Local command tags** — `[CMD:...]` for local automation tasks (disabled by default, requires explicit opt-in)
 - **Multi-language voice** — configure primary + auxiliary TTS voices, auto-switch based on detected language
 - **Configurable hotkey** — capture any key via Settings, no restart required
 - **TTS toggle** — disable voice output for text-only mode
 - **Compact widget** — 220x360px always-on-top window, dark sci-fi aesthetic
 - **macOS native** — global hotkey via CGEventTap, CoreAudio recording, menu bar tray
+
+---
+
+### Push API
+
+Pocket Agent runs a local HTTP server on port `8650` for receiving push messages from external sources (Hermes cron jobs, scripts, etc.):
+
+- **POST /push** — `{"text": "...", "emotion": "cheerful"}` → speaks and displays the message
+- **GET /health** — health check
+- Auth via `API_SERVER_KEY` Bearer token
+
+See [releases/0.1.1.md](releases/0.1.1.md) for full API details.
 
 ---
 
@@ -177,9 +192,6 @@ API_SERVER_KEY=your-api-server-key-here
 
 # edge-tts binary (pip install edge-tts), or keep "edge-tts" if in PATH
 EDGE_TTS_BIN=/path/to/edge-tts
-
-# Stable session identifier for conversation continuity
-SESSION_ID=pocket-agent-session
 
 # Python with faster_whisper installed
 STT_PYTHON=/path/to/python3

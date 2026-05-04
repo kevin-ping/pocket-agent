@@ -107,7 +107,6 @@ Do NOT switch to the user's actual language. Even if they write in Chinese, resp
 
 VIOLATION OF ANY RULE ABOVE will cause the voice output to sound broken. Always obey.
 
-
 {local_cmd_section}"#,
         lang_list = lang_list,
         primary_lang = primary_lang,

@@ -29,23 +29,24 @@ impl HermesClient {
         &self,
         text: &str,
         voice_hint: Option<&str>,
+        context: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<BoxStream<'static, Result<String, String>>, String> {
-        // Prepend voice output instruction directly to user message text
-        // This is the most reliable way — it can't be overridden by other system prompts
-        let full_text = match voice_hint {
-            Some(hint) => {
-                format!(
-                    "{}\n\n---\nUser's message: {}",
-                    hint, text
-                )
+        // Daily context summary (injected as ephemeral system prompt, not stored in DB)
+        // Voice hint as system message — api_server treats it as ephemeral_system_prompt
+        // which is injected into every LLM call but NOT stored in session history.
+        let mut messages = vec![];
+        if let Some(ctx) = context {
+            if !ctx.is_empty() {
+                messages.push(json!({ "role": "system", "content": ctx }));
             }
-            None => text.to_string(),
-        };
-
-        let messages = vec![
-            json!({ "role": "user", "content": full_text }),
-        ];
+        }
+        if let Some(hint) = voice_hint {
+            if !hint.is_empty() {
+                messages.push(json!({ "role": "system", "content": hint }));
+            }
+        }
+        messages.push(json!({ "role": "user", "content": text }));
 
         let body = json!({
             "model": "default",

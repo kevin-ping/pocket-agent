@@ -17,7 +17,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(AppState {
-            session_id: Mutex::new(std::env::var("SESSION_ID").unwrap_or_else(|_| "pocket-agent-session".to_string())),
+            session_id: Mutex::new("pocket-agent".to_string()),
         })
         .manage(commands::voice::RecordingState::default())
         .setup(|app| {
@@ -28,6 +28,14 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.set_position(tauri::LogicalPosition::new(x, y));
                 }
+            }
+
+            // Log session info at startup for debugging
+            {
+                let app_state: tauri::State<'_, AppState> = app.state::<AppState>();
+                let sid = app_state.session_id.lock().unwrap();
+                let today = chrono::Local::now().format("%Y-%m-%d");
+                eprintln!("[session] using {}-{}", *sid, today);
             }
 
             voice::hotkey::check_accessibility(handle);

@@ -10,12 +10,18 @@ if len(sys.argv) != 2:
 
 wav_path = sys.argv[1]
 
+import time
+t0 = time.time()
+
 try:
+    print(f"[stt] loading model...", file=sys.stderr, flush=True)
     model = WhisperModel("small", device="cpu", compute_type="int8")
-    # No language param — let Whisper auto-detect
+    print(f"[stt] model loaded ({time.time()-t0:.1f}s), transcribing...", file=sys.stderr, flush=True)
+    t1 = time.time()
     segments, info = model.transcribe(wav_path, beam_size=5)
     text = " ".join(seg.text.strip() for seg in segments).strip()
     detected_lang = info.language
+    print(f"[stt] done ({time.time()-t1:.1f}s) lang={detected_lang}", file=sys.stderr, flush=True)
 
     if text:
         result = {"text": text, "language": detected_lang}

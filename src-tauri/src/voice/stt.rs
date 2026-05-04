@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::io::BufRead;
 
 fn helper_path() -> PathBuf {
     // app bundle: .app/Contents/MacOS/pocket-agent → .app/Contents/Resources/stt-helper
@@ -40,18 +41,36 @@ pub fn transcribe(wav_path: &str) -> Result<SttResult, String> {
         ));
     }
 
-    let output = if let Ok(python) = std::env::var("STT_PYTHON") {
+    let mut child = if let Ok(python) = std::env::var("STT_PYTHON") {
         Command::new(python)
             .arg(&helper)
             .arg(wav_path)
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| format!("stt-helper 启动失败: {}", e))?
     } else {
         Command::new(&helper)
             .arg(wav_path)
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| format!("stt-helper 启动失败: {}", e))?
     };
+
+    // Stream stderr lines in real-time for progress logging
+    if let Some(stderr) = child.stderr.take() {
+        let reader = std::io::BufReader::new(stderr);
+        for line in reader.lines() {
+            match line {
+                Ok(l) if !l.is_empty() => eprintln!("{}", l),
+                _ => break,
+            }
+        }
+    }
+
+    let output = child.wait_with_output()
+        .map_err(|e| format!("stt-helper 等待失败: {}", e))?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();

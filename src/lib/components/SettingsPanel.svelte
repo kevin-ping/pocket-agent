@@ -211,7 +211,7 @@
       <!-- ── Hotkey section ── -->
       <div class="section-label">Hotkey</div>
       <div class="field-row">
-        <label class="field-label">Record Key</label>
+        <span class="field-label">Record Key</span>
         {#if capturing}
           <button class="capture-btn active" disabled>按下快捷键...</button>
         {:else}
@@ -311,7 +311,7 @@
       </div>
 
       <div class="field-row">
-        <label class="field-label">Voice Output</label>
+        <span class="field-label">Voice Output</span>
         <div class="toggle-wrap">
           <input type="checkbox" id="tts-enabled" class="toggle-input" bind:checked={local.tts_enabled} />
           <label for="tts-enabled" class="toggle-track">

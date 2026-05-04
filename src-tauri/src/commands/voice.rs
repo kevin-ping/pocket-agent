@@ -1,3 +1,4 @@
+use chrono;
 use crate::voice::record::{start_recording, stop_recording, take_pre_started, RecordingHandle};
 use crate::voice::stt::transcribe;
 use std::sync::Mutex;
@@ -89,18 +90,34 @@ pub async fn stop_voice_recording(
     // Cancel the auto-timeout
     state.timeout_active.store(false, Ordering::SeqCst);
 
+    // Retry getting handle — start_voice_recording may still be in-flight
+    // (race between fn-key-down and fn-key-up reaching Tauri commands)
     let handle = {
-        let mut guard = state
-            .handle
-            .lock()
-            .map_err(|_| "录音状态锁定失败".to_string())?;
-        guard.take()
+        let mut retries = 0u32;
+        loop {
+            let mut guard = state
+                .handle
+                .lock()
+                .map_err(|_| "录音状态锁定失败".to_string())?;
+            if let Some(h) = guard.take() {
+                break Some(h);
+            }
+            drop(guard);
+            retries += 1;
+            if retries > 50 {
+                // ~500ms total wait, give up
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     };
 
     let Some(handle) = handle else {
+        eprintln!("[voice] stop: no handle after retries, skipping");
         return Ok(());
     };
 
+    eprintln!("[voice] recording stopped, starting STT... [{}]", chrono::Local::now().format("%H:%M:%S%.3f"));
     let wav_path = tokio::task::spawn_blocking(move || stop_recording(handle))
         .await
         .map_err(|e| format!("停止录音失败: {}", e))??;
@@ -125,7 +142,8 @@ pub async fn stop_voice_recording(
 
     match result {
         Ok(result) => {
-            eprintln!("[voice] stt: {:?} (lang: {})", result.text, result.language);
+            eprintln!("[voice] stt: {:?} (lang: {}) [{}]", result.text, result.language, chrono::Local::now().format("%H:%M:%S%.3f"));
+            eprintln!("[voice] >>> sending to LLM...");
             app.emit("stt-result", serde_json::json!({ "text": result.text, "language": result.language }))
                 .map_err(|e| e.to_string())?;
         }

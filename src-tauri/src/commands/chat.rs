@@ -1,3 +1,4 @@
+use chrono;
 use crate::api::client::HermesClient;
 use crate::commands::config::{get_api_key, build_voice_hint};
 use crate::AppState;
@@ -46,7 +47,12 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                             let (rate, volume) = emotion_to_prosody(&emotion);
                             let char_count = text.chars().count();
 
-                            // 1. Emit text events (typewriter starts immediately)
+                            // 1. Generate TTS first (takes time, don't start typewriter yet)
+                            let tts_file = tts_path(&format);
+                            let tts_ok = generate_tts_to(&text, &tts_file, &voice, rate, volume);
+
+                            // 2. Emit text events AFTER TTS generation, RIGHT BEFORE playback
+                            //    so typewriter and audio start nearly simultaneously
                             let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
                                 emotion: emotion.clone(),
                                 total_chars: char_count,
@@ -54,10 +60,6 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                             });
                             let _ = app.emit("chat-stream", ChatStreamPayload { delta: text.clone() });
                             let _ = app.emit("chat-stream-end", ());
-
-                            // 2. Generate TTS
-                            let tts_file = tts_path(&format);
-                            let tts_ok = generate_tts_to(&text, &tts_file, &voice, rate, volume);
                             eprintln!("[SPEAK] emotion={} voice={} rate={} vol={} chars={} audio={}",
                                 emotion, voice, rate, volume, char_count, tts_ok);
 
@@ -138,6 +140,8 @@ fn edge_tts_bin() -> String {
 }
 
 /// Detect language from text content using Unicode character ranges.
+/// English is counted by word (space-separated), not by letter,
+/// so "hello world" counts as en=2, not en=10.
 fn detect_language(text: &str) -> &'static str {
     let mut ja = 0u32;
     let mut ko = 0u32;
@@ -149,9 +153,14 @@ fn detect_language(text: &str) -> &'static str {
             '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}' => ja += 1,
             '\u{AC00}'..='\u{D7AF}' => ko += 1,
             '\u{4E00}'..='\u{9FFF}' => zh += 1,
-            '\u{FF00}'..='\u{FFEF}' => {}
-            'a'..='z' | 'A'..='Z' => en += 1,
             _ => {}
+        }
+    }
+    // Count English words (sequences of ASCII letters)
+    for word in text.split_whitespace() {
+        let ascii_letters: String = word.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+        if ascii_letters.len() >= 2 {
+            en += 1;
         }
     }
 
@@ -348,11 +357,28 @@ pub async fn send_message(
 
     let user_lang = user_language.unwrap_or_else(|| "zh".to_string());
     let fixed = fixed_lang.unwrap_or_default();
-    let hint = build_voice_hint(&primary, &aux1, &aux2, &user_lang, &fixed);
+    let mut hint = build_voice_hint(&primary, &aux1, &aux2, &user_lang, &fixed);
+    // In auto mode (no forced language), append language-follow instruction
+    // so LLM does not drift to a different language from recent context
+    if fixed.is_empty() {
+        hint.push_str("\n\nIMPORTANT: You MUST respond in the SAME language the user writes in. If the user writes in Chinese, respond in Chinese. If the user writes in English, respond in English. Never switch languages based on previous conversation context.");
+    }
 
     app.emit("chat-thinking-start", ()).map_err(|e| e.to_string())?;
 
-    let session_id = state.session_id.lock().unwrap().clone();
+    // Dynamic session_id: base-{yyyy-mm-dd} — auto-rotates daily
+    let base_id = state.session_id.lock().unwrap().clone();
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let session_id = format!("{}-{}", base_id, today);
+
+    // Read yesterday's daily summary for context continuity
+    let yesterday = (chrono::Local::now() - chrono::TimeDelta::days(1)).format("%Y-%m-%d").to_string();
+    let summary_path = format!("{}/.hermes/pa-summaries/{}.md",
+        std::env::var("HOME").unwrap_or_default(), yesterday);
+    let daily_summary = std::fs::read_to_string(&summary_path).ok();
+    if daily_summary.is_some() {
+        eprintln!("[SSE] loaded daily summary from {}", summary_path);
+    }
     let mut full_response = String::new();
     let max_retries = 2;
 
@@ -362,7 +388,8 @@ pub async fn send_message(
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
 
-        let mut stream = match client.chat_stream(&text, Some(&hint), Some(&session_id)).await {
+        eprintln!("[SSE] >>> sending to LLM [{}] (session: {})", chrono::Local::now().format("%H:%M:%S%.3f"), session_id);
+        let mut stream = match client.chat_stream(&text, Some(&hint), daily_summary.as_deref(), Some(&session_id)).await {
             Ok(s) => s,
             Err(e) => {
                 if attempt < max_retries { continue; }
@@ -375,6 +402,9 @@ pub async fn send_message(
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(delta) => {
+                    if !received_data {
+                        eprintln!("[SSE] <<< first token from LLM [{}]", chrono::Local::now().format("%H:%M:%S%.3f"));
+                    }
                     received_data = true;
                     full_response.push_str(&delta);
                 }
@@ -389,6 +419,7 @@ pub async fn send_message(
             }
         }
         stream_ended_normally = true;
+        eprintln!("[SSE] <<< stream complete [{}] ({} chars)", chrono::Local::now().format("%H:%M:%S%.3f"), full_response.len());
 
         if received_data || stream_ended_normally { break; }
     }
