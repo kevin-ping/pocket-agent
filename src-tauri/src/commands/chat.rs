@@ -294,6 +294,48 @@ fn detect_emotion(text: &str) -> String {
     "friendly".to_string()
 }
 
+
+/// Shared playback pipeline: TTS generation -> typewriter events -> audio playback.
+/// Used by both send_message (voice chat) and speak_text (API push).
+fn speak_internal(
+    app: &AppHandle,
+    text: &str,
+    emotion: &str,
+    voice: &str,
+    format: &str,
+    tts_enabled: bool,
+    generation: u64,
+) -> bool {
+    let (rate, volume) = emotion_to_prosody(emotion);
+    let tts_file = tts_path(format);
+    let tts_ok = if tts_enabled {
+        generate_tts_to(text, &tts_file, voice, rate, volume)
+    } else {
+        eprintln!("[SPEAK] TTS skipped (tts_enabled=false)");
+        false
+    };
+
+    let char_count = text.chars().count();
+    eprintln!("[SPEAK] emotion={} voice={} rate={} vol={} chars={} audio={}",
+        emotion, voice, rate, volume, char_count, tts_ok);
+
+    let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
+        emotion: emotion.to_string(),
+        total_chars: char_count,
+        has_audio: tts_ok,
+    });
+    let _ = app.emit("chat-stream", ChatStreamPayload { delta: text.to_string() });
+    let _ = app.emit("chat-stream-end", ());
+
+    if tts_ok {
+        play_audio(tts_file, app.clone(), generation);
+    } else {
+        let _ = app.emit("chat-audio-done", ());
+    }
+
+    tts_ok
+}
+
 #[tauri::command]
 pub async fn send_message(
     app: AppHandle,
@@ -379,34 +421,11 @@ pub async fn send_message(
     }
 
     let emotion = detect_emotion(&full_response);
-    eprintln!("[EMOTION] detected: {}", emotion);
-
     let voice = select_voice(&full_response, &primary, &aux1, &aux2, &fixed);
-    eprintln!("[TTS] selected voice: {}", voice);
-    let tts_file = tts_path(&format);
     let use_tts = tts_enabled.unwrap_or(true);
-    let tts_ok = if use_tts {
-        generate_tts_to(&full_response, &tts_file, &voice, "+0%", "+0%")
-    } else {
-        eprintln!("[TTS] skipped (tts_enabled=false)");
-        false
-    };
-    if tts_ok { play_audio(tts_file.clone(), app.clone(), generation); }
 
-    app.emit("chat-speaking-start", TypewriterStartPayload {
-        emotion: emotion.clone(),
-        total_chars: full_response.chars().count(),
-        has_audio: tts_ok,
-    }).map_err(|e| e.to_string())?;
+    speak_internal(&app, &full_response, &emotion, &voice, &format, use_tts, generation);
 
-    let _ = app.emit("chat-stream", ChatStreamPayload {
-        delta: full_response,
-    });
-
-    let _ = app.emit("chat-stream-end", ());
-    if !tts_ok {
-        let _ = app.emit("chat-audio-done", ());
-    }
     Ok(())
 }
 
@@ -436,40 +455,11 @@ pub async fn speak_text(
     let aux2 = tts_aux2_voice.unwrap_or_default();
     let generation = AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
-    // Use override_voice if provided, otherwise auto-detect
     let voice = override_voice.unwrap_or_else(|| select_voice(&text, &primary, &aux1, &aux2, ""));
     let emotion_str = emotion.unwrap_or_else(|| detect_emotion(&text));
-    let (rate, volume) = emotion_to_prosody(&emotion_str);
-    // typewriter speed: match EMOTION_SPEEDS in chat.ts
-    let tw_speed = match emotion_str.as_str() {
-        "excited" => (1, 192),
-        "angry" => (1, 184),
-        "cheerful" => (1, 192),
-        "friendly" => (1, 210),
-        "serious" => (1, 232),
-        "calm" => (1, 245),
-        "whisper" => (1, 259),
-        "sad" => (1, 276),
-        _ => (1, 210),
-    };
-    eprintln!("[TTS:push] voice={} emotion={} rate={} volume={} typewriter={}/{}ms", voice, emotion_str, rate, volume, tw_speed.0, tw_speed.1);
-    let tts_file = tts_path(&format);
     let use_tts = tts_enabled.unwrap_or(true);
-    let tts_ok = if use_tts {
-        generate_tts_to(&text, &tts_file, &voice, rate, volume)
-    } else { false };
 
-    // Emit events so frontend typewriter + UI sync with audio playback
-    let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
-        emotion: emotion_str,
-        total_chars: text.chars().count(),
-        has_audio: tts_ok,
-    });
-    let _ = app.emit("chat-stream", ChatStreamPayload { delta: text });
-    let _ = app.emit("chat-stream-end", ());
-
-    if tts_ok { play_audio(tts_file, app.clone(), generation); }
-    if !tts_ok { let _ = app.emit("chat-audio-done", ()); }
+    speak_internal(&app, &text, &emotion_str, &voice, &format, use_tts, generation);
 
     Ok(())
 }
