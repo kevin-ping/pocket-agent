@@ -9,7 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
-use crate::commands::chat::try_acquire_speaking;
+use crate::commands::chat::is_speaking;
 use tower_http::cors::CorsLayer;
 
 pub struct ServerState {
@@ -111,7 +111,7 @@ async fn push_handler(
     }
 
     // Reject if already speaking — only one message at a time
-    if !try_acquire_speaking() {
+    if is_speaking() {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(PushResponse { ok: false, message: "busy speaking".into() }),

@@ -95,8 +95,13 @@ pub fn stop_audio_queue() {
     let _ = audio_sender().lock().unwrap().send(AudioCmd::Stop);
 }
 
+/// Check if currently speaking (read-only, no lock change).
+pub fn is_speaking() -> bool {
+    SPEAKING_LOCK.load(Ordering::SeqCst)
+}
+
 /// Try to acquire the speaking lock. Returns false if already speaking.
-pub fn try_acquire_speaking() -> bool {
+fn try_acquire_speaking() -> bool {
     SPEAKING_LOCK.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok()
 }
 
