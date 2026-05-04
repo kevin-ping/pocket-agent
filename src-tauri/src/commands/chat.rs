@@ -38,13 +38,11 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                             }
                             _stream = None;
                             queued = 0;
+                            crate::commands::chat::audio_queue_reset();
                             eprintln!("[AUDIO] queue cleared");
                         }
                         AudioCmd::Play { path, app, generation } => {
-                            if queued >= MAX_AUDIO_QUEUE {
-                                eprintln!("[AUDIO] queue full ({}/{}), dropping", queued, MAX_AUDIO_QUEUE);
-                                continue;
-                            }
+
                             if sink.is_none() {
                                 match rodio::OutputStream::try_default() {
                                     Ok((s, sh)) => {
@@ -75,6 +73,7 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                                 s.sleep_until_end();
                             }
                             queued = queued.saturating_sub(1);
+                            crate::commands::chat::audio_queue_release();
                             eprintln!("[AUDIO] done, queue: {}", queued);
                             if queued == 0 && AUDIO_GENERATION.load(Ordering::SeqCst) == generation {
                                 let _ = app.emit("chat-audio-done", ());
@@ -98,8 +97,31 @@ pub fn stop_audio_queue() {
     let _ = audio_sender().lock().unwrap().send(AudioCmd::Stop);
 }
 
+/// Try to reserve a queue slot (atomic CAS). Returns false if queue full.
+fn audio_queue_reserve() -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    loop {
+        let current = AUDIO_QUEUE_DEPTH.load(SeqCst);
+        if current >= MAX_AUDIO_QUEUE { return false; }
+        if AUDIO_QUEUE_DEPTH.compare_exchange(current, current + 1, SeqCst, SeqCst).is_ok() {
+            return true;
+        }
+    }
+}
+
+/// Release a queue slot after audio finishes.
+fn audio_queue_release() {
+    AUDIO_QUEUE_DEPTH.fetch_sub(1, Ordering::SeqCst);
+}
+
+/// Reset queue counter (on stop/cancel).
+fn audio_queue_reset() {
+    AUDIO_QUEUE_DEPTH.store(0, Ordering::SeqCst);
+}
+
 
 static AUDIO_GENERATION: AtomicU64 = AtomicU64::new(0);
+static AUDIO_QUEUE_DEPTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Get edge-tts binary path from env var, fallback to "edge-tts" (expect in PATH)
 fn edge_tts_bin() -> String {
@@ -282,6 +304,21 @@ fn speak_internal(
     tts_enabled: bool,
     generation: u64,
 ) -> bool {
+    // Reserve queue slot FIRST — before TTS generation
+    if !audio_queue_reserve() {
+        eprintln!("[SPEAK] queue full, dropping {} chars", text.chars().count());
+        // Still show text in UI even if audio is dropped
+        let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
+            emotion: emotion.to_string(),
+            total_chars: text.chars().count(),
+            has_audio: false,
+        });
+        let _ = app.emit("chat-stream", ChatStreamPayload { delta: text.to_string() });
+        let _ = app.emit("chat-stream-end", ());
+        let _ = app.emit("chat-audio-done", ());
+        return false;
+    }
+
     let (rate, volume) = emotion_to_prosody(emotion);
     let tts_file = tts_path(format);
     let tts_ok = if tts_enabled {
@@ -306,6 +343,8 @@ fn speak_internal(
     if tts_ok {
         play_audio(tts_file, app.clone(), generation);
     } else {
+        // No audio — release the slot we reserved
+        audio_queue_release();
         let _ = app.emit("chat-audio-done", ());
     }
 
