@@ -182,8 +182,17 @@ fn select_voice(text: &str, primary: &str, aux1: &str, aux2: &str, fixed_lang: &
             "aux2" if !aux2.is_empty() => aux2,
             _ => primary,
         };
-        eprintln!("[TTS] fixed_lang={}, forcing voice: {}", fixed_lang, forced_voice);
-        return forced_voice.to_string();
+        // Graceful degradation: if response language doesn't match forced voice,
+        // fall back to auto-detection to avoid edge-tts NoAudioReceived error
+        let forced_lang = voice_lang(forced_voice);
+        let detected = detect_language(text);
+        if forced_lang == detected {
+            eprintln!("[TTS] fixed_lang={}, forcing voice: {} (matches detected: {})", fixed_lang, forced_voice, detected);
+            return forced_voice.to_string();
+        } else {
+            eprintln!("[TTS] fixed_lang={} but detected={} — falling back to auto voice to avoid TTS failure", fixed_lang, detected);
+            // Fall through to auto-detection below
+        }
     }
     let detected = detect_language(text);
     eprintln!("[TTS] detected language: {}", detected);
@@ -363,6 +372,31 @@ pub async fn send_message(
     if fixed.is_empty() {
         hint.push_str("\n\nIMPORTANT: You MUST respond in the SAME language the user writes in. If the user writes in Chinese, respond in Chinese. If the user writes in English, respond in English. Never switch languages based on previous conversation context.");
     }
+
+    // Append forced language instruction to user message — LLMs obey user-message
+    // instructions far more reliably than system prompts.
+    let forced_suffix = if !fixed.is_empty() {
+        let voice = match fixed.as_str() {
+            "aux1" if !aux1.is_empty() => &aux1,
+            "aux2" if !aux2.is_empty() => &aux2,
+            _ => &primary,
+        };
+        let lang_code = voice.split('-').next().unwrap_or("zh");
+        let lang_name = match lang_code {
+            "zh" => "Chinese",
+            "ja" => "Japanese",
+            "ko" => "Korean",
+            "en" => "English",
+            "fr" => "French",
+            "de" => "German",
+            "es" => "Spanish",
+            _ => "Chinese",
+        };
+        format!(" Please reply in {}.", lang_name)
+    } else {
+        String::new()
+    };
+    let text = format!("{}{}", text, forced_suffix);
 
     app.emit("chat-thinking-start", ()).map_err(|e| e.to_string())?;
 

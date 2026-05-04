@@ -57,13 +57,6 @@ pub fn build_voice_hint(primary_voice: &str, aux1_voice: &str, aux2_voice: &str,
     let primary_lang = voice_to_language(primary_voice)
         .unwrap_or("Chinese (中文)");
 
-    // Build forced language instruction
-    let forced_instruction = if !fixed_lang.is_empty() {
-        format!("FORCED LANGUAGE MODE: Your TTS voice is locked to a specific language. ")
-    } else {
-        String::new()
-    };
-
     let user_lang_name = match effective_lang.as_str() {
         "zh" => "Chinese (中文)",
         "ja" => "Japanese (日本語)",
@@ -102,8 +95,7 @@ You have TTS voices installed for these languages: {lang_list}.
 - Default response language: {primary_lang}. Use this unless the user writes to you in another installed language.
 - If the user writes in a language you do NOT have a voice for, respond in {primary_lang} and briefly explain you cannot speak that language.
 
-{forced_instruction}You MUST respond in {user_lang_name}.
-Do NOT switch to the user's actual language. Even if they write in Chinese, respond in {user_lang_name}. This is a hard TTS requirement.
+- Default response language: {user_lang_name}.
 
 VIOLATION OF ANY RULE ABOVE will cause the voice output to sound broken. Always obey.
 
@@ -111,7 +103,6 @@ VIOLATION OF ANY RULE ABOVE will cause the voice output to sound broken. Always 
         lang_list = lang_list,
         primary_lang = primary_lang,
         user_lang_name = user_lang_name,
-        forced_instruction = forced_instruction,
         local_cmd_section = local_cmd_section,
     )
 }

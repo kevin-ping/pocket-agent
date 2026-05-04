@@ -1,5 +1,5 @@
 use chrono;
-use crate::voice::record::{start_recording, stop_recording, take_pre_started, RecordingHandle};
+use crate::voice::record::{start_recording, stop_recording_no_handle, take_pre_started, RecordingHandle};
 use crate::voice::stt::transcribe;
 use std::sync::Mutex;
 use std::sync::Arc;
@@ -90,35 +90,17 @@ pub async fn stop_voice_recording(
     // Cancel the auto-timeout
     state.timeout_active.store(false, Ordering::SeqCst);
 
-    // Retry getting handle — start_voice_recording may still be in-flight
-    // (race between fn-key-down and fn-key-up reaching Tauri commands)
-    let handle = {
-        let mut retries = 0u32;
-        loop {
-            let mut guard = state
-                .handle
-                .lock()
-                .map_err(|_| "录音状态锁定失败".to_string())?;
-            if let Some(h) = guard.take() {
-                break Some(h);
-            }
-            drop(guard);
-            retries += 1;
-            if retries > 50 {
-                // ~500ms total wait, give up
-                break None;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    };
-
-    let Some(handle) = handle else {
-        eprintln!("[voice] stop: no handle after retries, skipping");
-        return Ok(());
-    };
+    // Clear handle (for housekeeping)
+    {
+        let mut guard = state
+            .handle
+            .lock()
+            .map_err(|_| "录音状态锁定失败".to_string())?;
+        guard.take();
+    }
 
     eprintln!("[voice] recording stopped, starting STT... [{}]", chrono::Local::now().format("%H:%M:%S%.3f"));
-    let wav_path = tokio::task::spawn_blocking(move || stop_recording(handle))
+    let wav_path = tokio::task::spawn_blocking(move || stop_recording_no_handle())
         .await
         .map_err(|e| format!("停止录音失败: {}", e))??;
 
@@ -164,20 +146,18 @@ pub async fn cancel_voice_recording(
     // Cancel the auto-timeout
     state.timeout_active.store(false, Ordering::SeqCst);
 
-    let handle = {
+    // Clear handle (housekeeping)
+    {
         let mut guard = state
             .handle
             .lock()
             .map_err(|_| "录音状态锁定失败".to_string())?;
-        guard.take()
-    };
-
-    if let Some(handle) = handle {
-        // Stop recording, discard the WAV — ignore errors
-        let _ = tokio::task::spawn_blocking(move || stop_recording(handle)).await;
-        // Clean up the temp file silently
-        eprintln!("[voice] recording cancelled, discarding audio");
+        guard.take();
     }
+
+    // Stop recording, discard the WAV — ignore errors
+    let _ = tokio::task::spawn_blocking(move || stop_recording_no_handle()).await;
+    eprintln!("[voice] recording cancelled, discarding audio");
 
     Ok(())
 }
