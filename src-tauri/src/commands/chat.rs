@@ -36,7 +36,7 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                             }
                             _stream = None;
                             queued = 0;
-                            crate::commands::chat::reset_speaking();
+                            crate::commands::chat::audio_queue_reset();
                             eprintln!("[AUDIO] queue cleared");
                         }
                         AudioCmd::Play { path, app, generation } => {
@@ -71,7 +71,7 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                                 s.sleep_until_end();
                             }
                             queued = queued.saturating_sub(1);
-                            crate::commands::chat::release_speaking();
+                            crate::commands::chat::audio_queue_release();
                             eprintln!("[AUDIO] done, queue: {}", queued);
                             if queued == 0 && AUDIO_GENERATION.load(Ordering::SeqCst) == generation {
                                 let _ = app.emit("chat-audio-done", ());
@@ -95,29 +95,39 @@ pub fn stop_audio_queue() {
     let _ = audio_sender().lock().unwrap().send(AudioCmd::Stop);
 }
 
-/// Check if currently speaking (read-only, no lock change).
-pub fn is_speaking() -> bool {
-    SPEAKING_LOCK.load(Ordering::SeqCst)
+/// Check if queue is full (read-only).
+pub fn is_queue_full() -> bool {
+    AUDIO_QUEUE_DEPTH.load(Ordering::SeqCst) >= MAX_AUDIO_QUEUE
 }
 
-/// Try to acquire the speaking lock. Returns false if already speaking.
-fn try_acquire_speaking() -> bool {
-    SPEAKING_LOCK.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+/// Try to reserve a queue slot (atomic CAS). Returns false if queue full.
+fn audio_queue_reserve() -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    loop {
+        let current = AUDIO_QUEUE_DEPTH.load(SeqCst);
+        if current >= MAX_AUDIO_QUEUE { return false; }
+        if AUDIO_QUEUE_DEPTH.compare_exchange(current, current + 1, SeqCst, SeqCst).is_ok() {
+            return true;
+        }
+    }
 }
 
-/// Release the speaking lock when done.
-fn release_speaking() {
-    SPEAKING_LOCK.store(false, Ordering::SeqCst);
+/// Release a queue slot after audio finishes.
+fn audio_queue_release() {
+    AUDIO_QUEUE_DEPTH.fetch_sub(1, Ordering::SeqCst);
 }
 
-/// Force-release the speaking lock (on stop/cancel).
-pub fn reset_speaking() {
-    SPEAKING_LOCK.store(false, Ordering::SeqCst);
+/// Reset queue counter (on stop/cancel).
+pub fn audio_queue_reset() {
+    AUDIO_QUEUE_DEPTH.store(0, Ordering::SeqCst);
 }
 
+
+/// Maximum concurrent audio items.
+const MAX_AUDIO_QUEUE: usize = 3;
 
 static AUDIO_GENERATION: AtomicU64 = AtomicU64::new(0);
-static SPEAKING_LOCK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static AUDIO_QUEUE_DEPTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Get edge-tts binary path from env var, fallback to "edge-tts" (expect in PATH)
 fn edge_tts_bin() -> String {
@@ -300,9 +310,9 @@ fn speak_internal(
     tts_enabled: bool,
     generation: u64,
 ) -> bool {
-    // Acquire speaking lock — only one message at a time
-    if !try_acquire_speaking() {
-        eprintln!("[SPEAK] busy, dropping {} chars", text.chars().count());
+    // Reserve queue slot — max MAX_AUDIO_QUEUE concurrent
+    if !audio_queue_reserve() {
+        eprintln!("[SPEAK] queue full, dropping {} chars", text.chars().count());
         return false;
     }
 
@@ -331,11 +341,35 @@ fn speak_internal(
         play_audio(tts_file, app.clone(), generation);
     } else {
         // No audio — release the slot we reserved
-        release_speaking();
+        audio_queue_release();
         let _ = app.emit("chat-audio-done", ());
     }
 
     tts_ok
+}
+
+/// POST to internal /push API so voice chat goes through the same queue as external push.
+fn push_to_self(text: &str, emotion: &str, voice: &str) {
+    let api_key = std::env::var("API_SERVER_KEY").unwrap_or_default();
+    let port = std::env::var("PA_PORT").unwrap_or_else(|_| "8650".to_string());
+    let url = format!("http://127.0.0.1:{}/push", port);
+    let body = format!(r#"{{"text":{},"emotion":{},"voice":{}}}"#,
+        serde_json::to_string(text).unwrap_or_default(),
+        serde_json::to_string(emotion).unwrap_or_default(),
+        serde_json::to_string(voice).unwrap_or_default(),
+    );
+    std::thread::spawn(move || {
+        let client = reqwest::blocking::Client::new();
+        let resp = client.post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send();
+        match resp {
+            Ok(r) => eprintln!("[SSE] push_to_self: {}", r.status()),
+            Err(e) => eprintln!("[SSE] push_to_self failed: {}", e),
+        }
+    });
 }
 
 #[tauri::command]
@@ -344,19 +378,17 @@ pub async fn send_message(
     state: State<'_, AppState>,
     text: String,
     api_url: String,
-    tts_format: Option<String>,
+    _tts_format: Option<String>,
     tts_primary_voice: Option<String>,
     tts_aux1_voice: Option<String>,
     tts_aux2_voice: Option<String>,
     user_language: Option<String>,
     fixed_lang: Option<String>,
-    tts_enabled: Option<bool>,
+    _tts_enabled: Option<bool>,
 ) -> Result<(), String> {
-    let format = tts_format.unwrap_or_else(|| "wav".to_string());
     let primary = tts_primary_voice.unwrap_or_else(|| "zh-CN-XiaoxiaoNeural".to_string());
     let aux1 = tts_aux1_voice.unwrap_or_default();
     let aux2 = tts_aux2_voice.unwrap_or_default();
-    let generation = AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let api_key = get_api_key();
     let client = HermesClient::new(&api_url, api_key);
 
@@ -422,11 +454,10 @@ pub async fn send_message(
         return Ok(());
     }
 
+    // Route through internal push API — same queue as external push
     let emotion = detect_emotion(&full_response);
     let voice = select_voice(&full_response, &primary, &aux1, &aux2, &fixed);
-    let use_tts = tts_enabled.unwrap_or(true);
-
-    speak_internal(&app, &full_response, &emotion, &voice, &format, use_tts, generation);
+    push_to_self(&full_response, &emotion, &voice);
 
     Ok(())
 }
