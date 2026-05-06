@@ -88,7 +88,7 @@ CRITICAL RULES (you MUST follow every time):
 2. Keep your response CONCISE: 1-3 short sentences. Long text sounds terrible in TTS.
 3. NEVER use symbols that don't speak well: # * ` [ ] {{ }} < > | \ /
 4. If you need to mention code or technical terms, spell them out phonetically or describe them in plain words.
-
+5. NEVER use emoji. They cause TTS errors and will be read as garbled characters.
 LANGUAGE RESTRICTION:
 You have TTS voices installed for these languages: {lang_list}.
 - You MUST ONLY respond in one of these languages.
@@ -117,9 +117,15 @@ pub fn get_api_url() -> String {
 }
 
 /// Load API key from environment variable.
-/// Reads API_SERVER from .env file on startup, falls back to env var.
 pub fn get_api_key() -> Option<String> {
     std::env::var("API_SERVER_KEY").ok().filter(|s| !s.is_empty())
+}
+
+/// Load API agent from environment variable.
+/// If set (e.g. "main"), PA connects to OpenClaw and routes to openclaw/{agent}.
+/// If empty or unset, PA uses Hermes backend with model="default".
+pub fn get_api_agent() -> Option<String> {
+    std::env::var("API_AGENT").ok().filter(|s| !s.is_empty())
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

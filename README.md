@@ -2,9 +2,9 @@
 
 > A minimal desktop AI voice companion that lives on your screen — press a key, speak, get things done.
 >
-> **v0.2.0** — see [releases/0.2.0.md](releases/0.2.0.md) for changelog
+> **v0.2.1** — see [releases/0.2.1.md](releases/0.2.1.md) for changelog
 
-Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust**. It connects to a local [Hermes Agent](https://github.com/nousresearch/hermes) gateway via SSE streaming for real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
+Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust**. It connects to a local AI agent gateway ([Hermes](https://github.com/nousresearch/hermes) or [OpenClaw](https://github.com/nousresearch/openclaw)) via SSE streaming for real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
 
 ---
 
@@ -40,9 +40,9 @@ Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust*
         |             |
         v             v
   +----------+   +--------------+
-  | Whisper  |   | Hermes Agent |
-  | (local)  |   | Gateway      |
-  +----------+   | :8642        |
+  | Whisper  |   | Hermes /     |
+  | (local)  |   | OpenClaw     |
+  +----------+   | :8642/:18789 |
                  +--------------+
 ```
 
@@ -52,7 +52,7 @@ Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust*
 2. **Recording starts** — pre-warmed cpal Stream Daemon activates instantly (~11ms latency)
 3. **Press hotkey again** — recording stops, WAV saved to temp file
 4. **STT** — faster-whisper transcribes locally (auto language detection)
-5. **Send to backend** — text + voice hint streamed to Hermes gateway via `/v1/chat/completions`
+5. **Send to backend** — text + voice hint streamed to configured gateway (Hermes :8642 or OpenClaw :18789) via `/v1/chat/completions`
 6. **TTS playback** — edge-tts generates audio, rodio plays it via system speakers
 
 Press **Escape** during recording to cancel. Minimum recording: 1.5s. Maximum: 30s (auto-cutoff).
@@ -67,6 +67,7 @@ Press **Escape** during recording to cancel. Minimum recording: 1.5s. Maximum: 3
 - **Session memory** — daily auto-rotating sessions with compressed context summaries
 - **Language tracking** — auto-detects user language per message, follows user's language seamlessly
 - **Local command tags** — `[CMD:...]` for local automation tasks (disabled by default, requires explicit opt-in)
+- **OpenClaw support** — connect to OpenClaw gateway with multi-agent routing (openclaw/zhenyan, openclaw/qingyin, etc.), ENV-driven config, no Settings UI clutter
 - **Multi-language voice** — configure primary + auxiliary TTS voices, auto-switch based on detected language
 - **Configurable hotkey** — capture any key via Settings, no restart required
 - **TTS toggle** — disable voice output for text-only mode
@@ -100,9 +101,10 @@ See [releases/0.1.1.md](releases/0.1.1.md) for full API details.
 
 **AI / Voice**
 - [Hermes Agent](https://github.com/nousresearch/hermes) gateway (default `http://localhost:8642`)
+- [OpenClaw](https://github.com/nousresearch/openclaw) gateway (default `http://localhost:18789`) with multi-agent routing via model field
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for local speech-to-text
 - [edge-tts](https://github.com/rany2/edge-tts) for text-to-speech
-- Any OpenAI-compatible LLM via Hermes (tested with GLM-5)
+- Any OpenAI-compatible LLM (tested with GLM-5 on Hermes, Qwen/QwQ on OpenClaw)
 
 ---
 
@@ -111,6 +113,7 @@ See [releases/0.1.1.md](releases/0.1.1.md) for full API details.
 | Backend | Status | Notes |
 |---------|--------|-------|
 | **Hermes Agent** | Supported | Primary tested backend |
+| **OpenClaw** | Supported | Multi-agent routing via model field, ENV-driven |
 | **Other OpenAI-compatible** | Possible | Must support `/v1/chat/completions` streaming |
 
 Pocket Agent communicates via OpenAI-compatible chat completions API over SSE. Any server implementing this interface can be used as a drop-in replacement.
@@ -124,7 +127,7 @@ Pocket Agent is a local desktop client. Please understand these boundaries:
 - **API key handling** — `API_SERVER_KEY` is read from `.env` (plaintext on disk). Never commit `.env` to version control.
 - **Global input monitoring** — the hotkey listener uses macOS Accessibility APIs (CGEventTap). This grants system-level input monitoring capability. Only run builds you trust.
 - **Microphone access** — audio is captured via CoreAudio and processed **entirely locally** by faster-whisper. No audio data leaves your machine for STT.
-- **Conversation persistence** — sessions are stored in `~/.hermes/sessions/` by the Hermes gateway. These contain full conversation text. Consider disk encryption.
+- **Conversation persistence** — sessions are stored in the configured gateway (Hermes: `~/.hermes/sessions/`, OpenClaw: `~/.openclaw/agents/<agent>/sessions/`). These contain full conversation text. Consider disk encryption.
 
 ### Local Command Execution
 
@@ -158,7 +161,7 @@ The responsibility for safe operation is shared across three layers:
 - Rust toolchain installed
 - Node.js 18+ and npm
 - Python 3.10+ with `faster-whisper` and `edge-tts`
-- Hermes gateway running and reachable
+- Hermes or OpenClaw gateway running and reachable
 
 ### Prerequisites
 
@@ -166,7 +169,7 @@ The responsibility for safe operation is shared across three layers:
 - **Rust** — [install](https://rustup.rs/)
 - **Node.js** 18+ and npm
 - **Python 3.10+** with `faster-whisper` and `edge-tts`
-- **Hermes Agent** gateway (default `localhost:8642`)
+- **Backend gateway** — [Hermes Agent](https://github.com/nousresearch/hermes) (`localhost:8642`) or [OpenClaw](https://github.com/nousresearch/openclaw) (`localhost:18789`)
 
 ### Setup
 
@@ -187,10 +190,19 @@ cp .env.example .env
 Edit `.env`:
 
 ```bash
-# From Hermes config (api_server.key)
+# Backend API server URL
+# Hermes: http://localhost:8642 (default)
+# OpenClaw: http://localhost:18789
+API_SERVER=http://localhost:8642
+
+# API server auth key
 API_SERVER_KEY=your-api-server-key-here
 
-# edge-tts binary (pip install edge-tts), or keep "edge-tts" if in PATH
+# Agent routing (OpenClaw only - omit for Hermes)
+# Routes via model field: openclaw/<agent>
+# API_AGENT=zhenyan
+
+# edge-tts binary
 EDGE_TTS_BIN=/path/to/edge-tts
 
 # Python with faster_whisper installed
@@ -223,7 +235,7 @@ If Accessibility was denied initially, re-enable it and restart the app.
 
 Open **Settings** from the tray menu.
 
-- **API URL** — backend address (default `http://localhost:8642`)
+- **Backend** — read from `API_SERVER` in `.env` (not configurable in Settings UI)
 - **Avatar image** — optional custom character avatar
 - **Record Key** — capture any key as your push-to-talk hotkey (default: `fn`). Changes take effect immediately.
 - **TTS voices** — primary, auxiliary 1, auxiliary 2 (grouped by language)

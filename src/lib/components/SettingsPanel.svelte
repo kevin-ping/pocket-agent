@@ -562,17 +562,6 @@
     flex-shrink: 0;
   }
 
-  .text-input {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 8px;
-    padding: 6px 10px;
-    color: rgba(232, 232, 240, 0.9);
-    font-size: 12px;
-    outline: none;
-    transition: border-color 0.12s;
-  }
-  .text-input:focus { border-color: rgba(124, 158, 255, 0.5); }
 
   select.field-input {
     -webkit-appearance: none;
