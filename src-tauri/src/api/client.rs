@@ -8,10 +8,11 @@ pub struct HermesClient {
     client: Client,
     base_url: String,
     api_key: Option<String>,
+    api_agent: Option<String>,  // None=Hermes, Some("main")=OpenClaw routing to openclaw/{agent}
 }
 
 impl HermesClient {
-    pub fn new(base_url: &str, api_key: Option<String>) -> Self {
+    pub fn new(base_url: &str, api_key: Option<String>, api_agent: Option<String>) -> Self {
         let client = Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
@@ -21,6 +22,7 @@ impl HermesClient {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
+            api_agent,
         }
     }
 
@@ -48,8 +50,13 @@ impl HermesClient {
         }
         messages.push(json!({ "role": "user", "content": text }));
 
+        let model = if let Some(ref agent) = self.api_agent {
+            format!("openclaw/{}", agent)
+        } else {
+            "default".to_string()
+        };
         let body = json!({
-            "model": "default",
+            "model": model,
             "messages": messages,
             "stream": true
         });
@@ -66,18 +73,24 @@ impl HermesClient {
 
         // Session continuity
         if let Some(sid) = session_id {
-            request_builder = request_builder.header("X-Hermes-Session-Id", sid);
+            if let Some(ref agent) = self.api_agent {
+                // OpenClaw: session key with agent prefix
+                request_builder = request_builder.header("x-openclaw-session-key", format!("agent:{}:{}", agent, sid));
+            } else {
+                // Hermes: use X-Hermes-Session-Id
+                request_builder = request_builder.header("X-Hermes-Session-Id", sid);
+            }
         }
 
         let response = request_builder
             .send()
             .await
-            .map_err(|e| format!("连接 Hermes 失败: {}", e))?;
+            .map_err(|e| format!("接口连接失败: {}", e))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let resp_body = response.text().await.unwrap_or_default();
-            return Err(format!("Hermes 返回错误 {}: {}", status, resp_body));
+            return Err(format!("接口返回错误 {}: {}", status, resp_body));
         }
 
         let error_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));

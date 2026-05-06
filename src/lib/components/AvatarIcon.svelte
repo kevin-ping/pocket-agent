@@ -4,6 +4,7 @@
   import { createEventDispatcher } from 'svelte';
 
   export let avatarImage: string | null = null;
+  export let spiritPhase = 0;
   export let mediaSkins: Partial<Record<CharacterState, string>> = {};
 
   const dispatch = createEventDispatcher<{ expand: void; contextmenu: MouseEvent }>();
@@ -81,8 +82,28 @@
     <div class="wave-ring w2" aria-hidden="true"></div>
     <div class="wave-ring w3" aria-hidden="true"></div>
 
-    <!-- Thinking: rotating dashed arc -->
-    <div class="think-arc" aria-hidden="true"></div>
+    <!-- Spirit Ring 1: enhanced thinking arc (gold glow) -->
+    <div class="think-arc" class:ring-active={spiritPhase >= 1} aria-hidden="true"></div>
+
+    <!-- Spirit Ring 2: LLM phase (purple) -->
+    <div class="spirit-ring ring-2" class:active={spiritPhase >= 2} aria-hidden="true">
+      <div class="ring-glow"></div>
+      <div class="ring-arc"></div>
+      <div class="ring-runes">
+        <svg viewBox="0 0 96 96">
+          <defs><path id="p2" d="M48,5 a43,43 0 1,1 0,86 a43,43 0 1,1 0,-86" fill="none"/></defs>
+          <text fill="rgba(100,210,255,0.35)" font-size="6" font-family="'SF Mono',monospace" letter-spacing="2.5">
+            <textPath href="#p2">THINK · REASON · PROCESS · NEURAL · DEEP · MIND ·</textPath>
+          </text>
+        </svg>
+      </div>
+    </div>
+
+    <!-- Spirit Ring 3: TTS phase (emerald breathing light) -->
+    <div class="spirit-ring ring-3" class:active={spiritPhase >= 3} aria-hidden="true">
+      <div class="ring-glow"></div>
+      <div class="ring-arc"></div>
+    </div>
 
     <!-- Main circle -->
     <div class="avatar-circle">
@@ -116,7 +137,7 @@
 <style>
   /* ─── Wrapper ─── */
   .avatar-wrap {
-    padding-top: 11px;
+    padding-top: 14px;
     width: 108px;
     height: 115px;
     position: relative;
@@ -200,11 +221,7 @@
     100% { transform: scale(1.5);   opacity: 0;   }
   }
 
-  /* ─── Thinking arc ─── */
-  /*
-   * 90×90 arc, offset -7px so it surrounds the 76px circle perfectly.
-   * Spins around its own center = avatar circle center.
-   */
+  /* ─── Spirit Ring 1: enhanced thinking arc (gold glow) ─── */
   .think-arc {
     display: none;
     position: absolute;
@@ -213,16 +230,122 @@
     width: 90px;
     height: 90px;
     border-radius: 50%;
-    border: 1.5px dashed var(--ring);
-    border-color: var(--ring) transparent var(--ring) transparent;
+    border: 1.5px dashed rgba(255, 210, 110, 0.7);
+    border-color: rgba(255, 210, 110, 0.7) transparent rgba(255, 210, 110, 0.7) transparent;
     pointer-events: none;
     animation: think-spin 2.4s linear infinite;
+    transition: box-shadow 0.4s ease;
   }
+  /* Fallback: show during state-thinking without spirit rings */
   .state-thinking .think-arc { display: block; }
+  .state-speaking .think-arc,
+  .state-speaking .spirit-ring { display: none !important; opacity: 0 !important; }
+  /* Spirit ring mode: gold glow, persists through phases */
+  .think-arc.ring-active {
+    display: block;
+    border-color: rgba(255, 210, 110, 0.7) transparent rgba(255, 210, 110, 0.7) transparent;
+    box-shadow: 0 0 10px rgba(255, 200, 100, 0.25), 0 0 24px rgba(255, 200, 100, 0.1);
+  }
 
   @keyframes think-spin {
     from { transform: rotate(0deg); }
     to   { transform: rotate(360deg); }
+  }
+
+  /* ─── Spirit Ring 2: LLM phase (purple, 96px) ─── */
+  .spirit-ring {
+    position: absolute;
+    border-radius: 50%;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.5s ease;
+  }
+  .spirit-ring.active { opacity: 1; }
+
+  .ring-2 {
+    top: -8px;
+    left: -8px;
+    width: 92px;
+    height: 92px;
+  }
+  .ring-2 .ring-glow {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 1.5px solid rgba(100, 210, 255, 0.5);
+    box-shadow: 0 0 12px rgba(100, 210, 255, 0.2), 0 0 28px rgba(100, 210, 255, 0.08);
+    transition: box-shadow 0.6s ease;
+  }
+  .ring-2.active .ring-glow {
+    animation: ring2-pulse 2s ease-in-out infinite;
+  }
+  .ring-2 .ring-arc {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    border-top-color: rgba(100, 210, 255, 0.8);
+    border-right-color: rgba(100, 210, 255, 0.4);
+    animation: ring2-spin 2s linear infinite;
+  }
+  .ring-2 .ring-runes {
+    position: absolute;
+    inset: 0;
+    animation: ring2-spin-reverse 18s linear infinite;
+  }
+  .ring-2 .ring-runes svg {
+    width: 100%;
+    height: 100%;
+  }
+
+  @keyframes ring2-pulse {
+    0%, 100% { box-shadow: 0 0 12px rgba(160, 120, 255, 0.2), 0 0 28px rgba(160, 120, 255, 0.08); }
+    50%      { box-shadow: 0 0 18px rgba(160, 120, 255, 0.35), 0 0 40px rgba(160, 120, 255, 0.15); }
+  }
+  @keyframes ring2-spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+  @keyframes ring2-spin-reverse {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(-360deg); }
+  }
+
+  /* ─── Spirit Ring 3: TTS phase (emerald breathing, 110px) ─── */
+  .ring-3 {
+    top: -12px;
+    left: -12px;
+    width: 100px;
+    height: 100px;
+  }
+  .ring-3 .ring-glow {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 1.5px solid rgba(200, 130, 255, 0.5);
+    box-shadow: 0 0 14px rgba(200, 130, 255, 0.2), 0 0 30px rgba(200, 130, 255, 0.08);
+    transition: box-shadow 0.6s ease;
+  }
+  .ring-3.active .ring-glow {
+    animation: ring3-breathe 1.8s ease-in-out infinite;
+  }
+  .ring-3 .ring-arc {
+    position: absolute;
+    inset: -2px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    border-top-color: rgba(200, 130, 255, 0.7);
+    border-right-color: rgba(200, 130, 255, 0.3);
+    animation: ring3-orbit-reverse 6s linear infinite;
+  }
+
+  @keyframes ring3-breathe {
+    0%, 100% { box-shadow: 0 0 16px rgba(80, 220, 160, 0.15), 0 0 36px rgba(80, 220, 160, 0.06); }
+    50%      { box-shadow: 0 0 24px rgba(80, 220, 160, 0.3), 0 0 50px rgba(80, 220, 160, 0.12); }
+  }
+  @keyframes ring3-orbit-reverse {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(-360deg); }
   }
 
   /* ─── Main circle ─── */
@@ -347,8 +470,8 @@
     letter-spacing: 0.16em;
     color: var(--ring);
     text-align: center;
-    margin-top: 5px;
-    line-height: 1;
+    margin-top: 8px;
+    line-height: 1.2;
     opacity: 0.8;
     transition: color 0.3s;
     flex-shrink: 0;

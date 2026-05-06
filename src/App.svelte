@@ -31,10 +31,11 @@
     chatStore.startStream();
     characterState.toThinking();
     islandMode = 'thinking';
+    spiritPhase = 2;
+    firstStreamDelta = false;
     try {
       await invoke('send_message', {
         text,
-        apiUrl: get(settingsStore).api_url,
         ttsFormat: get(settingsStore).tts_format,
         ttsPrimaryVoice: get(settingsStore).tts_primary_voice,
         ttsAux1Voice: get(settingsStore).tts_aux1_voice,
@@ -46,12 +47,15 @@
     } catch (e) {
       chatStore.setError(`连接失败: ${e}`);
       characterState.toIdle();
+      spiritPhase = 0;
     }
   }
 
   // ─── Context menu ───
   let muted = false;
   let islandMode: "idle" | "recording" | "thinking" = "idle";
+  let spiritPhase = 0;
+  let firstStreamDelta = false;
 
   // ─── Settings panel ───
   let showSettings = false;
@@ -83,44 +87,56 @@
       listen('chat-thinking-start', () => characterState.toThinking()),
       listen<{ emotion: string; total_chars: number; has_audio: boolean }>('chat-speaking-start', (e) => {
         characterState.toSpeaking();
+        spiritPhase = 0;
         chatStore.startStream();
         chatStore.startTypewriter(e.payload.emotion);
         if (!e.payload.has_audio && !$layoutStore.expanded) {
           layoutStore.toggle();
         }
       }),
-      listen<{ delta: string }>('chat-stream', (e) => chatStore.appendDelta(e.payload.delta)),
+      listen<{ delta: string }>('chat-stream', (e) => {
+        chatStore.appendDelta(e.payload.delta);
+        if (!firstStreamDelta) {
+          firstStreamDelta = true;
+          spiritPhase = Math.max(spiritPhase, 2);
+        }
+      }),
       listen('chat-stream-end', () => {
         islandMode = 'idle';
         chatStore.endStream();
-        // 空响应时不会有 speaking-start，此时状态仍是 thinking，直接 idle
         if (get(characterState) !== 'speaking') {
           characterState.toIdle();
+          spiritPhase = 0;
         }
       }),
       listen('chat-audio-done', () => {
-        // 音频播放完毕，安全地从 speaking 转到 idle
         characterState.transition('speaking', 'idle');
+        spiritPhase = 0;
       }),
       listen<string>('chat-stream-error', (e) => {
         islandMode = 'idle';
         chatStore.setError(e.payload);
         characterState.toIdle();
+        spiritPhase = 0;
       }),
 
       listen('fn-key-down', () => {
         islandMode = 'recording';
+        spiritPhase = 0;
+        firstStreamDelta = false;
         characterState.toListening();
         chatStore.clear();
         invoke('start_voice_recording').catch(console.error);
       }),
       listen('fn-key-up', () => {
         islandMode = 'thinking';
+        spiritPhase = 1;
         characterState.toThinking();
         invoke('stop_voice_recording').catch(console.error);
       }),
       listen('voice-cancel', () => {
         islandMode = 'idle';
+        spiritPhase = 0;
         characterState.toIdle();
         invoke('cancel_voice_recording').catch(console.error);
       }),
@@ -129,11 +145,13 @@
         if (e.payload.text.trim()) {
           handleSendMessage(e.payload.text, e.payload.language);
         } else {
+          spiritPhase = 0;
           characterState.toIdle();
         }
       }),
       listen<{ error: string }>('stt-error', (e) => {
         islandMode = 'idle';
+        spiritPhase = 0;
         console.warn('[STT]', e.payload.error);
         characterState.toIdle();
       }),
@@ -151,6 +169,8 @@
       listen<{ text: string; emotion: string; voice: string | null }>("api-push", (e) => {
         const { text, emotion, voice } = e.payload;
         if (!text.trim()) return;
+        spiritPhase = 3;
+        firstStreamDelta = false;
         invoke("speak_text", {
           text,
           emotion,
@@ -232,6 +252,7 @@
   >
     <AvatarIcon
       avatarImage={$settingsStore.avatar_image ?? null}
+      spiritPhase={spiritPhase}
       on:expand={() => layoutStore.toggle()}
     />
     <DynamicIsland mode={islandMode} />

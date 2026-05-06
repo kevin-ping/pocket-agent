@@ -175,9 +175,16 @@ pub fn start_recording() -> Result<RecordingHandle, String> {
     }
 }
 
-/// Stop recording, finalize WAV, return file path
-pub fn stop_recording(_handle: RecordingHandle) -> Result<String, String> {
+/// Stop recording without requiring a handle (for race-safe stop)
+pub fn stop_recording_no_handle() -> Result<String, String> {
+    stop_recording_internal()
+}
+
+fn stop_recording_internal() -> Result<String, String> {
     if let Some(daemon) = DAEMON.get() {
+        if !daemon.start_ack.load(Ordering::Acquire) {
+            return Err("not recording".into());
+        }
         daemon.start_ack.store(false, Ordering::Release);
         let (resp_tx, resp_rx) = mpsc::channel();
         daemon

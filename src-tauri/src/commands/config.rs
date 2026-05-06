@@ -57,13 +57,6 @@ pub fn build_voice_hint(primary_voice: &str, aux1_voice: &str, aux2_voice: &str,
     let primary_lang = voice_to_language(primary_voice)
         .unwrap_or("Chinese (中文)");
 
-    // Build forced language instruction
-    let forced_instruction = if !fixed_lang.is_empty() {
-        format!("FORCED LANGUAGE MODE: Your TTS voice is locked to a specific language. ")
-    } else {
-        String::new()
-    };
-
     let user_lang_name = match effective_lang.as_str() {
         "zh" => "Chinese (中文)",
         "ja" => "Japanese (日本語)",
@@ -95,15 +88,14 @@ CRITICAL RULES (you MUST follow every time):
 2. Keep your response CONCISE: 1-3 short sentences. Long text sounds terrible in TTS.
 3. NEVER use symbols that don't speak well: # * ` [ ] {{ }} < > | \ /
 4. If you need to mention code or technical terms, spell them out phonetically or describe them in plain words.
-
+5. NEVER use emoji. They cause TTS errors and will be read as garbled characters.
 LANGUAGE RESTRICTION:
 You have TTS voices installed for these languages: {lang_list}.
 - You MUST ONLY respond in one of these languages.
 - Default response language: {primary_lang}. Use this unless the user writes to you in another installed language.
 - If the user writes in a language you do NOT have a voice for, respond in {primary_lang} and briefly explain you cannot speak that language.
 
-{forced_instruction}You MUST respond in {user_lang_name}.
-Do NOT switch to the user's actual language. Even if they write in Chinese, respond in {user_lang_name}. This is a hard TTS requirement.
+- Default response language: {user_lang_name}.
 
 VIOLATION OF ANY RULE ABOVE will cause the voice output to sound broken. Always obey.
 
@@ -111,20 +103,33 @@ VIOLATION OF ANY RULE ABOVE will cause the voice output to sound broken. Always 
         lang_list = lang_list,
         primary_lang = primary_lang,
         user_lang_name = user_lang_name,
-        forced_instruction = forced_instruction,
         local_cmd_section = local_cmd_section,
     )
 }
 
+/// Load API URL from environment variable.
+/// Reads API_SERVER from .env file on startup, falls back to env var.
+pub fn get_api_url() -> String {
+    std::env::var("API_SERVER")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "http://localhost:8642".to_string())
+}
+
 /// Load API key from environment variable.
-/// Reads from .env file on startup, falls back to env var.
 pub fn get_api_key() -> Option<String> {
     std::env::var("API_SERVER_KEY").ok().filter(|s| !s.is_empty())
 }
 
+/// Load API agent from environment variable.
+/// If set (e.g. "main"), PA connects to OpenClaw and routes to openclaw/{agent}.
+/// If empty or unset, PA uses Hermes backend with model="default".
+pub fn get_api_agent() -> Option<String> {
+    std::env::var("API_AGENT").ok().filter(|s| !s.is_empty())
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
-    pub api_url: String,
     pub volume: f32,
     pub character_skin: String,
     pub dialog_style: String,
@@ -144,7 +149,6 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            api_url: "http://localhost:8642".to_string(),
             volume: 0.8,
             character_skin: "default-css".to_string(),
             dialog_style: "bubble".to_string(),
@@ -169,7 +173,6 @@ pub fn load_config(app: &AppHandle) -> AppConfig {
     };
     let default = AppConfig::default();
     AppConfig {
-        api_url: store.get("api_url").and_then(|v| v.as_str().map(String::from)).unwrap_or(default.api_url),
         volume: store.get("volume").and_then(|v| v.as_f64().map(|f| f as f32)).unwrap_or(default.volume),
         character_skin: store.get("character_skin").and_then(|v| v.as_str().map(String::from)).unwrap_or(default.character_skin),
         dialog_style: store.get("dialog_style").and_then(|v| v.as_str().map(String::from)).unwrap_or(default.dialog_style),
@@ -195,7 +198,6 @@ pub fn get_config(app: AppHandle) -> AppConfig {
 #[tauri::command]
 pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
     let store = app.store("settings.json").map_err(|e| e.to_string())?;
-    store.set("api_url", serde_json::json!(config.api_url));
     store.set("volume", serde_json::json!(config.volume));
     store.set("character_skin", serde_json::json!(config.character_skin));
     store.set("dialog_style", serde_json::json!(config.dialog_style));

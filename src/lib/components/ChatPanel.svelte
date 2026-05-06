@@ -92,11 +92,6 @@
     backdrop-filter: blur(24px) saturate(160%);
     border: 1px solid rgba(160, 168, 255, 0.28);
     border-radius: 10px;
-    box-shadow:
-      0 0 0 1px rgba(160, 168, 255, 0.07),
-      0 0 20px rgba(160, 168, 255, 0.09),
-      0 6px 28px rgba(0, 0, 0, 0.55),
-      inset 0 1px 0 rgba(255, 255, 255, 0.06);
     overflow: hidden;
     position: relative;
     flex-shrink: 0;
