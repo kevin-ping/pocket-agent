@@ -36,7 +36,6 @@
     try {
       await invoke('send_message', {
         text,
-        apiUrl: get(settingsStore).api_url,
         ttsFormat: get(settingsStore).tts_format,
         ttsPrimaryVoice: get(settingsStore).tts_primary_voice,
         ttsAux1Voice: get(settingsStore).tts_aux1_voice,

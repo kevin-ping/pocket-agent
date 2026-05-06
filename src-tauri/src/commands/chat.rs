@@ -1,6 +1,6 @@
 use chrono;
 use crate::api::client::HermesClient;
-use crate::commands::config::{get_api_key, build_voice_hint};
+use crate::commands::config::{get_api_key, get_api_url, build_voice_hint};
 use crate::AppState;
 use futures_util::StreamExt;
 use std::process::Command;
@@ -349,7 +349,6 @@ pub async fn send_message(
     app: AppHandle,
     state: State<'_, AppState>,
     text: String,
-    api_url: String,
     _tts_format: Option<String>,
     tts_primary_voice: Option<String>,
     tts_aux1_voice: Option<String>,
@@ -362,7 +361,7 @@ pub async fn send_message(
     let aux1 = tts_aux1_voice.unwrap_or_default();
     let aux2 = tts_aux2_voice.unwrap_or_default();
     let api_key = get_api_key();
-    let client = HermesClient::new(&api_url, api_key);
+    let client = HermesClient::new(&get_api_url(), api_key);
 
     let user_lang = user_language.unwrap_or_else(|| "zh".to_string());
     let fixed = fixed_lang.unwrap_or_default();

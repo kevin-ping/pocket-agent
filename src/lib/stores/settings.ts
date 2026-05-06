@@ -2,7 +2,6 @@ import { writable } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 
 export interface AppSettings {
-  api_url: string;
   volume: number;
   character_skin: 'default-css' | 'rive' | 'lottie';
   dialog_style: 'bubble' | 'tv' | 'terminal';
@@ -20,7 +19,6 @@ export interface AppSettings {
 }
 
 const defaults: AppSettings = {
-  api_url: 'http://localhost:8642',
   volume: 0.8,
   character_skin: 'default-css',
   dialog_style: 'bubble',

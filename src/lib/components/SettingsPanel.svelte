@@ -192,21 +192,6 @@
         />
       </div>
 
-      <!-- ── Connection section ── -->
-      <div class="section-label">{t($settingsStore.tts_primary_voice).connection}</div>
-
-      <div class="field-row">
-        <label class="field-label" for="api-url">{t($settingsStore.tts_primary_voice).apiUrl}</label>
-        <input
-          id="api-url"
-          class="field-input text-input"
-          type="text"
-          bind:value={local.api_url}
-          placeholder="http://localhost:8642"
-          spellcheck="false"
-          autocomplete="off"
-        />
-      </div>
 
       <!-- ── Hotkey section ── -->
       <div class="section-label">Hotkey</div>

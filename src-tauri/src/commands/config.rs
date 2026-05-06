@@ -107,15 +107,23 @@ VIOLATION OF ANY RULE ABOVE will cause the voice output to sound broken. Always 
     )
 }
 
+/// Load API URL from environment variable.
+/// Reads API_SERVER from .env file on startup, falls back to env var.
+pub fn get_api_url() -> String {
+    std::env::var("API_SERVER")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "http://localhost:8642".to_string())
+}
+
 /// Load API key from environment variable.
-/// Reads from .env file on startup, falls back to env var.
+/// Reads API_SERVER from .env file on startup, falls back to env var.
 pub fn get_api_key() -> Option<String> {
     std::env::var("API_SERVER_KEY").ok().filter(|s| !s.is_empty())
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
-    pub api_url: String,
     pub volume: f32,
     pub character_skin: String,
     pub dialog_style: String,
@@ -135,7 +143,6 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            api_url: "http://localhost:8642".to_string(),
             volume: 0.8,
             character_skin: "default-css".to_string(),
             dialog_style: "bubble".to_string(),
@@ -160,7 +167,6 @@ pub fn load_config(app: &AppHandle) -> AppConfig {
     };
     let default = AppConfig::default();
     AppConfig {
-        api_url: store.get("api_url").and_then(|v| v.as_str().map(String::from)).unwrap_or(default.api_url),
         volume: store.get("volume").and_then(|v| v.as_f64().map(|f| f as f32)).unwrap_or(default.volume),
         character_skin: store.get("character_skin").and_then(|v| v.as_str().map(String::from)).unwrap_or(default.character_skin),
         dialog_style: store.get("dialog_style").and_then(|v| v.as_str().map(String::from)).unwrap_or(default.dialog_style),
@@ -186,7 +192,6 @@ pub fn get_config(app: AppHandle) -> AppConfig {
 #[tauri::command]
 pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
     let store = app.store("settings.json").map_err(|e| e.to_string())?;
-    store.set("api_url", serde_json::json!(config.api_url));
     store.set("volume", serde_json::json!(config.volume));
     store.set("character_skin", serde_json::json!(config.character_skin));
     store.set("dialog_style", serde_json::json!(config.dialog_style));
