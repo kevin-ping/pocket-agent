@@ -198,17 +198,17 @@
 
       <div class="field-row">
         <label class="field-label" for="env-api-server">API Server</label>
-        <input id="env-api-server" class="field-input text" bind:value={local.api_server} placeholder="http://localhost:8642" />
+        <input id="env-api-server" class="field-input text" bind:value={local.api_server} placeholder="http://localhost:8642" onfocus={(e) => e.target.select()} />
       </div>
 
       <div class="field-row">
         <label class="field-label" for="env-api-agent">API Agent</label>
-        <input id="env-api-agent" class="field-input text" bind:value={local.api_agent} placeholder="xingyin" />
+        <input id="env-api-agent" class="field-input text" bind:value={local.api_agent} placeholder="xingyin" onfocus={(e) => e.target.select()} />
       </div>
 
       <div class="field-row">
         <label class="field-label" for="env-api-key">API Key</label>
-        <input id="env-api-key" class="field-input text" type="text" bind:value={local.api_server_key} placeholder="留空则无认证" />
+        <input id="env-api-key" class="field-input text" type="text" bind:value={local.api_server_key} placeholder="留空则无认证" onfocus={(e) => e.target.select()} />
       </div>
 
       <div class="field-row">
