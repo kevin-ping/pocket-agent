@@ -208,3 +208,48 @@ pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String
 pub fn quit_app(app: AppHandle) {
     app.exit(0);
 }
+
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct EnvConfig {
+    pub api_server: String,
+    pub api_agent: String,
+    pub api_server_key: String,
+    pub enable_local_commands: String,
+}
+
+/// Read current env config from process environment
+#[tauri::command]
+pub fn get_env_config() -> EnvConfig {
+    EnvConfig {
+        api_server: std::env::var("API_SERVER").unwrap_or_default(),
+        api_agent: std::env::var("API_AGENT").unwrap_or_default(),
+        api_server_key: std::env::var("API_SERVER_KEY").unwrap_or_default(),
+        enable_local_commands: std::env::var("ENABLE_LOCAL_COMMANDS").unwrap_or_default(),
+    }
+}
+
+/// Save env config to ~/.pocket-agent/.env (reload needed)
+#[tauri::command]
+pub fn save_env_config(config: EnvConfig) -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let dir = std::path::Path::new(&home).join(".pocket-agent");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create dir: {}", e))?;
+
+    let env_path = dir.join(".env");
+    let content = format!(
+        "API_SERVER={}
+API_AGENT={}
+API_SERVER_KEY={}
+ENABLE_LOCAL_COMMANDS={}
+",
+        config.api_server,
+        config.api_agent,
+        config.api_server_key,
+        config.enable_local_commands,
+    );
+    std::fs::write(&env_path, content).map_err(|e| format!("write .env: {}", e))?;
+
+    eprintln!("[env] saved config to {}", env_path.display());
+    Ok(())
+}

@@ -8,5 +8,7 @@
     <string>Pocket Agent 使用语音识别将您的语音转换为文字指令</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Pocket Agent 需要辅助功能权限来监听 fn 键</string>
+    <key>NSAccessibilityUsageDescription</key>
+    <string>Pocket Agent 需要辅助功能权限来监听 fn 键热键</string>
 </dict>
 </plist>

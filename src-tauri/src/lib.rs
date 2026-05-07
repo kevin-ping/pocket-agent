@@ -11,8 +11,14 @@ pub struct AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Load .env file from current directory (silent — no error if missing)
+    // Load .env file:
+    // 1. Current working directory (works for `tauri dev`)
+    // 2. ~/.pocket-agent/.env (works for packaged .app)
     let _ = dotenvy::dotenv();
+    if let Ok(home) = std::env::var("HOME") {
+        let env_path = std::path::Path::new(&home).join(".pocket-agent").join(".env");
+        let _ = dotenvy::from_path(&env_path);
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
@@ -79,9 +85,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::chat::send_message,
             commands::chat::speak,
-            commands::chat::speak_text,            commands::config::get_config,
+            commands::chat::speak_text,
+            commands::config::get_config,
             commands::config::save_config,
             commands::config::quit_app,
+            commands::config::get_env_config,
+            commands::config::save_env_config,
             commands::voice::start_voice_recording,
             commands::voice::stop_voice_recording,
             commands::voice::cancel_voice_recording,

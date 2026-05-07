@@ -61,10 +61,32 @@
   // Reactive local state
   let local = $state<AppSettings>({ ...$settingsStore });
 
+  // ─── Env config ───
+  interface EnvConfig {
+    api_server: string;
+    api_agent: string;
+    api_server_key: string;
+    enable_local_commands: string;
+  }
+
+  let envConfig = $state<EnvConfig>({
+    api_server: '',
+    api_agent: '',
+    api_server_key: '',
+    enable_local_commands: '',
+  });
+
+  let envLocalCmd = $state(false);
+
   // Sync from store when panel opens
   $effect(() => {
     if (visible) {
       Object.assign(local, $settingsStore);
+      // Load env config
+      invoke<EnvConfig>('get_env_config').then((cfg) => {
+        envConfig = cfg;
+        envLocalCmd = cfg.enable_local_commands === 'true';
+      }).catch(console.warn);
     }
   });
 
@@ -119,6 +141,9 @@
     saveError = '';
     try {
       await settingsStore.save(local);
+      // Save env config
+      envConfig.enable_local_commands = envLocalCmd ? 'true' : '';
+      await invoke('save_env_config', { config: envConfig });
       visible = false;
       onclose?.();
     } catch (e) {
@@ -192,6 +217,36 @@
         />
       </div>
 
+
+
+      <!-- ── Server config section ── -->
+      <div class="section-label">服务器连接</div>
+
+      <div class="field-row">
+        <label class="field-label" for="env-api-server">API Server</label>
+        <input id="env-api-server" class="field-input text" bind:value={envConfig.api_server} placeholder="http://localhost:8642" />
+      </div>
+
+      <div class="field-row">
+        <label class="field-label" for="env-api-agent">API Agent</label>
+        <input id="env-api-agent" class="field-input text" bind:value={envConfig.api_agent} placeholder="xingyin" />
+      </div>
+
+      <div class="field-row">
+        <label class="field-label" for="env-api-key">API Key</label>
+        <input id="env-api-key" class="field-input text" type="password" bind:value={envConfig.api_server_key} placeholder="留空则无认证" />
+      </div>
+
+      <div class="field-row">
+        <label class="field-label" for="env-local-cmd">本地命令</label>
+        <div class="toggle-wrap">
+          <input type="checkbox" id="env-local-cmd" class="toggle-input" bind:checked={envLocalCmd} />
+          <label for="env-local-cmd" class="toggle-track">
+            <span class="toggle-thumb"></span>
+          </label>
+        </div>
+      </div>
+      <p class="hint">修改后需重启应用生效</p>
 
       <!-- ── Hotkey section ── -->
       <div class="section-label">Hotkey</div>
