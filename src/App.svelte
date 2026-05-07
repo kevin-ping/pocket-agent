@@ -317,8 +317,8 @@
     <div class="permission-guide" role="alert">
       <p class="guide-title"><Icon name="alert-triangle" size={14} color="rgba(255, 200, 80, 0.95)" /> 需要辅助功能权限</p>
       <p class="guide-body">
-        系统设置 → 隐私与安全性 → 辅助功能<br />
-        添加 Pocket Agent 后重启应用
+        🍎 左上角苹果菜单 → 系统设置 → 隐私与安全性 → 辅助功能<br />
+        在右侧列表中找到 Pocket Agent 并打开开关，然后重启应用
       </p>
       <button class="guide-btn" on:click={() => (showAccessibilityGuide = false)}>
         我知道了

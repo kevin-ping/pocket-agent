@@ -7,6 +7,9 @@ static CAPTURING: AtomicBool = AtomicBool::new(false);
 /// Global hotkey code — updatable at runtime without restart
 static HOTKEY_CODE: AtomicI64 = AtomicI64::new(179);
 
+/// Channel for capture_hotkey — main tap sends captured keycode here
+static CAPTURE_TX: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<i64>>> = std::sync::OnceLock::new();
+
 #[cfg(target_os = "macos")]
 mod macos_raw {
     use std::os::raw::c_void;
@@ -58,7 +61,6 @@ mod macos_raw {
         fn CFRunLoopGetCurrent() -> CFRunLoopRef;
         fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: *mut c_void);
         fn CFRunLoopRun();
-        fn CFRunLoopStop(rl: CFRunLoopRef);
 
         #[link_name = "kCFRunLoopCommonModes"]
         static kCFRunLoopCommonModes: SyncPtr;
@@ -79,8 +81,23 @@ mod macos_raw {
             return event;
         }
 
-        // Skip events during hotkey capture
+        // During hotkey capture: intercept the first key pressed
         if super::CAPTURING.load(Ordering::SeqCst) {
+            if etype == KCG_EVENT_KEY_DOWN {
+                let kc = CGEventGetIntegerValueField(event, KCG_KEYBOARD_EVENT_KEYCODE);
+                if kc != ESC_KEYCODE {
+                    super::CAPTURING.store(false, Ordering::SeqCst);
+                    if let Some(tx) = super::CAPTURE_TX.get() {
+                        let _ = tx.lock().unwrap().send(kc);
+                    }
+                } else {
+                    // Escape cancels capture
+                    super::CAPTURING.store(false, Ordering::SeqCst);
+                    if let Some(tx) = super::CAPTURE_TX.get() {
+                        let _ = tx.lock().unwrap().send(-1);
+                    }
+                }
+            }
             return event;
         }
 
@@ -178,93 +195,13 @@ mod macos_raw {
             .expect("failed to spawn hotkey thread");
     }
 
-    // ── Capture mode: one-shot key capture ──
-
-    struct CaptureCtx {
-        tx: mpsc::Sender<i64>,
-        /// Tracks whether we've seen at least one KeyUp since capture started.
-        /// Prevents residual KeyDown events from the mouse click that triggered capture.
-        seen_first_key_up: AtomicBool,
-    }
-
-    unsafe extern "C" fn capture_callback(
-        _proxy: *mut c_void,
-        etype: u32,
-        event: CGEventRef,
-        user_info: *mut c_void,
-    ) -> CGEventRef {
-        let ctx = &*(user_info as *const CaptureCtx);
-
-        // Ignore KeyUp events but use them to signal "click is done"
-        if etype == KCG_EVENT_KEY_UP {
-            ctx.seen_first_key_up.store(true, Ordering::SeqCst);
-            return event;
-        }
-
-        if etype != KCG_EVENT_KEY_DOWN {
-            return event;
-        }
-
-        // Only accept key presses after we've seen at least one release
-        // (the mouse click that started capture generates a key-down without a prior key-up)
-        if !ctx.seen_first_key_up.load(Ordering::SeqCst) {
-            return event; // Still in the click, skip this stale event
-        }
-
-        let keycode = CGEventGetIntegerValueField(event, KCG_KEYBOARD_EVENT_KEYCODE);
-        let _ = ctx.tx.send(keycode);
-        // Stop our own run loop
-        CFRunLoopStop(CFRunLoopGetCurrent());
-        event
-    }
-
     pub fn capture_one_key(timeout_secs: u64) -> Result<(i64, String), String> {
         let (tx, rx) = mpsc::channel();
-        let tx_err = tx.clone();
+        let _ = super::CAPTURE_TX.set(std::sync::Mutex::new(tx));
 
-        std::thread::Builder::new()
-            .name("hotkey-capture".to_string())
-            .spawn(move || {
-                let ctx = Box::new(CaptureCtx {
-                    tx,
-                    seen_first_key_up: AtomicBool::new(false),
-                });
-                let ctx_ptr = Box::into_raw(ctx) as *mut c_void;
+        super::CAPTURING.store(true, Ordering::SeqCst);
 
-                unsafe {
-                    let event_mask = (1u64 << KCG_EVENT_KEY_DOWN) | (1u64 << KCG_EVENT_KEY_UP);
-                    let tap = CGEventTapCreate(
-                        KCG_HID_EVENT_TAP,
-                        KCG_HEAD_INSERT_EVENT_TAP,
-                        KCG_EVENT_TAP_OPTION_LISTEN_ONLY,
-                        event_mask,
-                        capture_callback,
-                        ctx_ptr,
-                    );
-
-                    if tap.is_null() {
-                        let _ = Box::from_raw(ctx_ptr as *mut CaptureCtx);
-                        let _ = tx_err.send(-1);
-                        return;
-                    }
-
-                    let source = CFMachPortCreateRunLoopSource(std::ptr::null_mut(), tap, 0);
-                    if source.is_null() {
-                        let _ = Box::from_raw(ctx_ptr as *mut CaptureCtx);
-                        let _ = tx_err.send(-1);
-                        return;
-                    }
-
-                    let rl = CFRunLoopGetCurrent();
-                    CFRunLoopAddSource(rl, source, kCFRunLoopCommonModes.0);
-                    CFRunLoopRun();
-
-                    let _ = Box::from_raw(ctx_ptr as *mut CaptureCtx);
-                }
-            })
-            .map_err(|e| format!("thread spawn: {}", e))?;
-
-        match rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
+        let result = match rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
             Ok(keycode) if keycode < 0 => {
                 Err("accessibility_permission_required".to_string())
             }
@@ -272,8 +209,13 @@ mod macos_raw {
                 let name = keycode_to_name(keycode);
                 Ok((keycode, name))
             }
-            Err(_) => Err("timeout".to_string()),
-        }
+            Err(_) => {
+                super::CAPTURING.store(false, Ordering::SeqCst);
+                Err("timeout".to_string())
+            }
+        };
+
+        result
     }
 
     /// Pre-warm the CGEventTap infrastructure to avoid first-click stutter
