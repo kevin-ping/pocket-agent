@@ -208,7 +208,7 @@
 
       <div class="field-row">
         <label class="field-label" for="env-api-key">API Key</label>
-        <input id="env-api-key" class="field-input text" type="password" bind:value={local.api_server_key} placeholder="留空则无认证" />
+        <input id="env-api-key" class="field-input text" type="text" bind:value={local.api_server_key} placeholder="留空则无认证" />
       </div>
 
       <div class="field-row">
