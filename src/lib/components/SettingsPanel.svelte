@@ -380,7 +380,7 @@
     position: fixed;
     inset: 0;
     z-index: 100;
-    background: #26263d;
+    background: rgba(12, 12, 22, 0.98);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -414,14 +414,14 @@
     flex: 1;
     font-size: 13px;
     font-weight: 600;
-    color: rgba(232, 232, 240, 0.85);
+    color: rgba(232, 232, 240, 0.7);
     text-align: center;
   }
 
   .close-btn {
     background: none;
     border: none;
-    color: rgba(232, 232, 240, 0.5);
+    color: rgba(232, 232, 240, 0.35);
     font-size: 14px;
     cursor: pointer;
     padding: 4px 6px;
@@ -567,7 +567,7 @@
   .avatar-hint {
     margin: 0;
     font-size: 11px;
-    color: rgba(232, 232, 240, 0.6);
+    color: rgba(232, 232, 240, 0.45);
     line-height: 1.5;
   }
   .avatar-hint.muted { color: rgba(232, 232, 240, 0.28); font-style: italic; }
@@ -598,7 +598,7 @@
 
   .field-label {
     font-size: 13px;
-    color: rgba(232, 232, 240, 0.92);
+    color: rgba(232, 232, 240, 0.78);
     flex-shrink: 0;
     min-width: 72px;
     display: flex;
@@ -621,7 +621,7 @@
   select.field-input {
     -webkit-appearance: none;
     appearance: none;
-    background-color: rgba(255, 255, 255, 0.1);
+    background-color: rgba(255, 255, 255, 0.06);
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='rgba(160,160,200,0.5)'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 10px center;
@@ -670,6 +670,7 @@
     cursor: pointer;
     font-size: 14px;
     flex-shrink: 0;
+    color: #ffffff;
     opacity: 0.7;
     transition: opacity 0.15s;
   }
@@ -680,7 +681,7 @@
   .hint {
     margin: 8px 0 0;
     font-size: 10.5px;
-    color: rgba(232, 232, 240, 0.5);
+    color: rgba(232, 232, 240, 0.3);
     font-style: italic;
     line-height: 1.5;
   }
