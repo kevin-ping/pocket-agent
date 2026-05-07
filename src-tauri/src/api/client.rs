@@ -8,7 +8,18 @@ pub struct HermesClient {
     client: Client,
     base_url: String,
     api_key: Option<String>,
-    api_agent: Option<String>,  // None=Hermes, Some("main")=OpenClaw routing to openclaw/{agent}
+    api_agent: Option<String>,
+}
+
+/// A single chunk from the SSE stream — carries content, reasoning, or tool call events.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// Regular content text delta
+    Content(String),
+    /// LLM reasoning/thinking text (e.g. DeepSeek R1 thinking process)
+    Reasoning(String),
+    /// Start of a new tool call
+    ToolCallStart { id: String, name: String },
 }
 
 impl HermesClient {
@@ -26,17 +37,15 @@ impl HermesClient {
         }
     }
 
-    /// 发起流式对话请求，返回 delta 文字流
+    /// Initiate a streaming chat request, returning a stream of events
+    /// (content, reasoning, tool_calls).
     pub async fn chat_stream(
         &self,
         text: &str,
         voice_hint: Option<&str>,
         context: Option<&str>,
         session_id: Option<&str>,
-    ) -> Result<BoxStream<'static, Result<String, String>>, String> {
-        // Daily context summary (injected as ephemeral system prompt, not stored in DB)
-        // Voice hint as system message — api_server treats it as ephemeral_system_prompt
-        // which is injected into every LLM call but NOT stored in session history.
+    ) -> Result<BoxStream<'static, Result<StreamEvent, String>>, String> {
         let mut messages = vec![];
         if let Some(ctx) = context {
             if !ctx.is_empty() {
@@ -66,31 +75,28 @@ impl HermesClient {
             .post(format!("{}/v1/chat/completions", self.base_url))
             .json(&body);
 
-        // Bearer auth (required by Hermes api_server when API_SERVER_KEY is configured)
         if let Some(ref key) = self.api_key {
             request_builder = request_builder.header("Authorization", format!("Bearer {}", key));
         }
 
-        // Session continuity
         if let Some(sid) = session_id {
+            // Always send Hermes session ID for session continuity
+            request_builder = request_builder.header("X-Hermes-Session-Id", sid);
+            // Also send OpenClaw format if agent is configured (for compatibility)
             if let Some(ref agent) = self.api_agent {
-                // OpenClaw: session key with agent prefix
                 request_builder = request_builder.header("x-openclaw-session-key", format!("agent:{}:{}", agent, sid));
-            } else {
-                // Hermes: use X-Hermes-Session-Id
-                request_builder = request_builder.header("X-Hermes-Session-Id", sid);
             }
         }
 
         let response = request_builder
             .send()
             .await
-            .map_err(|e| format!("接口连接失败: {}", e))?;
+            .map_err(|e| format!("Connection failed: {}", e))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let resp_body = response.text().await.unwrap_or_default();
-            return Err(format!("接口返回错误 {}: {}", status, resp_body));
+            return Err(format!("API returned error {}: {}", status, resp_body));
         }
 
         let error_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -104,28 +110,80 @@ impl HermesClient {
                 async move {
                     match event {
                         Ok(e) if e.data == "[DONE]" => None,
+                        // OpenClaw Hermes custom SSE events for tool progress
+                        Ok(e) if e.event == "hermes.tool.progress" => {
+                            error_count.store(0, std::sync::atomic::Ordering::SeqCst);
+                            if let Ok(v) = serde_json::from_str::<Value>(&e.data) {
+                                let status = v["status"].as_str().unwrap_or("");
+                                if status == "running" {
+                                    if let (Some(id), Some(name)) = (
+                                        v["toolCallId"].as_str().filter(|s| !s.is_empty()),
+                                        v["tool"].as_str().filter(|s| !s.is_empty()),
+                                    ) {
+                                        return Some(Ok(StreamEvent::ToolCallStart {
+                                            id: id.to_string(),
+                                            name: name.to_string(),
+                                        }));
+                                    }
+                                }
+                                // Skip "completed" status events silently
+                            }
+                            None
+                        }
                         Ok(e) => {
                             error_count.store(0, std::sync::atomic::Ordering::SeqCst);
                             let v: Value = match serde_json::from_str(&e.data) {
                                 Ok(v) => v,
                                 Err(_) => return None,
                             };
-                            let delta = v["choices"][0]["delta"]["content"]
+                            let choices = &v["choices"];
+                            if !choices.is_array() || choices.as_array().unwrap().is_empty() {
+                                return None;
+                            }
+                            let delta = &choices[0]["delta"];
+
+                            // 1. Reasoning / thinking content (DeepSeek R1 style)
+                            let reasoning = delta["reasoning"]
+                                .as_str()
+                                .or_else(|| delta["reasoning_content"].as_str())
+                                .map(|s| s.to_string())
+                                .filter(|s| !s.is_empty());
+                            if let Some(text) = reasoning {
+                                return Some(Ok(StreamEvent::Reasoning(text)));
+                            }
+
+                            // 2. Tool calls via OpenAI format — fallback for non-OpenClaw providers
+                            if let Some(tool_calls) = delta["tool_calls"].as_array() {
+                                for tc in tool_calls {
+                                    if let (Some(id), Some(name)) = (
+                                        tc["id"].as_str().filter(|s| !s.is_empty()),
+                                        tc["function"]["name"].as_str().filter(|s| !s.is_empty()),
+                                    ) {
+                                        return Some(Ok(StreamEvent::ToolCallStart {
+                                            id: id.to_string(),
+                                            name: name.to_string(),
+                                        }));
+                                    }
+                                }
+                            }
+
+                            // 3. Regular content
+                            let content = delta["content"]
                                 .as_str()
                                 .unwrap_or("")
                                 .to_string();
-                            if delta.is_empty() {
-                                None
-                            } else {
-                                Some(Ok(delta))
+                            if !content.is_empty() {
+                                return Some(Ok(StreamEvent::Content(content)));
                             }
+
+                            None
                         }
                         Err(e) => {
                             let count = error_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                             eprintln!("[SSE] transient error ({}/{}): {}", count, max_errors, e);
                             if count >= max_errors {
                                 eprintln!("[SSE] too many errors, terminating stream");
-                                Some(Err(format!("SSE 连接不稳定，已自动断开 ({} errors)", max_errors)))
+                                Some(Err(format!("SSE stream unstable, auto-disconnected ({} errors)", max_errors)))
                             } else {
                                 None
                             }
@@ -135,6 +193,7 @@ impl HermesClient {
             })
             .boxed();
 
+        eprintln!("[SSE] model={} url={}/v1/chat/completions", model, self.base_url);
         Ok(stream)
     }
 }

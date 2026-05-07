@@ -30,9 +30,19 @@
 
 <div class="dialog-box style-{dialogStyle}" class:error={isError}>
   <div class="content-area">
-    <p class="message-text" class:error-text={isError}>
-      {displayContent}{#if isStreaming}<span class="cursor" aria-hidden="true">▋</span>{/if}
-    </p>
+    {#if isStreaming && $chatStore.thinkingSteps.length > 0 && !$chatStore.streamingContent}
+      <!-- LLM thinking/tool-calling phase: show intermediate steps -->
+      <div class="thinking-steps">
+        {#each $chatStore.thinkingSteps as step}
+          <span class="thinking-step">{step}</span>
+        {/each}
+        <span class="cursor" aria-hidden="true">▋</span>
+      </div>
+    {:else}
+      <p class="message-text" class:error-text={isError}>
+        {displayContent}{#if isStreaming}<span class="cursor" aria-hidden="true">▋</span>{/if}
+      </p>
+    {/if}
   </div>
 
   <div class="input-area">
@@ -126,6 +136,25 @@
     0%, 100% { opacity: 1; }
     50%       { opacity: 0; }
   }
+  .thinking-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .thinking-step {
+    font-size: 12px;
+    line-height: 1.5;
+    color: rgba(124, 158, 255, 0.75);
+    animation: fade-in-step 0.3s ease-out;
+    word-break: break-word;
+  }
+
+  @keyframes fade-in-step {
+    from { opacity: 0; transform: translateY(-3px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
   .cursor {
     display: inline-block;
     color: #7c9eff;
