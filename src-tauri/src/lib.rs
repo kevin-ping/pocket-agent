@@ -61,23 +61,40 @@ pub fn run() {
                     crate::api::server::start_server(server_handle, 8650).await;
                 });
             }
-            // System tray menu (appears in macOS menu bar)
-            let settings_item = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
-            let quit_item = MenuItemBuilder::with_id("quit", "Quit Pocket Agent").build(app)?;
-            let _menu = MenuBuilder::new(app)
-                .items(&[&settings_item, &quit_item])
+            // ── macOS top menu bar (app name next to Apple logo) ──
+            use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
+            let about_item = PredefinedMenuItem::about(app, None, None)?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let app_settings = MenuItemBuilder::with_id("app-settings", "Settings…").build(app)?;
+            let sep2 = PredefinedMenuItem::separator(app)?;
+            let quit_item = PredefinedMenuItem::quit(app, None)?;
+            let app_submenu = Submenu::with_items(app, "Pocket Agent", true, &[&about_item, &sep, &app_settings, &sep2, &quit_item])?;
+            let menu = Menu::with_items(app, &[&app_submenu])?;
+            app.set_menu(menu)?;
+
+            app.on_menu_event(move |app, event| {
+                if event.id().as_ref() == "app-settings" {
+                    let _ = app.emit("tray-open-settings", ());
+                }
+            });
+
+            // ── Tray icon (right side of menu bar) ──
+            let tray_settings = MenuItemBuilder::with_id("tray-settings", "Settings…").build(app)?;
+            let tray_quit = MenuItemBuilder::with_id("tray-quit", "Quit Pocket Agent").build(app)?;
+            let tray_menu = MenuBuilder::new(app)
+                .items(&[&tray_settings, &tray_quit])
                 .build()?;
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().cloned().unwrap())
-                .menu(&_menu)
+                .menu(&tray_menu)
                 .tooltip("Pocket Agent")
                 .on_menu_event(move |app, event| {
                     match event.id().as_ref() {
-                        "settings" => {
+                        "tray-settings" => {
                             let _ = app.emit("tray-open-settings", ());
                         }
-                        "quit" => {
+                        "tray-quit" => {
                             app.exit(0);
                         }
                         _ => {}
