@@ -10,8 +10,9 @@
   let inputText = $state('');
   let contentEl: HTMLDivElement | undefined;
 
-  let displayContent = $derived($chatStore.isStreaming
-    ? $chatStore.streamingContent
+  // During thinking/tool phase, show intermediate steps instead of empty box
+  let displayContent = $derived($chatStore.isStreaming && !$chatStore.streamingContent
+    ? ''
     : ($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? t($settingsStore.tts_primary_voice).hint.replace("{key}", $settingsStore.hotkey_name)));
 
   // Auto-scroll to bottom when streaming
@@ -51,9 +52,25 @@
 
   <!-- Content area -->
   <div class="content-area" bind:this={contentEl} class:error={isError}>
-    <p class="message-text" class:error-text={isError}>
-      {displayContent}{#if isStreaming}<span class="cursor" aria-hidden="true">▋</span>{/if}
-    </p>
+    <div class="message-content">
+      {#if $chatStore.isStreaming && $chatStore.thinkingSteps.length > 0 && !$chatStore.streamingContent}
+        <!-- LLM thinking/tool-calling phase: show intermediate steps -->
+        <div class="thinking-steps">
+          {#each $chatStore.thinkingSteps as step}
+            <span class="thinking-step">{step}</span>
+          {/each}
+        </div>
+        <span class="cursor" aria-hidden="true">▋</span>
+      {:else if $chatStore.isStreaming}
+        <p class="message-text" class:error-text={isError}>
+          {$chatStore.streamingContent}<span class="cursor" aria-hidden="true">▋</span>
+        </p>
+      {:else}
+        <p class="message-text" class:error-text={isError}>
+          {$chatStore.error ?? $chatStore.messages.at(-1)?.content ?? t($settingsStore.tts_primary_voice).hint.replace("{key}", $settingsStore.hotkey_name)}
+        </p>
+      {/if}
+    </div>
   </div>
 
   <!-- Input area -->
@@ -190,6 +207,27 @@
     white-space: pre-wrap;
   }
   .error-text { color: rgba(255, 120, 120, 0.9) !important; }
+
+  .message-content { width: 100%; }
+
+  .thinking-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .thinking-step {
+    font-size: 11px;
+    line-height: 1.5;
+    color: rgba(160, 168, 255, 0.7);
+    animation: fade-in-step 0.3s ease-out;
+    word-break: break-word;
+  }
+
+  @keyframes fade-in-step {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
 
   @keyframes blink-cursor {
     0%, 100% { opacity: 1; }

@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tauri_plugin_store::StoreExt;
 
-// IMPORTANT: This is sent as a SYSTEM message to force plain text output.
-// The model MUST obey this — no markdown, no bold, no code, no lists.
+// IMPORTANT: This is sent as a SYSTEM message to force spoken-style output.
+// The model MUST obey this — no formatting, no visual-only content, no symbols.
 // Every reply will be read aloud via TTS. Keep it short (2-3 sentences max).
+// Absolutely NO emoji, NO tables, NO charts — describe everything in plain spoken words.
 /// Map voice name prefix to human-readable language name for prompt injection.
 fn voice_to_language(voice: &str) -> Option<&'static str> {
     let lang = voice.split('-').next().unwrap_or("");
@@ -24,7 +25,7 @@ fn voice_to_language(voice: &str) -> Option<&'static str> {
 /// Tells the LLM which languages it's allowed to respond in.
 pub fn build_voice_hint(primary_voice: &str, aux1_voice: &str, aux2_voice: &str, user_lang: &str, fixed_lang: &str) -> String {
     // Resolve fixed language: if set, override user_lang with the fixed voice's language
-    let effective_lang = if !fixed_lang.is_empty() {
+    let _effective_lang = if !fixed_lang.is_empty() {
         let voice = match fixed_lang {
             "aux1" if !aux1_voice.is_empty() => aux1_voice,
             "aux2" if !aux2_voice.is_empty() => aux2_voice,
@@ -57,17 +58,6 @@ pub fn build_voice_hint(primary_voice: &str, aux1_voice: &str, aux2_voice: &str,
     let primary_lang = voice_to_language(primary_voice)
         .unwrap_or("Chinese (中文)");
 
-    let user_lang_name = match effective_lang.as_str() {
-        "zh" => "Chinese (中文)",
-        "ja" => "Japanese (日本語)",
-        "ko" => "Korean (한국어)",
-        "en" => "English",
-        "fr" => "French (Français)",
-        "de" => "German (Deutsch)",
-        "es" => "Spanish (Español)",
-        _ => primary_lang,
-    };
-
     let local_cmd_section = if std::env::var("ENABLE_LOCAL_COMMANDS").as_deref() == Ok("true") {
         r#"LOCAL COMMANDS:
 You can control the user\'s Mac by embedding command tags in your response.
@@ -81,28 +71,25 @@ You can use multiple [CMD:...] tags if needed. Available apps: Chrome, Safari, S
     };
 
     format!(r#"[SYSTEM INSTRUCTION - MANDATORY]
-You are speaking to the user through a text-to-speech voice. Your response will be CONVERTED TO SPEECH and played aloud.
+You are speaking to the user through a text-to-speech voice. Your entire response will be CONVERTED TO SPEECH and read aloud — every word must be something a human can naturally say out loud.
 
 CRITICAL RULES (you MUST follow every time):
-1. Respond in PLAIN TEXT ONLY. No markdown, no asterisks, no backticks, no code blocks, no bullet points, no numbered lists, no headers, no bold, no italic.
-2. Keep your response CONCISE: 1-3 short sentences. Long text sounds terrible in TTS.
-3. NEVER use symbols that don't speak well: # * ` [ ] {{ }} < > | \ /
-4. If you need to mention code or technical terms, spell them out phonetically or describe them in plain words.
-5. NEVER use emoji. They cause TTS errors and will be read as garbled characters.
+1. Respond in PURE SPOKEN TEXT ONLY. No markdown, no asterisks, no backticks, no code blocks, no bullet points, no numbered lists, no headers, no bold, no italic, no inline code.
+2. NO TABLES, NO GRAPHS, NO DIAGRAMS, NO CHARTS -- these cannot be read aloud. Describe relationships in plain spoken sentences instead.
+3. Keep your response CONCISE: 1-3 short sentences. Long text sounds terrible in TTS.
+4. NEVER use any symbols or special characters that don't read well: # * ` [ ] {{ }} < > | \ / -- and absolutely NO emoji or emoticons (:), ;), etc.). These will be read as garbled noise or cause TTS errors.
+5. If you need to mention code or technical terms, spell them out phonetically or describe them in plain spoken words.
 LANGUAGE RESTRICTION:
 You have TTS voices installed for these languages: {lang_list}.
 - You MUST ONLY respond in one of these languages.
 - Default response language: {primary_lang}. Use this unless the user writes to you in another installed language.
 - If the user writes in a language you do NOT have a voice for, respond in {primary_lang} and briefly explain you cannot speak that language.
 
-- Default response language: {user_lang_name}.
-
 VIOLATION OF ANY RULE ABOVE will cause the voice output to sound broken. Always obey.
 
 {local_cmd_section}"#,
         lang_list = lang_list,
         primary_lang = primary_lang,
-        user_lang_name = user_lang_name,
         local_cmd_section = local_cmd_section,
     )
 }

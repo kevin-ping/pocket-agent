@@ -1,5 +1,5 @@
 use chrono;
-use crate::api::client::HermesClient;
+use crate::api::client::{HermesClient, StreamEvent};
 use crate::commands::config::{get_api_key, get_api_url, get_api_agent, build_voice_hint};
 use crate::AppState;
 use futures_util::StreamExt;
@@ -232,7 +232,7 @@ fn emotion_to_prosody(emotion: &str) -> (&'static str, &'static str) {
         "cheerful" => ("+15%", "+30%"),
         "sad"      => ("-20%", "-20%"),
         "angry"    => ("+20%", "+40%"),
-        "calm"     => ("-10%", "-5%"),
+        "calm"     => ("+0%", "-5%"),
         "excited"  => ("+15%", "+35%"),
         "whisper"  => ("-15%", "-30%"),
         "serious"  => ("-5%",  "+10%"),
@@ -373,8 +373,9 @@ pub async fn send_message(
         hint.push_str("\n\nIMPORTANT: You MUST respond in the SAME language the user writes in. If the user writes in Chinese, respond in Chinese. If the user writes in English, respond in English. Never switch languages based on previous conversation context.");
     }
 
-    // Append forced language instruction to user message — LLMs obey user-message
+    // Append language instruction to user message — LLMs obey user-message
     // instructions far more reliably than system prompts.
+    // If fixed language is set, use that; otherwise detect from user's input.
     let forced_suffix = if !fixed.is_empty() {
         let voice = match fixed.as_str() {
             "aux1" if !aux1.is_empty() => &aux1,
@@ -394,7 +395,14 @@ pub async fn send_message(
         };
         format!(" Please reply in {}.", lang_name)
     } else {
-        String::new()
+        let detected = detect_language(&text);
+        let lang_name = match detected {
+            "en" => "English",
+            "ja" => "Japanese",
+            "ko" => "Korean",
+            _ => "Chinese",
+        };
+        format!(" Please reply in {}.", lang_name)
     };
     let text = format!("{}{}", text, forced_suffix);
 
@@ -432,15 +440,50 @@ pub async fn send_message(
         };
         let mut received_data = false;
 
+        // Reasoning text comes in many tiny chunks — buffer and batch emit
+        let mut reasoning_buffer = String::new();
         let stream_ended_normally;
         while let Some(chunk) = stream.next().await {
             match chunk {
-                Ok(delta) => {
+                Ok(StreamEvent::Content(delta)) => {
+                    // Flush any remaining reasoning before content starts
+                    if !reasoning_buffer.is_empty() {
+                        let _ = app.emit("chat-thinking", reasoning_buffer.clone());
+                        reasoning_buffer.clear();
+                    }
                     if !received_data {
                         eprintln!("[SSE] <<< first token from LLM [{}]", chrono::Local::now().format("%H:%M:%S%.3f"));
                     }
                     received_data = true;
                     full_response.push_str(&delta);
+                }
+                Ok(StreamEvent::Reasoning(text)) => {
+                    if !received_data {
+                        eprintln!("[SSE] <<< first reasoning from LLM [{}]: {}...", chrono::Local::now().format("%H:%M:%S%.3f"), &text[..text.len().min(60)]);
+                    }
+                    received_data = true;
+                    // Buffer reasoning text; emit when we hit a paragraph boundary or buffer is large
+                    reasoning_buffer.push_str(&text);
+                    if reasoning_buffer.contains('\n') || reasoning_buffer.len() >= 60 {
+                        let _ = app.emit("chat-thinking", reasoning_buffer.clone());
+                        reasoning_buffer.clear();
+                    }
+                }
+                Ok(StreamEvent::ToolCallStart { id, name }) => {
+                    // Flush remaining reasoning before tool call
+                    if !reasoning_buffer.is_empty() {
+                        let _ = app.emit("chat-thinking", reasoning_buffer.clone());
+                        reasoning_buffer.clear();
+                    }
+                    if !received_data {
+                        eprintln!("[SSE] <<< first tool call from LLM [{}]: {}", chrono::Local::now().format("%H:%M:%S%.3f"), name);
+                    }
+                    received_data = true;
+                    // Emit tool call event to frontend
+                    let _ = app.emit("chat-tool-call", serde_json::json!({
+                        "id": id,
+                        "name": name
+                    }).to_string());
                 }
                 Err(e) => {
                     if !received_data && attempt < max_retries {

@@ -84,9 +84,10 @@
 
   async function setupListeners() {
     unlisten = await Promise.all([
-      listen('chat-thinking-start', () => characterState.toThinking()),
+      listen('chat-thinking-start', () => { characterState.toThinking(); chatStore.addThinkingStep('🤔 正在思考...'); }),
       listen<{ emotion: string; total_chars: number; has_audio: boolean }>('chat-speaking-start', (e) => {
         characterState.toSpeaking();
+        chatStore.clearThinkingSteps();
         spiritPhase = 0;
         chatStore.startStream();
         chatStore.startTypewriter(e.payload.emotion);
@@ -112,6 +113,26 @@
       listen('chat-audio-done', () => {
         characterState.transition('speaking', 'idle');
         spiritPhase = 0;
+      }),
+
+      // LLM intermediate thinking/reasoning updates (in-place update of last 🤔 step)
+      listen<string>('chat-thinking', (e) => {
+        chatStore.updateLastThinkingStep(e.payload);
+      }),
+
+      // Tool call start notification
+      listen<string>('chat-tool-call', (e) => {
+        try {
+          const payload = JSON.parse(e.payload);
+          // Clean up tool name: strip common prefixes
+          let toolName = payload.name
+            .replace(/^mcp_tradingview_/, '')
+            .replace(/^mcp_/, '')
+            .replace(/_/g, ' ');
+          chatStore.addThinkingStep(`🔧 查询 ${toolName}...`);
+        } catch {
+          chatStore.addThinkingStep(`🔧 正在执行操作...`);
+        }
       }),
       listen<string>('chat-stream-error', (e) => {
         islandMode = 'idle';
@@ -185,22 +206,39 @@
     ]);
   }
 
-  // ─── Save window position on close ───
+  // ─── Save window position on drag + on close ───
+  let posDragTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async function saveCurrentPosition() {
+    let pos, scale;
+    try {
+      pos = await appWindow.outerPosition();
+      scale = await appWindow.scaleFactor();
+    } catch { return; }
+    if (scale <= 0) return;
+    const layout = get(layoutStore);
+    let avatarX = pos.x / scale;
+    if (layout.expanded && layout.avatarSide === 'right') {
+      avatarX = pos.x / scale + (layoutStore.EXPANDED_W - layoutStore.AVATAR_W);
+    }
+    try {
+      await settingsStore.save({ window_x: Math.round(avatarX), window_y: Math.round(pos.y / scale) });
+    } catch {}
+  }
+
+  // ─── Listen for window drag + save on close ───
   async function setupWindowPositionSave() {
+    // Debounced save on window move (fires during drag)
+    const unlistenMove = await appWindow.onMoved(() => {
+      if (posDragTimer) clearTimeout(posDragTimer);
+      posDragTimer = setTimeout(() => saveCurrentPosition(), 500);
+    });
+    unlisten.push(unlistenMove);
+
+    // Final save on close
     await appWindow.onCloseRequested(async () => {
-      try {
-        const pos = await appWindow.outerPosition();
-        const monitor = await appWindow.currentMonitor();
-        const scale = monitor ? monitor.scaleFactor : 1;
-        const layout = get(layoutStore);
-        // Save the avatar's logical X position (not panel's window X)
-        let avatarX = pos.x / scale;
-        if (layout.expanded && layout.avatarSide === 'right') {
-          // EXPANDED_W - AVATAR_W = CHAT_W + GAP (332px)
-          avatarX = pos.x / scale + (layoutStore.EXPANDED_W - layoutStore.AVATAR_W);
-        }
-        await settingsStore.save({ window_x: Math.round(avatarX), window_y: Math.round(pos.y / scale) });
-      } catch {}
+      if (posDragTimer) clearTimeout(posDragTimer);
+      await saveCurrentPosition();
     });
   }
 
@@ -210,7 +248,7 @@
     if (settings.window_x !== null && settings.window_y !== null) {
       try {
         await appWindow.setPosition(new LogicalPosition(settings.window_x, settings.window_y));
-      } catch {}
+      } catch (e) { console.warn('[POS] restore failed:', e); }
     }
   }
 

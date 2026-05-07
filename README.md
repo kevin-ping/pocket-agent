@@ -324,17 +324,6 @@ npm run tauri build
 ```
 
 ---
-
-## Demo
-
-**English Demo:**
-
-https://github.com/user-attachments/assets/e67eb2d7-48c4-4617-b9ad-5947cb5914fe
-
-**Chinese Demo:**
-
-https://github.com/user-attachments/assets/bc815581-c662-4f24-979d-0ce5c672ae8c
-
 ---
 
 ## License
