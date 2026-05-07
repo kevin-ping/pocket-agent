@@ -434,14 +434,11 @@
 
   /* ─── Section label ─── */
   .section-label {
-    font-size: 10px;
+    font-size: 13px;
     font-weight: 700;
-    letter-spacing: 0.13em;
-    text-transform: uppercase;
-    color: rgba(124, 158, 255, 0.55);
+    color: rgba(124, 158, 255, 0.7);
     padding-top: 18px;
     padding-bottom: 8px;
-    border-bottom: 1px solid rgba(124, 158, 255, 0.1);
     margin-bottom: 4px;
   }
   .section-label:first-child { padding-top: 4px; }
