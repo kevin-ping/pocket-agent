@@ -170,13 +170,8 @@
   >
     <!-- Header -->
     <div class="header">
-      <div class="header-dots" aria-hidden="true">
-        <span class="dot red"></span>
-        <span class="dot yellow"></span>
-        <span class="dot green"></span>
-      </div>
+      <button class="close-btn" onclick={cancel} aria-label={t($settingsStore.tts_primary_voice).ariaCloseSettings}></button>
       <span class="header-title">{t($settingsStore.tts_primary_voice).settings}</span>
-      <button class="close-btn" onclick={cancel} aria-label={t($settingsStore.tts_primary_voice).ariaCloseSettings}>✕</button>
     </div>
 
     <!-- Scrollable body -->
@@ -388,50 +383,39 @@
 
   /* ─── Header ─── */
   .header {
-    height: 48px;
+    height: 38px;
     display: flex;
     align-items: center;
-    padding: 0 14px;
+    padding: 0 12px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
     flex-shrink: 0;
   }
 
-  .header-dots {
-    display: flex;
-    gap: 6px;
-    margin-right: 12px;
-  }
-  .dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-  }
-  .dot.red    { background: rgba(255, 95,  86,  0.7); }
-  .dot.yellow { background: rgba(255, 189, 46,  0.7); }
-  .dot.green  { background: rgba(39,  201, 63,  0.7); }
-
   .header-title {
     flex: 1;
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 600;
-    color: rgba(232, 232, 240, 0.7);
+    color: rgba(232, 232, 240, 0.6);
     text-align: center;
   }
 
   .close-btn {
-    background: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
     border: none;
-    color: rgba(232, 232, 240, 0.35);
-    font-size: 14px;
+    background: rgba(255, 95, 86, 0.9);
     cursor: pointer;
-    padding: 4px 6px;
-    border-radius: 5px;
-    line-height: 1;
-    transition: background 0.1s, color 0.1s;
+    padding: 0;
+    flex-shrink: 0;
+    transition: filter 0.1s, transform 0.1s;
   }
   .close-btn:hover {
-    background: rgba(255, 255, 255, 0.08);
-    color: rgba(232, 232, 240, 0.8);
+    filter: brightness(1.3);
+    transform: scale(1.15);
+  }
+  .close-btn:active {
+    transform: scale(0.95);
   }
 
   /* ─── Body ─── */
