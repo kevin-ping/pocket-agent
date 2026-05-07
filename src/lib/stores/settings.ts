@@ -16,6 +16,10 @@ export interface AppSettings {
   hotkey_code: number;
   hotkey_name: string;
   tts_enabled: boolean;
+  api_server: string;
+  api_agent: string;
+  api_server_key: string;
+  enable_local_commands: string;
 }
 
 const defaults: AppSettings = {
@@ -33,6 +37,10 @@ const defaults: AppSettings = {
   hotkey_code: 179,
   hotkey_name: "fn",
   tts_enabled: true,
+  api_server: '',
+  api_agent: '',
+  api_server_key: '',
+  enable_local_commands: '',
 };
 
 function createSettingsStore() {
