@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 static CAPTURING: AtomicBool = AtomicBool::new(false);
 
 /// Global hotkey code — updatable at runtime without restart
-static HOTKEY_CODE: AtomicI64 = AtomicI64::new(179);
+static HOTKEY_CODE: AtomicI64 = AtomicI64::new(60);
 
 /// Channel for capture_hotkey — main tap sends captured keycode here
-static CAPTURE_TX: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<i64>>> = std::sync::OnceLock::new();
+static CAPTURE_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<i64>>> = std::sync::Mutex::new(None);
 
 #[cfg(target_os = "macos")]
 mod macos_raw {
@@ -87,14 +87,14 @@ mod macos_raw {
                 let kc = CGEventGetIntegerValueField(event, KCG_KEYBOARD_EVENT_KEYCODE);
                 if kc != ESC_KEYCODE {
                     super::CAPTURING.store(false, Ordering::SeqCst);
-                    if let Some(tx) = super::CAPTURE_TX.get() {
-                        let _ = tx.lock().unwrap().send(kc);
+                    if let Some(tx) = super::CAPTURE_TX.lock().unwrap().as_ref() {
+                        let _ = tx.send(kc);
                     }
                 } else {
                     // Escape cancels capture
                     super::CAPTURING.store(false, Ordering::SeqCst);
-                    if let Some(tx) = super::CAPTURE_TX.get() {
-                        let _ = tx.lock().unwrap().send(-1);
+                    if let Some(tx) = super::CAPTURE_TX.lock().unwrap().as_ref() {
+                        let _ = tx.send(-1);
                     }
                 }
             }
@@ -197,7 +197,7 @@ mod macos_raw {
 
     pub fn capture_one_key(timeout_secs: u64) -> Result<(i64, String), String> {
         let (tx, rx) = mpsc::channel();
-        let _ = super::CAPTURE_TX.set(std::sync::Mutex::new(tx));
+        *super::CAPTURE_TX.lock().unwrap() = Some(tx);
 
         super::CAPTURING.store(true, Ordering::SeqCst);
 
@@ -281,6 +281,8 @@ mod macos_raw {
             // Navigation
             116 => "PageUp".into(), 121 => "PageDown".into(), 119 => "End".into(),
             115 => "Home".into(),
+            // Right Shift
+            60 => "RightShift".into(),
             // fn key (MacBook built-in)
             179 => "fn".into(),
             _ => format!("Key({})", code),
