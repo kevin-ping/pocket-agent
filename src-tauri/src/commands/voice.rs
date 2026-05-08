@@ -161,3 +161,10 @@ pub async fn cancel_voice_recording(
 
     Ok(())
 }
+
+/// Read current audio level normalized to 0.0-1.0 from the recording callback.
+/// Frontend polls this every ~200ms during recording to show a level meter.
+#[tauri::command]
+pub fn get_audio_level() -> f32 {
+    crate::voice::record::AUDIO_LEVEL.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0
+}

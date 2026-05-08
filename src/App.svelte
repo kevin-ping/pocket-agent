@@ -55,6 +55,8 @@
   let muted = false;
   let islandMode: "idle" | "recording" | "thinking" = "idle";
   let spiritPhase = 0;
+  let audioLevel = 0;
+  let audioLevelTimer: ReturnType<typeof setInterval> | null = null;
   let firstStreamDelta = false;
 
   // ─── Settings panel ───
@@ -148,17 +150,28 @@
         characterState.toListening();
         chatStore.clear();
         invoke('start_voice_recording').catch(console.error);
+        // Start polling audio level for visual feedback
+        audioLevel = 0;
+        if (audioLevelTimer) clearInterval(audioLevelTimer);
+        audioLevelTimer = setInterval(async () => {
+          try {
+            const level = await invoke<number>('get_audio_level');
+            audioLevel = level;
+          } catch {}
+        }, 150);
       }),
       listen('fn-key-up', () => {
         islandMode = 'thinking';
         spiritPhase = 1;
         characterState.toThinking();
+        if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
         invoke('stop_voice_recording').catch(console.error);
       }),
       listen('voice-cancel', () => {
         islandMode = 'idle';
         spiritPhase = 0;
         characterState.toIdle();
+        if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
         invoke('cancel_voice_recording').catch(console.error);
       }),
       listen<{ text: string; language: string }>('stt-result', (e) => {
@@ -168,13 +181,17 @@
         } else {
           spiritPhase = 0;
           characterState.toIdle();
+          chatStore.setError('语音识别结果为空，请重试');
+          if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
         }
       }),
       listen<{ error: string }>('stt-error', (e) => {
         islandMode = 'idle';
         spiritPhase = 0;
         console.warn('[STT]', e.payload.error);
+        chatStore.setError(`语音识别失败: ${e.payload.error}`);
         characterState.toIdle();
+        if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
       }),
 
       listen('accessibility-permission-required', () => {
@@ -261,6 +278,7 @@
 
   onDestroy(() => {
     unlisten.forEach((fn) => fn());
+    if (audioLevelTimer) clearInterval(audioLevelTimer);
   });
 </script>
 
@@ -293,7 +311,7 @@
       spiritPhase={spiritPhase}
       on:expand={() => layoutStore.toggle()}
     />
-    <DynamicIsland mode={islandMode} />
+    <DynamicIsland mode={islandMode} audioLevel={audioLevel} />
   </div>
 
   <!-- Chat panel on RIGHT (default, when avatar is on the left side of screen) -->

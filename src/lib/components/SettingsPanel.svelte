@@ -1,5 +1,6 @@
 <script lang="ts">
   import { fly } from 'svelte/transition';
+  import { tick } from 'svelte';
   import { settingsStore, type AppSettings } from '../stores/settings';
   import { t } from '../i18n';
   import { invoke } from '@tauri-apps/api/core';
@@ -95,17 +96,34 @@
 
   let capturing = $state(false);
 
+  let captureTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
+
   async function startCapture() {
     capturing = true;
-    // Yield to let UI update before blocking invoke
+    // Triple-guarantee rendering chain before blocking invoke:
+    // 1. tick() flushes Svelte DOM changes
+    // 2. requestAnimationFrame waits for browser to paint
+    // 3. setTimeout(50) extra buffer for WKWebView in packaged app
+    await tick();
     await new Promise(r => requestAnimationFrame(r));
+    await new Promise(r => setTimeout(r, 50));
+    // Timeout safeguard: cancel capture after 6s
+    captureTimeout = setTimeout(() => {
+      if (capturing) {
+        capturing = false;
+        saveError = '按键捕获超时，请重新尝试';
+      }
+    }, 6000);
     try {
       const result = await invoke<[number, string]>('capture_hotkey');
+      if (captureTimeout) clearTimeout(captureTimeout);
+      captureTimeout = null;
       local.hotkey_code = result[0];
-      local.hotkey_name = result[1];
-      // Apply immediately — no restart needed
-      await invoke('update_hotkey', { code: result[0] });
+      // update_hotkey returns the display name (e.g. "RightShift", "fn")
+      local.hotkey_name = await invoke<string>('update_hotkey', { code: result[0] });
     } catch (e) {
+      if (captureTimeout) clearTimeout(captureTimeout);
+      captureTimeout = null;
       console.warn('[hotkey] capture failed:', e);
       if (String(e).includes('accessibility')) {
         saveError = '需要辅助功能权限：系统设置 → 隐私与安全性 → 辅助功能 → 允许此应用';
@@ -122,9 +140,11 @@
     saveError = '';
     try {
       local.enable_local_commands = envEnabled ? 'true' : '';
-      await settingsStore.save(local);
+
+      // Close first to avoid $effect flash from store update
       visible = false;
       onclose?.();
+      await settingsStore.save(local);
     } catch (e) {
       saveError = '保存失败，请重试';
       console.error('[settings] save error:', e);
@@ -229,7 +249,7 @@
         {#if capturing}
           <button class="capture-btn active" disabled>按下快捷键...</button>
         {:else}
-          <button class="capture-btn" onclick={startCapture}>{local.hotkey_name || 'fn'}</button>
+          <button class="capture-btn" onclick={startCapture}>{local.hotkey_name || $settingsStore.hotkey_name || 'RightShift'}</button>
         {/if}
       </div>
 

@@ -18,6 +18,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 pub const RECORDING_PATH: &str = "/tmp/pocket-agent-recording.wav";
 
+/// Global audio level indicator — updated by CPAL callback during recording.
+/// Frontend polls this via Tauri command every ~200ms. Range: 0-1000 (0.0-1.0 * 1000)
+pub static AUDIO_LEVEL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 // -- Shared state between audio callback and daemon thread --
 
 struct CaptureShared {
@@ -30,6 +34,13 @@ impl CaptureShared {
         if !self.recording.load(Ordering::Relaxed) {
             return;
         }
+        // Compute RMS audio level and store in global for frontend polling
+        // Every buffer ~1024 samples at 48kHz ≈ 21ms — fast enough for level meter
+        let rms = (data.iter().map(|&s| s * s).sum::<f32>() / data.len() as f32).sqrt();
+        let db = if rms > 0.001 { 20.0 * rms.log10() } else { -60.0 };
+        let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+        AUDIO_LEVEL.store((level * 1000.0) as u32, std::sync::atomic::Ordering::Relaxed);
+
         if let Ok(mut g) = self.writer.try_lock() {
             if let Some(wr) = g.as_mut() {
                 for &s in data {

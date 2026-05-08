@@ -2,6 +2,7 @@
   import { createEventDispatcher } from 'svelte';
 
   export let mode: 'idle' | 'recording' | 'thinking' = 'idle';
+  export let audioLevel: number = 0;
 
   const dispatch = createEventDispatcher<{ click: void }>();
 </script>
@@ -14,7 +15,7 @@
     {#if mode === 'recording'}
       <div class="voice-wave">
         {#each Array(8) as _, i}
-          <div class="wave-bar" style="--i: {i}"></div>
+          <div class="wave-bar" style="--i: {i}; --level: {audioLevel}"></div>
         {/each}
       </div>
     {:else}
@@ -109,9 +110,11 @@
   .wave-bar {
     width: 2px;
     min-height: 2px;
-    max-height: 8px;
+    max-height: 10px;
     border-radius: 2px;
     background: linear-gradient(180deg, rgba(100, 200, 255, 0.9), rgba(160, 170, 255, 0.6));
+    /* Dynamic level from audio — fallback wave animation when silent */
+    height: calc(3px + var(--level, 0) * 7px);
     animation: wave-bounce 0.6s ease-in-out infinite alternate;
     animation-delay: calc(var(--i) * 0.05s);
   }
