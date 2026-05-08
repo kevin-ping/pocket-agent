@@ -121,6 +121,8 @@
       local.hotkey_code = result[0];
       // update_hotkey returns the display name (e.g. "RightShift", "fn")
       local.hotkey_name = await invoke<string>('update_hotkey', { code: result[0] });
+      // Auto-save hotkey change so UI updates immediately and persists across restart
+      await settingsStore.save({ hotkey_code: result[0], hotkey_name: local.hotkey_name });
     } catch (e) {
       if (captureTimeout) clearTimeout(captureTimeout);
       captureTimeout = null;
