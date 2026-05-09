@@ -67,7 +67,7 @@ Press **Escape** during recording to cancel. Minimum recording: 1.5s. Maximum: 3
 - **Session memory** — daily auto-rotating sessions with compressed context summaries
 - **Language tracking** — auto-detects user language per message, follows user's language seamlessly
 - **Local command tags** — `[CMD:...]` for local automation tasks (disabled by default, enable via `ENABLE_LOCAL_COMMANDS=true` in `.env`)
-- **OpenClaw support** — connect to OpenClaw gateway with multi-agent routing (openclaw/zhenyan, openclaw/qingyin, etc.); server connection configured via `.env` only
+- **OpenClaw support** — connect to OpenClaw gateway with multi-agent routing (openclaw/agent-a, openclaw/agent-b, etc.); server connection configured via `.env` only
 - **Multi-language voice** — configure primary + auxiliary TTS voices, auto-switch based on detected language
 - **Configurable hotkey** — capture any key via Settings, no restart required
 - **TTS toggle** — disable voice output for text-only mode
@@ -192,7 +192,7 @@ pip install faster-whisper
 1. **Clone and install dependencies:**
 
 ```bash
-git clone https://github.com/kevin-ping/pocket-agent.git
+git clone https://github.com/YOUR_USERNAME/pocket-agent.git
 cd pocket-agent
 npm install
 ```
@@ -212,7 +212,7 @@ All server connection settings (`API_SERVER`, `API_SERVER_KEY`, `API_AGENT`, `EN
 # Required: backend connection
 API_SERVER=http://localhost:8642
 API_SERVER_KEY=           # leave empty for no auth
-API_AGENT=xingyin         # agent name
+API_AGENT=my-agent         # agent name
 
 # Optional
 # ENABLE_LOCAL_COMMANDS=true
