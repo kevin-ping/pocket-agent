@@ -6,7 +6,7 @@
 
 Pocket Agent (PA) is a macOS desktop voice companion. It connects to an AI agent gateway (Hermes or OpenClaw) and provides push-to-talk voice interaction.
 
-- **GitHub**: https://github.com/YOUR_USERNAME/pocket-agent
+- **GitHub**: https://github.com/kevin-ping/pocket-agent
 - **Stack**: Tauri 2 + Svelte 5 + Rust
 - **Platform**: macOS 12+ (Intel and Apple Silicon)
 - **Current version**: 0.2.3
@@ -59,7 +59,7 @@ Verify: `which edge-tts` and `python3 -c "import faster_whisper"`
 ## Step 2: Clone and Build
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/pocket-agent.git
+git clone https://github.com/kevin-ping/pocket-agent.git
 cd pocket-agent
 npm install
 ```
