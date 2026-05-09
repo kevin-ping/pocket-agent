@@ -131,10 +131,6 @@ pub struct AppConfig {
     pub hotkey_code: i64,
     pub hotkey_name: String,
     pub tts_enabled: bool,
-    pub api_server: String,
-    pub api_agent: String,
-    pub api_server_key: String,
-    pub enable_local_commands: String,
 }
 
 impl Default for AppConfig {
@@ -154,10 +150,6 @@ impl Default for AppConfig {
             hotkey_code: 60,
             hotkey_name: "RightShift".to_string(),
             tts_enabled: true,
-            api_server: String::new(),
-            api_agent: String::new(),
-            api_server_key: String::new(),
-            enable_local_commands: String::new(),
         }
     }
 }
@@ -182,10 +174,6 @@ pub fn load_config(app: &AppHandle) -> AppConfig {
         hotkey_code: store.get("hotkey_code").and_then(|v| v.as_i64()).unwrap_or(60),
         hotkey_name: store.get("hotkey_name").and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "RightShift".to_string()),
         tts_enabled: store.get("tts_enabled").and_then(|v| v.as_bool()).unwrap_or(true),
-        api_server: store.get("api_server").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
-        api_agent: store.get("api_agent").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
-        api_server_key: store.get("api_server_key").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
-        enable_local_commands: store.get("enable_local_commands").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
     }
 }
 
@@ -212,10 +200,6 @@ pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String
     store.set("hotkey_code", serde_json::json!(config.hotkey_code));
     store.set("hotkey_name", serde_json::json!(config.hotkey_name));
     store.set("tts_enabled", serde_json::json!(config.tts_enabled));
-    store.set("api_server", serde_json::json!(config.api_server));
-    store.set("api_agent", serde_json::json!(config.api_agent));
-    store.set("api_server_key", serde_json::json!(config.api_server_key));
-    store.set("enable_local_commands", serde_json::json!(config.enable_local_commands));
     store.save().map_err(|e| e.to_string())?;
     Ok(())
 }

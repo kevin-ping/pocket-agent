@@ -62,13 +62,11 @@
   // Reactive local state
   let local = $state<AppSettings>({ ...$settingsStore });
 
-  let envEnabled = $state(false);
 
   // Sync from store when panel opens
   $effect(() => {
     if (visible) {
       Object.assign(local, $settingsStore);
-      envEnabled = local.enable_local_commands === 'true';
     }
   });
 
@@ -95,45 +93,65 @@
   }
 
   let capturing = $state(false);
+  let applying = $state(false);
 
-  let captureTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
+  let captureTimeout: ReturnType<typeof setTimeout> | null = null;
+  let capturePollTimer: ReturnType<typeof setInterval> | null = null;
+
+  function cleanupCapture() {
+    if (capturePollTimer) { clearInterval(capturePollTimer); capturePollTimer = null; }
+    if (captureTimeout) { clearTimeout(captureTimeout); captureTimeout = null; }
+  }
 
   async function startCapture() {
     capturing = true;
-    // Triple-guarantee rendering chain before blocking invoke:
-    // 1. tick() flushes Svelte DOM changes
-    // 2. requestAnimationFrame waits for browser to paint
-    // 3. setTimeout(50) extra buffer for WKWebView in packaged app
+    applying = false;
+    saveError = '';
+    // Triple-guarantee rendering chain before invoke:
     await tick();
     await new Promise(r => requestAnimationFrame(r));
     await new Promise(r => setTimeout(r, 50));
-    // Timeout safeguard: cancel capture after 6s
-    captureTimeout = setTimeout(() => {
-      if (capturing) {
-        capturing = false;
-        saveError = '按键捕获超时，请重新尝试';
-      }
-    }, 6000);
     try {
-      const result = await invoke<[number, string]>('capture_hotkey');
-      if (captureTimeout) clearTimeout(captureTimeout);
-      captureTimeout = null;
-      local.hotkey_code = result[0];
-      // update_hotkey returns the display name (e.g. "RightShift", "fn")
-      local.hotkey_name = await invoke<string>('update_hotkey', { code: result[0] });
-      // Auto-save hotkey change so UI updates immediately and persists across restart
-      await settingsStore.save({ hotkey_code: result[0], hotkey_name: local.hotkey_name });
+      await invoke('start_capture');
     } catch (e) {
-      if (captureTimeout) clearTimeout(captureTimeout);
-      captureTimeout = null;
-      console.warn('[hotkey] capture failed:', e);
+      console.warn('[hotkey] start_capture failed:', e);
       if (String(e).includes('accessibility')) {
         saveError = '需要辅助功能权限：系统设置 → 隐私与安全性 → 辅助功能 → 允许此应用';
       } else {
         saveError = '按键捕获失败，请重试';
       }
+      capturing = false;
+      return;
     }
-    capturing = false;
+    // Poll every 80ms — reads an AtomicI64 on Rust side (sub-microsecond)
+    capturePollTimer = setInterval(async () => {
+      try {
+        const result = await invoke<[number, string] | null>('poll_capture');
+        if (result) {
+          cleanupCapture();
+          // Immediately show yellow "applying" state with the captured key name
+          capturing = false;
+          applying = true;
+          local.hotkey_code = result[0];
+          local.hotkey_name = result[1];
+          // Background: update backend + persist
+          invoke('update_hotkey', { code: result[0] });
+          settingsStore.save({ hotkey_code: result[0], hotkey_name: result[1] }).then(() => {
+            applying = false;
+          });
+        }
+      } catch {
+        // poll failed — keep trying until timeout
+      }
+    }, 80);
+    // Timeout safeguard
+    captureTimeout = setTimeout(() => {
+      cleanupCapture();
+      if (capturing) {
+        capturing = false;
+        saveError = '按键捕获超时，请重新尝试';
+      }
+    }, 6000);
   }
 
   let saveError = $state('');
@@ -141,8 +159,6 @@
   async function save() {
     saveError = '';
     try {
-      local.enable_local_commands = envEnabled ? 'true' : '';
-
       // Close first to avoid $effect flash from store update
       visible = false;
       onclose?.();
@@ -215,41 +231,14 @@
 
 
 
-      <!-- ── Server config section ── -->
-      <div class="section-label">服务器连接</div>
-
-      <div class="field-row">
-        <label class="field-label" for="env-api-server">API Server</label>
-        <input id="env-api-server" class="field-input text" bind:value={local.api_server} placeholder="http://localhost:8642" onfocus={(e) => e.target.select()} />
-      </div>
-
-      <div class="field-row">
-        <label class="field-label" for="env-api-agent">API Agent</label>
-        <input id="env-api-agent" class="field-input text" bind:value={local.api_agent} placeholder="xingyin" onfocus={(e) => e.target.select()} />
-      </div>
-
-      <div class="field-row">
-        <label class="field-label" for="env-api-key">API Key</label>
-        <input id="env-api-key" class="field-input text" type="text" bind:value={local.api_server_key} placeholder="留空则无认证" onfocus={(e) => e.target.select()} />
-      </div>
-
-      <div class="field-row">
-        <label class="field-label" for="env-local-cmd">本地命令</label>
-        <div class="toggle-wrap">
-          <input type="checkbox" id="env-local-cmd" class="toggle-input" bind:checked={envEnabled} />
-          <label for="env-local-cmd" class="toggle-track">
-            <span class="toggle-thumb"></span>
-          </label>
-        </div>
-      </div>
-      <p class="hint">修改后需重启应用生效</p>
-
       <!-- ── Hotkey section ── -->
       <div class="section-label">Hotkey</div>
       <div class="field-row">
         <span class="field-label">Record Key</span>
         {#if capturing}
           <button class="capture-btn active" disabled>按下快捷键...</button>
+        {:else if applying}
+          <button class="capture-btn applying" disabled>按键更换中...</button>
         {:else}
           <button class="capture-btn" onclick={startCapture}>{local.hotkey_name || $settingsStore.hotkey_name || 'RightShift'}</button>
         {/if}
@@ -720,6 +709,12 @@
     background: rgba(100, 255, 200, 0.12);
     color: rgba(100, 255, 200, 0.9);
     animation: capture-pulse 1s ease-in-out infinite;
+  }
+  .capture-btn.applying {
+    border-color: rgba(255, 210, 80, 0.5);
+    background: rgba(255, 210, 80, 0.12);
+    color: rgba(255, 210, 80, 0.9);
+    animation: capture-pulse 0.6s ease-in-out infinite;
   }
   .capture-btn:disabled {
     cursor: default;

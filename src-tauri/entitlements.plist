@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Tauri/wry needs JIT and unsigned executable memory for webview -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <!-- Audio input for voice recording -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <!-- Input monitoring for CGEventTap (hotkey) -->
+    <key>com.apple.security.device.input-monitoring</key>
+    <true/>
+    <!-- Apple events for system automation -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+    <!-- Network access for API server -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+    <!-- Filesystem read access for config -->
+    <key>com.apple.security.files.user-selected.read-only</key>
+    <true/>
+</dict>
+</plist>

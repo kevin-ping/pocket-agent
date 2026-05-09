@@ -10,5 +10,7 @@
     <string>Pocket Agent 需要辅助功能权限来监听 fn 键</string>
     <key>NSAccessibilityUsageDescription</key>
     <string>Pocket Agent 需要辅助功能权限来监听 fn 键热键</string>
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>Pocket Agent 需要输入监控权限来识别您设置的全局快捷键</string>
 </dict>
 </plist>

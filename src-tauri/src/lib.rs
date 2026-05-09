@@ -30,11 +30,7 @@ pub fn run() {
             let handle = app.handle();
 
             let config = commands::config::load_config(handle);
-            // Apply env config from saved settings (overrides .env file)
-            if !config.api_server.is_empty() { std::env::set_var("API_SERVER", &config.api_server); }
-            if !config.api_agent.is_empty() { std::env::set_var("API_AGENT", &config.api_agent); }
-            if !config.api_server_key.is_empty() { std::env::set_var("API_SERVER_KEY", &config.api_server_key); }
-            if !config.enable_local_commands.is_empty() { std::env::set_var("ENABLE_LOCAL_COMMANDS", &config.enable_local_commands); }
+
             if let (Some(x), Some(y)) = (config.window_x, config.window_y) {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.set_position(tauri::LogicalPosition::new(x, y));
@@ -116,6 +112,8 @@ pub fn run() {
             commands::voice::cancel_voice_recording,
             commands::voice::get_audio_level,
             voice::hotkey::capture_hotkey,
+            voice::hotkey::start_capture,
+            voice::hotkey::poll_capture,
             voice::hotkey::update_hotkey,
         ])
         .run(tauri::generate_context!())

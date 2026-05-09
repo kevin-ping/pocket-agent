@@ -1,6 +1,6 @@
 {
   "productName": "Pocket Agent",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "identifier": "com.hermes.pocket-agent",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -22,8 +22,10 @@
       "resources/stt-helper": "resources/stt-helper"
     },
     "macOS": {
-      "minimumSystemVersion": "10.13",
-      "infoPlist": "Info.plist"
+      "minimumSystemVersion": "12.0",
+      "infoPlist": "Info.plist",
+      "entitlements": "entitlements.plist",
+      "hardenedRuntime": true
     }
   },
   "app": {

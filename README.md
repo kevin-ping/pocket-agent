@@ -2,7 +2,7 @@
 
 > A minimal desktop AI voice companion that lives on your screen — press a key, speak, get things done.
 >
-> **v0.2.2** — see [releases/0.2.2.md](releases/0.2.2.md) for changelog
+> **v0.2.3** — see [releases/0.2.3.md](releases/0.2.3.md) for changelog
 
 Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust**. It connects to a local AI agent gateway ([Hermes](https://github.com/nousresearch/hermes) or [OpenClaw](https://github.com/nousresearch/openclaw)) via SSE streaming for real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
 
@@ -66,8 +66,8 @@ Press **Escape** during recording to cancel. Minimum recording: 1.5s. Maximum: 3
 - **TTS voice response** — edge-tts with automatic language detection (Chinese, English, Japanese, Korean + more)
 - **Session memory** — daily auto-rotating sessions with compressed context summaries
 - **Language tracking** — auto-detects user language per message, follows user's language seamlessly
-- **Local command tags** — `[CMD:...]` for local automation tasks (disabled by default, requires explicit opt-in)
-- **OpenClaw support** — connect to OpenClaw gateway with multi-agent routing (openclaw/zhenyan, openclaw/qingyin, etc.), ENV-driven config, no Settings UI clutter
+- **Local command tags** — `[CMD:...]` for local automation tasks (disabled by default, enable via `ENABLE_LOCAL_COMMANDS=true` in `.env`)
+- **OpenClaw support** — connect to OpenClaw gateway with multi-agent routing (openclaw/zhenyan, openclaw/qingyin, etc.); server connection configured via `.env` only
 - **Multi-language voice** — configure primary + auxiliary TTS voices, auto-switch based on detected language
 - **Configurable hotkey** — capture any key via Settings, no restart required
 - **TTS toggle** — disable voice output for text-only mode
@@ -124,17 +124,18 @@ Pocket Agent communicates via OpenAI-compatible chat completions API over SSE. A
 
 Pocket Agent is a local desktop client. Please understand these boundaries:
 
-- **API key handling** — `API_SERVER_KEY` is read from `.env` (plaintext on disk). Never commit `.env` to version control.
+- **API key handling** — `API_SERVER_KEY` is stored in `.env` (plaintext on disk). Never commit `.env` to version control.
 - **Global input monitoring** — the hotkey listener uses macOS Accessibility APIs (CGEventTap). This grants system-level input monitoring capability. Only run builds you trust.
 - **Microphone access** — audio is captured via CoreAudio and processed **entirely locally** by faster-whisper. No audio data leaves your machine for STT.
 - **Conversation persistence** — sessions are stored in the configured gateway (Hermes: `~/.hermes/sessions/`, OpenClaw: `~/.openclaw/agents/<agent>/sessions/`). These contain full conversation text. Consider disk encryption.
 
 ### Local Command Execution
 
-`[CMD:...]` command execution is **off by default** and must be explicitly enabled via `ENABLE_LOCAL_COMMANDS=true` in `.env`.
+`[CMD:...]` command execution is **off by default**. Enable via `ENABLE_LOCAL_COMMANDS=true` in `.env`.
 
 When disabled:
 - The system prompt does not mention `[CMD:...]` — the LLM has no knowledge of this capability.
+- Enable via `ENABLE_LOCAL_COMMANDS=true` in `.env` (project root for dev, `~/.pocket-agent/.env` for packaged app).
 - Even if the LLM outputs `[CMD:...]` tags (e.g., through prompt injection), they are stripped and never executed.
 
 When enabled, commands run via `sh -c`. Only enable this if you trust your backend and runtime environment.
@@ -145,7 +146,7 @@ Pocket Agent is a **voice interface** — it provides a communication channel be
 
 The responsibility for safe operation is shared across three layers:
 
-1. **Pocket Agent (this app)** — provides the voice/text interface. We add guard rails where practical (e.g., `ENABLE_LOCAL_COMMANDS` default-off) to prevent accidental misuse, but we do not attempt to fully sandbox the agent.
+1. **Pocket Agent (this app)** — provides the voice/text interface. We add guard rails where practical (e.g., `ENABLE_LOCAL_COMMANDS` default-off in `.env`) to prevent accidental misuse, but we do not attempt to fully sandbox the agent.
 2. **Agent Framework (Hermes)** — the backend that hosts the LLM. It decides what the agent can and cannot do: which tools are available, what APIs are accessible, what system prompts govern behavior. Security policies belong here.
 3. **User** — you decide what agent you connect to, what permissions you grant, and what data you share.
 
@@ -154,6 +155,8 @@ The responsibility for safe operation is shared across three layers:
 ---
 
 ## Getting Started
+
+> **For agent-driven installation** (PA and Hermes/OpenClaw on the same machine): see [README_AGENTS.md](README_AGENTS.md)
 
 ### Before You Run
 
@@ -168,7 +171,20 @@ The responsibility for safe operation is shared across three layers:
 - **macOS** (primary supported platform today)
 - **Rust** — [install](https://rustup.rs/)
 - **Node.js** 18+ and npm
-- **Python 3.10+** with `faster-whisper` and `edge-tts`
+- **Python 3.10+** — install voice dependencies:
+
+```bash
+# edge-tts for text-to-speech
+pipx install edge-tts
+
+# faster-whisper for local speech-to-text
+pip install faster-whisper
+```
+
+> For the **packaged app** (built `.dmg`), Python deps must be available globally or via `pipx`.  
+> If `edge-tts` is not in PATH, set `EDGE_TTS_BIN` in `~/.pocket-agent/.env`.  
+> If `faster-whisper` Python is not the system default, set `STT_PYTHON` in `~/.pocket-agent/.env`.
+
 - **Backend gateway** — [Hermes Agent](https://github.com/nousresearch/hermes) (`localhost:8642`) or [OpenClaw](https://github.com/nousresearch/openclaw) (`localhost:18789`)
 
 ### Setup
@@ -187,29 +203,21 @@ npm install
 cp .env.example .env
 ```
 
-Edit `.env`:
+For development (`tauri dev`), edit `.env` in the project root.  
+For the **packaged app** (`.dmg`), create `~/.pocket-agent/.env` instead.
+
+All server connection settings (`API_SERVER`, `API_SERVER_KEY`, `API_AGENT`, `ENABLE_LOCAL_COMMANDS`) are configured **only** via `.env`:
 
 ```bash
-# Backend API server URL
-# Hermes: http://localhost:8642 (default)
-# OpenClaw: http://localhost:18789
+# Required: backend connection
 API_SERVER=http://localhost:8642
+API_SERVER_KEY=           # leave empty for no auth
+API_AGENT=xingyin         # agent name
 
-# API server auth key
-API_SERVER_KEY=your-api-server-key-here
-
-# Agent routing (OpenClaw only - omit for Hermes)
-# Routes via model field: openclaw/<agent>
-# API_AGENT=zhenyan
-
-# edge-tts binary
-EDGE_TTS_BIN=/path/to/edge-tts
-
-# Python with faster_whisper installed
-STT_PYTHON=/path/to/python3
-
-# Local command execution (default: false)
-ENABLE_LOCAL_COMMANDS=false
+# Optional
+# ENABLE_LOCAL_COMMANDS=true
+# EDGE_TTS_BIN=/path/to/edge-tts
+# STT_PYTHON=/path/to/python3
 ```
 
 3. **Run in development mode:**
@@ -235,7 +243,7 @@ If Accessibility was denied initially, re-enable it and restart the app.
 
 Open **Settings** from the tray menu.
 
-- **Backend** — read from `API_SERVER` in `.env` (not configurable in Settings UI)
+- **Server connection** — API server URL, auth key, agent name, and local commands are configured via `.env` only (see `.env.example`)
 - **Avatar image** — optional custom character avatar
 - **Record Key** — capture any key as your push-to-talk hotkey (default: `fn`). Changes take effect immediately.
 - **TTS voices** — primary, auxiliary 1, auxiliary 2 (grouped by language)
