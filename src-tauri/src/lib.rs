@@ -111,7 +111,6 @@ pub fn run() {
             commands::voice::stop_voice_recording,
             commands::voice::cancel_voice_recording,
             commands::voice::get_audio_level,
-            voice::hotkey::capture_hotkey,
             voice::hotkey::start_capture,
             voice::hotkey::poll_capture,
             voice::hotkey::update_hotkey,

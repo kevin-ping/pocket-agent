@@ -11,9 +11,6 @@ static HOTKEY_CODE: AtomicI64 = AtomicI64::new(60);
 /// Prevents the release (flags changed) from toggling recording off immediately
 static MODIFIER_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Channel for capture_hotkey — main tap sends captured keycode here
-static CAPTURE_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<i64>>> = std::sync::Mutex::new(None);
-
 /// Captured key stored by CGEventTap callback, read by poll_capture command.
 /// -1 = not captured yet. Set to keycode on capture, reset to -1 by start_capture.
 static CAPTURED_KEY: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
@@ -22,7 +19,6 @@ static CAPTURED_KEY: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64
 mod macos_raw {
     use std::os::raw::c_void;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::mpsc;
     use std::sync::Arc;
     use tauri::{AppHandle, Emitter};
 
@@ -284,33 +280,6 @@ mod macos_raw {
             .expect("failed to spawn hotkey thread");
     }
 
-    pub fn capture_one_key(timeout_secs: u64) -> Result<(i64, String), String> {
-        let (tx, rx) = mpsc::channel();
-        *super::CAPTURE_TX.lock().unwrap() = Some(tx);
-
-        super::CAPTURING.store(true, Ordering::SeqCst);
-        eprintln!("[capture] waiting for key (timeout={}s)...", timeout_secs);
-
-        let result = match rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
-            Ok(keycode) if keycode < 0 => {
-                eprintln!("[capture] escape received");
-                Err("accessibility_permission_required".to_string())
-            }
-            Ok(keycode) => {
-                let name = keycode_to_name(keycode);
-                eprintln!("[capture] SUCCESS: keycode={} name={}", keycode, name);
-                Ok((keycode, name))
-            }
-            Err(_) => {
-                super::CAPTURING.store(false, Ordering::SeqCst);
-                eprintln!("[capture] TIMEOUT after {}s", timeout_secs);
-                Err("timeout".to_string())
-            }
-        };
-
-        result
-    }
-
     fn keycode_to_name(code: i64) -> String {
         match code {
             // Letters
@@ -384,23 +353,17 @@ pub fn poll_capture() -> Option<(i64, String)> {
     let kc = CAPTURED_KEY.load(Ordering::SeqCst);
     if kc >= 0 {
         CAPTURING.store(false, Ordering::SeqCst);
-        let name = keycode_name(kc).to_string();
-        Some((kc, name))
+        let name = keycode_name(kc);
+        let display = if name.is_empty() { format!("Key({})", kc) } else { name.to_string() };
+        Some((kc, display))
     } else {
         None
     }
 }
 
 #[cfg(target_os = "macos")]
-#[tauri::command]
-pub fn capture_hotkey() -> Result<(i64, String), String> {
-    CAPTURING.store(true, Ordering::SeqCst);
-    let result = macos_raw::capture_one_key(5);
-    CAPTURING.store(false, Ordering::SeqCst);
-    result
-}
-
 fn keycode_name(code: i64) -> &'static str {
+    // Note: returns "" for unknown keys — poll_capture converts to Key(code) fallback
     match code {
         0 => "A", 1 => "S", 2 => "D", 3 => "F",
         4 => "H", 5 => "G", 6 => "Z", 7 => "X",
