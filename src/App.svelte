@@ -28,6 +28,9 @@
   // ─── Chat send ───
   async function handleSendMessage(text: string, userLanguage?: string) {
     chatStore.addUserMessage(text);
+    // Save user message to history
+    invoke('save_chat_message', { role: 'user', content: text }).catch(e => console.error('Failed to save user message:', e));
+    
     chatStore.startStream();
     characterState.toThinking();
     islandMode = 'thinking';
@@ -58,6 +61,17 @@
   let audioLevel = 0;
   let audioLevelTimer: ReturnType<typeof setInterval> | null = null;
   let firstStreamDelta = false;
+  let lastSpeakingHadAudio = true;
+
+  // When typewriter finishes (isStreaming→false) with no audio, stop SPEAKING animation
+  $: if (!$chatStore.isStreaming && $chatStore.messages.length > 0 && !lastSpeakingHadAudio) {
+    const cs = get(characterState);
+    if (cs === 'speaking') {
+      characterState.transition('speaking', 'idle');
+      spiritPhase = 0;
+      lastSpeakingHadAudio = true;  // reset guard
+    }
+  }
 
   // ─── Settings panel ───
   let showSettings = false;
@@ -68,6 +82,14 @@
     // Wait for WebView to process the window resize before rendering the panel
     await new Promise<void>(resolve => requestAnimationFrame(resolve));
     showSettings = true;
+  }
+
+  async function openChatHistory() {
+    try {
+      await invoke('open_chat_history');
+    } catch (e) {
+      console.error('Failed to open chat history:', e);
+    }
   }
 
   async function closeSettings() {
@@ -88,9 +110,10 @@
     unlisten = await Promise.all([
       listen('chat-thinking-start', () => { characterState.toThinking(); chatStore.addThinkingStep('🤔 正在思考...'); }),
       listen<{ emotion: string; total_chars: number; has_audio: boolean }>('chat-speaking-start', (e) => {
+        lastSpeakingHadAudio = e.payload.has_audio;
         characterState.toSpeaking();
         chatStore.clearThinkingSteps();
-        spiritPhase = 0;
+        spiritPhase = 3;
         chatStore.startStream();
         chatStore.startTypewriter(e.payload.emotion);
         if (!e.payload.has_audio && !$layoutStore.expanded) {
@@ -200,6 +223,9 @@
       listen('tray-open-settings', () => {
         openSettings();
       }),
+      listen('tray-open-history', () => {
+        openChatHistory();
+      }),
 
       // API push: external message pushed to PA (e.g. from Hermes cron)
       // Only call speak_text — text display is handled by the speak_text
@@ -271,6 +297,11 @@
 
   onMount(async () => {
     await settingsStore.load();
+    // Apply double-click mode setting to hotkey listener
+    const s = $settingsStore;
+    if (s.double_click_to_record) {
+      await invoke('set_double_click_mode', { enabled: true });
+    }
     await restoreWindowPosition();
     await setupListeners();
     await setupWindowPositionSave();

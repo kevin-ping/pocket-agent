@@ -29,7 +29,15 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle();
 
+            // Initialize chat history database
+            if let Err(e) = commands::history::init_db() {
+                eprintln!("[history] failed to init db: {}", e);
+            }
+
             let config = commands::config::load_config(handle);
+
+            // Apply double-click mode setting
+            voice::hotkey::set_double_click_mode(config.double_click_to_record);
 
             if let (Some(x), Some(y)) = (config.window_x, config.window_y) {
                 if let Some(window) = app.get_webview_window("main") {
@@ -75,9 +83,10 @@ pub fn run() {
 
             // ── Tray icon (right side of menu bar) ──
             let tray_settings = MenuItemBuilder::with_id("tray-settings", "Settings…").build(app)?;
+            let tray_history = MenuItemBuilder::with_id("tray-history", "Chat History").build(app)?;
             let tray_quit = MenuItemBuilder::with_id("tray-quit", "Quit Pocket Agent").build(app)?;
             let tray_menu = MenuBuilder::new(app)
-                .items(&[&tray_settings, &tray_quit])
+                .items(&[&tray_settings, &tray_history, &tray_quit])
                 .build()?;
 
             let _tray = TrayIconBuilder::new()
@@ -88,6 +97,9 @@ pub fn run() {
                     match event.id().as_ref() {
                         "tray-settings" => {
                             let _ = app.emit("tray-open-settings", ());
+                        }
+                        "tray-history" => {
+                            let _ = app.emit("tray-open-history", ());
                         }
                         "tray-quit" => {
                             app.exit(0);
@@ -106,6 +118,8 @@ pub fn run() {
             commands::config::get_config,
             commands::config::save_config,
             commands::config::quit_app,
+            commands::history::open_chat_history,
+            commands::history::save_chat_message,
 
             commands::voice::start_voice_recording,
             commands::voice::stop_voice_recording,
@@ -114,6 +128,7 @@ pub fn run() {
             voice::hotkey::start_capture,
             voice::hotkey::poll_capture,
             voice::hotkey::update_hotkey,
+            voice::hotkey::set_double_click_mode,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

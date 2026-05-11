@@ -131,6 +131,7 @@ pub struct AppConfig {
     pub hotkey_code: i64,
     pub hotkey_name: String,
     pub tts_enabled: bool,
+    pub double_click_to_record: bool,
 }
 
 impl Default for AppConfig {
@@ -150,6 +151,7 @@ impl Default for AppConfig {
             hotkey_code: 60,
             hotkey_name: "RightShift".to_string(),
             tts_enabled: true,
+            double_click_to_record: false,
         }
     }
 }
@@ -174,6 +176,7 @@ pub fn load_config(app: &AppHandle) -> AppConfig {
         hotkey_code: store.get("hotkey_code").and_then(|v| v.as_i64()).unwrap_or(60),
         hotkey_name: store.get("hotkey_name").and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "RightShift".to_string()),
         tts_enabled: store.get("tts_enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+        double_click_to_record: store.get("double_click_to_record").and_then(|v| v.as_bool()).unwrap_or(false),
     }
 }
 
@@ -199,7 +202,12 @@ pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String
     store.set("fixed_lang", serde_json::json!(config.fixed_lang));
     store.set("hotkey_code", serde_json::json!(config.hotkey_code));
     store.set("hotkey_name", serde_json::json!(config.hotkey_name));
+    let old_tts = store.get("tts_enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    if old_tts != config.tts_enabled {
+        println!("[config] voice_output set to: {}", config.tts_enabled);
+    }
     store.set("tts_enabled", serde_json::json!(config.tts_enabled));
+    store.set("double_click_to_record", serde_json::json!(config.double_click_to_record));
     store.save().map_err(|e| e.to_string())?;
     Ok(())
 }

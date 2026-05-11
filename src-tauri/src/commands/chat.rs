@@ -355,7 +355,7 @@ pub async fn send_message(
     tts_aux2_voice: Option<String>,
     user_language: Option<String>,
     fixed_lang: Option<String>,
-    _tts_enabled: Option<bool>,
+    tts_enabled: Option<bool>,
 ) -> Result<(), String> {
     let primary = tts_primary_voice.unwrap_or_else(|| "zh-CN-XiaoxiaoNeural".to_string());
     let aux1 = tts_aux1_voice.unwrap_or_default();
@@ -512,9 +512,30 @@ pub async fn send_message(
         return Ok(());
     }
 
+    // Save assistant message to history
+    if let Err(e) = super::history::save_message("assistant", &full_response) {
+        eprintln!("[history] failed to save assistant message: {}", e);
+    }
+
+    let tts_enabled = tts_enabled.unwrap_or(true);
     let emotion = detect_emotion(&full_response);
-    let voice = select_voice(&full_response, &primary, &aux1, &aux2, &fixed);
-    push_to_self(&full_response, &emotion, &voice);
+    if tts_enabled {
+        let voice = select_voice(&full_response, &primary, &aux1, &aux2, &fixed);
+        push_to_self(&full_response, &emotion, &voice);
+    } else {
+        // TTS disabled: show typewriter effect and speaking animation, but don't generate audio
+        // Emit speaking-start to trigger typewriter and animation
+        let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
+            emotion: emotion.clone(),
+            total_chars: full_response.chars().count(),
+            has_audio: false,
+        });
+        // Stream the text character by character for typewriter effect
+        for ch in full_response.chars() {
+            let _ = app.emit("chat-stream", ChatStreamPayload { delta: ch.to_string() });
+        }
+        let _ = app.emit("chat-stream-end", ());
+    }
 
     Ok(())
 }
@@ -534,9 +555,23 @@ pub async fn speak_text(
     tts_primary_voice: Option<String>,
     tts_aux1_voice: Option<String>,
     tts_aux2_voice: Option<String>,
-    _tts_enabled: Option<bool>,
+    tts_enabled: Option<bool>,
 ) -> Result<(), String> {
     if text.trim().is_empty() { return Ok(()); }
+
+    let tts_enabled = tts_enabled.unwrap_or(true);
+    if !tts_enabled {
+        // TTS disabled: show typewriter effect and speaking animation, but don't generate audio
+        let emotion_str = emotion.unwrap_or_else(|| detect_emotion(&text));
+        let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
+            emotion: emotion_str,
+            total_chars: text.chars().count(),
+            has_audio: false,
+        });
+        let _ = app.emit("chat-stream", ChatStreamPayload { delta: text.clone() });
+        let _ = app.emit("chat-stream-end", ());
+        return Ok(());
+    }
 
     let format = tts_format.unwrap_or_else(|| "wav".to_string());
     let primary = tts_primary_voice.unwrap_or_else(|| "zh-CN-XiaoxiaoNeural".to_string());

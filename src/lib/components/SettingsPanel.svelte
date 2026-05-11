@@ -63,10 +63,17 @@
   let local = $state<AppSettings>({ ...$settingsStore });
 
 
-  // Sync from store when panel opens
+  // Initialize local state from store when panel opens
+  // Only sync on initial open, not continuously
+  let panelWasVisible = false;
   $effect(() => {
-    if (visible) {
-      Object.assign(local, $settingsStore);
+    if (visible && !panelWasVisible) {
+      // Panel just opened: load from store
+      local = { ...$settingsStore };
+      panelWasVisible = true;
+    } else if (!visible && panelWasVisible) {
+      // Panel just closed: reset flag
+      panelWasVisible = false;
     }
   });
 
@@ -159,10 +166,9 @@
   async function save() {
     saveError = '';
     try {
-      // Close first to avoid $effect flash from store update
+      await settingsStore.save(local);
       visible = false;
       onclose?.();
-      await settingsStore.save(local);
     } catch (e) {
       saveError = '保存失败，请重试';
       console.error('[settings] save error:', e);
@@ -242,6 +248,26 @@
         {:else}
           <button class="capture-btn" onclick={startCapture}>{local.hotkey_name || $settingsStore.hotkey_name || 'RightShift'}</button>
         {/if}
+      </div>
+
+      <div class="field-row">
+        <span class="field-label">Double-Click Record</span>
+        <div class="toggle-wrap">
+          <input type="checkbox" id="double-click-record" class="toggle-input" bind:checked={local.double_click_to_record} />
+          <label for="double-click-record" class="toggle-track">
+            <span class="toggle-thumb"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <span class="field-label">Voice Output</span>
+        <div class="toggle-wrap">
+          <input type="checkbox" id="tts-enabled" class="toggle-input" bind:checked={local.tts_enabled} />
+          <label for="tts-enabled" class="toggle-track">
+            <span class="toggle-thumb"></span>
+          </label>
+        </div>
       </div>
 
       <!-- ── Appearance section ── -->
@@ -333,16 +359,6 @@
           <option value="wav">{t($settingsStore.tts_primary_voice).wavLossless}</option>
           <option value="mp3">{t($settingsStore.tts_primary_voice).mp3Compact}</option>
         </select>
-      </div>
-
-      <div class="field-row">
-        <span class="field-label">Voice Output</span>
-        <div class="toggle-wrap">
-          <input type="checkbox" id="tts-enabled" class="toggle-input" bind:checked={local.tts_enabled} />
-          <label for="tts-enabled" class="toggle-track">
-            <span class="toggle-thumb"></span>
-          </label>
-        </div>
       </div>
 
       <p class="hint">{t($settingsStore.tts_primary_voice).autoDetectHint}</p>

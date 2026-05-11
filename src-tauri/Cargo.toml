@@ -38,6 +38,12 @@ rodio = "0.19"
 # Regex for [CMD:...] tag parsing
 regex = "1"
 
+# SQLite for chat history
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Home directory utilities
+dirs = "5.0"
+
 # Environment variables from .env
 dotenvy = "0.15"
 

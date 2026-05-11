@@ -16,6 +16,7 @@ export interface AppSettings {
   hotkey_code: number;
   hotkey_name: string;
   tts_enabled: boolean;
+  double_click_to_record: boolean;
 }
 
 const defaults: AppSettings = {
@@ -33,6 +34,7 @@ const defaults: AppSettings = {
   hotkey_code: 60,
   hotkey_name: "RightShift",
   tts_enabled: true,
+  double_click_to_record: false,
 };
 
 function createSettingsStore() {
@@ -52,17 +54,37 @@ function createSettingsStore() {
     },
 
     save: async (partial: Partial<AppSettings>): Promise<void> => {
-      let next: AppSettings = defaults;
+      let next: AppSettings | null = null;
+      let oldDoubleClickValue: boolean | undefined;
+      
+      // Merge partial into current store state
       update((current) => {
+        oldDoubleClickValue = current.double_click_to_record;
         next = { ...current, ...partial };
         return current; // Don't update store until save succeeds
       });
+      
+      // Safety check
+      if (!next) {
+        throw new Error('[settings] merge failed');
+      }
+      
       try {
+        // Save complete config to Rust
         await invoke('save_config', { config: next });
-        set(next); // Only update store after successful save
+        
+        // Update store with merged result
+        set(next);
+        
+        
+        // Notify Rust if double-click mode changed
+        if (partial.double_click_to_record !== undefined && 
+            oldDoubleClickValue !== partial.double_click_to_record) {
+          await invoke('set_double_click_mode', { enabled: partial.double_click_to_record });
+        }
       } catch (e) {
         console.error('[settings] save failed:', e);
-        throw e; // Let caller handle (e.g., show error toast)
+        throw e;
       }
     },
   };

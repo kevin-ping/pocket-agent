@@ -33,9 +33,16 @@ function createLayoutStore() {
       const scale = monitor.scaleFactor;
       const monitorW = monitor.workArea.size.width / scale;
       const logicalX = pos.x / scale;
-      const avatarCenterX = logicalX + AVATAR_W / 2;
-      const distToRight = monitorW - avatarCenterX;
-      return distToRight < EDGE_THRESHOLD ? 'right' : 'left';
+      
+      // Calculate if chat box would overflow on the right
+      // avatarX + avatarWidth + gap + chatWidth > screenWidth => put chat on left
+      const rightEdge = logicalX + AVATAR_W + GAP + CHAT_W;
+      
+      if (rightEdge > monitorW) {
+        return 'right'; // Chat on left side
+      } else {
+        return 'left'; // Chat on right side (default)
+      }
     } catch {
       return 'left';
     }

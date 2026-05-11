@@ -9,6 +9,52 @@
 
   let inputText = $state('');
   let contentEl: HTMLDivElement | undefined;
+  let panelEl: HTMLDivElement | undefined;
+
+  // Sanitize HTML: only allow safe tags and attributes
+  function sanitizeHtml(html: string): string {
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    
+    // Remove all script tags and event handlers
+    const scripts = div.querySelectorAll('script');
+    scripts.forEach(script => script.remove());
+    
+    // Remove event handlers from all elements
+    const allElements = div.querySelectorAll('*');
+    allElements.forEach(el => {
+      // Remove all on* attributes
+      Array.from(el.attributes).forEach(attr => {
+        if (attr.name.startsWith('on')) {
+          el.removeAttribute(attr.name);
+        }
+      });
+      
+      // Only allow specific tags
+      const allowedTags = ['A', 'BR', 'P', 'SPAN', 'STRONG', 'EM', 'B', 'I', 'U', 'CODE', 'PRE'];
+      if (!allowedTags.includes(el.tagName)) {
+        // Replace with text content
+        const text = document.createTextNode(el.textContent || '');
+        el.parentNode?.replaceChild(text, el);
+      }
+    });
+    
+    // Only allow href attribute on links
+    const links = div.querySelectorAll('a');
+    links.forEach(link => {
+      const href = link.getAttribute('href');
+      const linkText = link.textContent || href || '';
+      Array.from(link.attributes).forEach(attr => link.removeAttribute(attr.name));
+      if (href && (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('mailto:'))) {
+        link.setAttribute('href', href);
+        link.setAttribute('target', '_blank');
+        link.setAttribute('rel', 'noopener noreferrer');
+      }
+            link.textContent = linkText;
+    });
+    
+    return div.innerHTML;
+  }
 
   // During thinking/tool phase, show intermediate steps instead of empty box
   let displayContent = $derived($chatStore.isStreaming && !$chatStore.streamingContent
@@ -19,6 +65,28 @@
   $effect(() => {
     if ($chatStore.isStreaming && contentEl) {
       contentEl.scrollTop = contentEl.scrollHeight;
+    }
+  });
+
+  // Adjust position to prevent overflow
+  $effect(() => {
+    if (panelEl) {
+      const rect = panelEl.getBoundingClientRect();
+      const windowWidth = window.innerWidth;
+      
+      // If panel overflows on the right, move it to the left
+      if (side === 'right' && rect.right > windowWidth - 10) {
+        panelEl.style.marginRight = 'auto';
+        panelEl.style.marginLeft = '10px';
+      }
+      // If panel overflows on the left, move it to the right
+      else if (side === 'left' && rect.left < 10) {
+        panelEl.style.marginLeft = 'auto';
+        panelEl.style.marginRight = '10px';
+      } else {
+        panelEl.style.marginRight = '';
+        panelEl.style.marginLeft = '';
+      }
     }
   });
 
@@ -43,6 +111,7 @@
 </script>
 
 <div
+  bind:this={panelEl}
   class="chat-panel tail-{side}"
   in:fly={{ x: side === 'right' ? -16 : 16, duration: 200, opacity: 0 }}
   out:fly={{ x: side === 'right' ? -12 : 12, duration: 160, opacity: 0 }}
@@ -63,11 +132,11 @@
         <span class="cursor" aria-hidden="true">▋</span>
       {:else if $chatStore.isStreaming}
         <p class="message-text" class:error-text={isError}>
-          {$chatStore.streamingContent}<span class="cursor" aria-hidden="true">▋</span>
+          {@html sanitizeHtml($chatStore.streamingContent)}<span class="cursor" aria-hidden="true">▋</span>
         </p>
       {:else}
         <p class="message-text" class:error-text={isError}>
-          {$chatStore.error ?? $chatStore.messages.at(-1)?.content ?? t($settingsStore.tts_primary_voice).hint.replace("{key}", $settingsStore.hotkey_name)}
+          {@html sanitizeHtml($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? t($settingsStore.tts_primary_voice).hint.replace("{key}", $settingsStore.hotkey_name))}
         </p>
       {/if}
     </div>
@@ -205,6 +274,15 @@
     color: rgba(232, 232, 240, 0.92);
     word-break: break-word;
     white-space: pre-wrap;
+  }
+  .message-text :global(a) {
+    color: rgba(124, 158, 255, 0.9);
+    text-decoration: underline;
+    cursor: pointer;
+    transition: color 0.15s;
+  }
+  .message-text :global(a):hover {
+    color: rgba(160, 168, 255, 1);
   }
   .error-text { color: rgba(255, 120, 120, 0.9) !important; }
 

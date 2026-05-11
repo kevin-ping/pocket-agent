@@ -11,6 +11,15 @@ static HOTKEY_CODE: AtomicI64 = AtomicI64::new(60);
 /// Prevents the release (flags changed) from toggling recording off immediately
 static MODIFIER_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Double-click detection: timestamp of last hotkey press (in milliseconds)
+static LAST_HOTKEY_PRESS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Double-click detection: threshold in milliseconds
+const DOUBLE_CLICK_THRESHOLD_MS: u64 = 300;
+
+/// Double-click to record mode: enabled/disabled
+static DOUBLE_CLICK_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Captured key stored by CGEventTap callback, read by poll_capture command.
 /// -1 = not captured yet. Set to keycode on capture, reset to -1 by start_capture.
 static CAPTURED_KEY: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
@@ -151,18 +160,49 @@ mod macos_raw {
         }
 
         if etype == KCG_EVENT_KEY_DOWN {
-            // Regular key (fn/globe) — toggle on press
-            if !active {
-                if ctx.is_active.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                    crate::voice::record::pre_start();
-                    crate::commands::chat::stop_audio_queue();
-                    eprintln!("[hotkey] hotkey-down (toggle ON)");
-                    let _ = ctx.app.emit("fn-key-down", ());
+            // Regular key (fn/globe) — check double-click mode setting
+            let double_click_mode = super::DOUBLE_CLICK_MODE.load(Ordering::SeqCst);
+            
+            if double_click_mode {
+                // Double-click mode: detect double-click
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let last_press = super::LAST_HOTKEY_PRESS.load(Ordering::SeqCst);
+                let is_double_click = (now - last_press) < super::DOUBLE_CLICK_THRESHOLD_MS && last_press > 0;
+                super::LAST_HOTKEY_PRESS.store(now, Ordering::SeqCst);
+
+                if is_double_click {
+                    // Double-click: toggle recording state
+                    if !active {
+                        if ctx.is_active.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                            crate::voice::record::pre_start();
+                            crate::commands::chat::stop_audio_queue();
+                            eprintln!("[hotkey] double-click mode: start recording");
+                            let _ = ctx.app.emit("fn-key-down", ());
+                        }
+                    } else {
+                        if ctx.is_active.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                            eprintln!("[hotkey] double-click mode: stop recording");
+                            let _ = ctx.app.emit("fn-key-up", ());
+                        }
+                    }
                 }
             } else {
-                if ctx.is_active.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                    eprintln!("[hotkey] hotkey-up (toggle OFF)");
-                    let _ = ctx.app.emit("fn-key-up", ());
+                // Single-click mode: toggle on every press (start/stop)
+                if !active {
+                    if ctx.is_active.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                        crate::voice::record::pre_start();
+                        crate::commands::chat::stop_audio_queue();
+                        eprintln!("[hotkey] single-click mode: start recording");
+                        let _ = ctx.app.emit("fn-key-down", ());
+                    }
+                } else {
+                    if ctx.is_active.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                        eprintln!("[hotkey] single-click mode: stop recording");
+                        let _ = ctx.app.emit("fn-key-up", ());
+                    }
                 }
             }
         } else if etype == KCG_EVENT_FLAGS_CHANGED {
@@ -171,22 +211,54 @@ mod macos_raw {
             if keycode == 179 {
                 return event;
             }
-            // Modifier key (Shift/Ctrl/Cmd/Option) — only toggle on press, ignore release
+            // Modifier key (Shift/Ctrl/Cmd/Option) — check for double-click
             let held = super::MODIFIER_HELD.load(Ordering::SeqCst);
             if !held {
                 // This is a press event (first flags changed for this key)
                 super::MODIFIER_HELD.store(true, Ordering::SeqCst);
-                if !active {
-                    if ctx.is_active.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                        crate::voice::record::pre_start();
-                        crate::commands::chat::stop_audio_queue();
-                        eprintln!("[hotkey] modifier-down (toggle ON)");
-                        let _ = ctx.app.emit("fn-key-down", ());
+                
+                let double_click_mode = super::DOUBLE_CLICK_MODE.load(Ordering::SeqCst);
+                
+                if double_click_mode {
+                    // Double-click mode: detect double-click
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let last_press = super::LAST_HOTKEY_PRESS.load(Ordering::SeqCst);
+                    let is_double_click = (now - last_press) < super::DOUBLE_CLICK_THRESHOLD_MS && last_press > 0;
+                    super::LAST_HOTKEY_PRESS.store(now, Ordering::SeqCst);
+
+                    if is_double_click {
+                        // Double-click: toggle recording state
+                        if !active {
+                            if ctx.is_active.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                                crate::voice::record::pre_start();
+                                crate::commands::chat::stop_audio_queue();
+                                eprintln!("[hotkey] modifier double-click mode: start recording");
+                                let _ = ctx.app.emit("fn-key-down", ());
+                            }
+                        } else {
+                            if ctx.is_active.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                                eprintln!("[hotkey] modifier double-click mode: stop recording");
+                                let _ = ctx.app.emit("fn-key-up", ());
+                            }
+                        }
                     }
                 } else {
-                    if ctx.is_active.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                        eprintln!("[hotkey] modifier-down (toggle OFF)");
-                        let _ = ctx.app.emit("fn-key-up", ());
+                    // Single-click mode: toggle on every press (start/stop)
+                    if !active {
+                        if ctx.is_active.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                            crate::voice::record::pre_start();
+                            crate::commands::chat::stop_audio_queue();
+                            eprintln!("[hotkey] modifier single-click mode: start recording");
+                            let _ = ctx.app.emit("fn-key-down", ());
+                        }
+                    } else {
+                        if ctx.is_active.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                            eprintln!("[hotkey] modifier single-click mode: stop recording");
+                            let _ = ctx.app.emit("fn-key-up", ());
+                        }
                     }
                 }
             } else {
@@ -409,6 +481,13 @@ pub fn update_hotkey(code: i64) -> String {
         eprintln!("[hotkey] hotkey updated: {} -> {}", old, code);
     }
     new_name.to_string()
+}
+
+/// Update double-click to record mode
+#[tauri::command]
+pub fn set_double_click_mode(enabled: bool) {
+    DOUBLE_CLICK_MODE.store(enabled, Ordering::SeqCst);
+    eprintln!("[hotkey] double_click_mode set to: {}", enabled);
 }
 
 #[cfg(target_os = "macos")]
