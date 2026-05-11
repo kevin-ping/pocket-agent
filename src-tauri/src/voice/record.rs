@@ -192,22 +192,18 @@ pub fn stop_recording_no_handle() -> Result<String, String> {
 }
 
 fn stop_recording_internal() -> Result<String, String> {
-    if let Some(daemon) = DAEMON.get() {
-        if !daemon.start_ack.load(Ordering::Acquire) {
-            return Err("not recording".into());
-        }
-        daemon.start_ack.store(false, Ordering::Release);
-        let (resp_tx, resp_rx) = mpsc::channel();
-        daemon
-            .cmd_tx
-            .send(DaemonCmd::Stop(resp_tx))
-            .map_err(|e| format!("send: {}", e))?;
-        match resp_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            Ok(result) => result,
-            Err(_) => Err("stop timeout".into()),
-        }
-    } else {
-        Err("audio not initialized".into())
+    let daemon = DAEMON.get().ok_or_else(|| "audio not initialized".to_string())?;
+    daemon.start_ack.store(false, Ordering::Release);
+    let (resp_tx, resp_rx) = mpsc::channel();
+    daemon
+        .cmd_tx
+        .send(DaemonCmd::Stop(resp_tx))
+        .map_err(|e| format!("send: {}", e))?;
+    // Daemon may still be in Phase 1 (build_stream ~200ms) when Stop arrives —
+    // give it enough headroom to walk through Phase 1 → Phase 2 → Phase 3 → finalize.
+    match resp_rx.recv_timeout(std::time::Duration::from_secs(8)) {
+        Ok(result) => result,
+        Err(_) => Err("stop timeout".into()),
     }
 }
 
@@ -304,8 +300,12 @@ fn daemon_loop(
                             eprintln!("[record] recording stopped");
                             break;
                         }
-                        Ok(DaemonCmd::Start(_)) => {
-                            // Spurious Start while recording - ignore
+                        Ok(DaemonCmd::Start(resp)) => {
+                            // Spurious Start while recording — already started, ack immediately
+                            // so the caller's recv_timeout doesn't hang.
+                            if let Some(r) = resp {
+                                let _ = r.send(Ok(()));
+                            }
                         }
                         Err(_) => return,
                     }

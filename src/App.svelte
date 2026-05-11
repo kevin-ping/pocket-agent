@@ -188,7 +188,13 @@
         spiritPhase = 1;
         characterState.toThinking();
         if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
-        invoke('stop_voice_recording').catch(console.error);
+        invoke('stop_voice_recording').catch((e) => {
+          console.warn('[stop_voice_recording]', e);
+          islandMode = 'idle';
+          spiritPhase = 0;
+          characterState.toIdle();
+          chatStore.setError(`录音停止失败: ${e}`);
+        });
       }),
       listen('voice-cancel', () => {
         islandMode = 'idle';

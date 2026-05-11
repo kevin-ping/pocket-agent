@@ -44,20 +44,31 @@ pub fn start_voice_recording(
     app: AppHandle,
     state: State<'_, RecordingState>,
 ) -> Result<(), String> {
-    let mut guard = state
-        .handle
-        .lock()
-        .map_err(|_| "录音状态锁定失败".to_string())?;
-
-    if guard.is_some() {
-        return Ok(());
+    {
+        let guard = state
+            .handle
+            .lock()
+            .map_err(|_| "录音状态锁定失败".to_string())?;
+        if guard.is_some() {
+            return Ok(());
+        }
     }
 
     let handle = match take_pre_started() {
         Some(h) => h,
         None => start_recording()?,
     };
-    *guard = Some(handle);
+
+    {
+        let mut guard = state
+            .handle
+            .lock()
+            .map_err(|_| "录音状态锁定失败".to_string())?;
+        if guard.is_some() {
+            return Ok(());
+        }
+        *guard = Some(handle);
+    }
 
     // Mark timeout as active
     state.timeout_active.store(true, Ordering::SeqCst);
