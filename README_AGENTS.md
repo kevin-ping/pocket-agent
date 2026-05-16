@@ -9,7 +9,7 @@ Pocket Agent (PA) is a macOS desktop voice companion. It connects to an AI agent
 - **GitHub**: https://github.com/kevin-ping/pocket-agent
 - **Stack**: Tauri 2 + Svelte 5 + Rust
 - **Platform**: macOS 12+ (Intel and Apple Silicon)
-- **Current version**: 0.2.3
+- **Current version**: 0.2.4
 
 ---
 
@@ -138,19 +138,40 @@ On first launch, grant these in System Settings > Privacy and Security:
 ### Verify Everything Works
 
 1. PA window appears on screen
-2. Press the hotkey (default: fn key) — recording indicator appears
-3. Speak, release hotkey — STT transcribes, LLM responds with voice
-4. Settings panel opens from menu bar tray icon
+2. Press the hotkey (default: fn key) once — recording indicator appears
+3. Press the hotkey again — recording stops, STT transcribes, LLM responds with voice
+4. While PA is speaking, press the hotkey and verify voice playback stops immediately before recording begins
+5. Press Escape during recording — capture cancels cleanly
+6. Settings panel opens from menu bar tray icon
 
 ---
 
 ## Troubleshooting
 
-- **No hotkey response** — Accessibility permission granted? Restart PA after enabling.
+- **No hotkey response in local dev** — Accessibility alone is not enough. The terminal app that launched `npm run tauri dev` (for example iTerm2) also needs **Input Monitoring** permission. Restart the terminal after granting it.
+- **No hotkey response only after changing to a modifier** — ensure you are on v0.2.4+, which fixes the post-capture release event swallowing the first real press.
+- **fn works over SSH but double-triggers** — ensure you are on v0.2.4+, which suppresses the duplicate SSH `KEY_DOWN` after the `FLAGS_CHANGED` press path.
+- **PA keeps speaking after hotkey press** — ensure you are on v0.2.4+, which synchronously interrupts the active rodio sink instead of waiting for the playback thread queue.
 - **STT fails** — faster-whisper installed? STT_PYTHON path correct?
 - **No voice output** — edge-tts in PATH? EDGE_TTS_BIN correct?
 - **Cannot connect to backend** — Gateway running? API_SERVER and API_SERVER_KEY match?
 - **Build fails** — cargo check and npm run build both pass? Rust and Node versions current?
+
+---
+
+## FAQ: local vs SSH hotkey behavior
+
+### Local `tauri dev` needs more than Accessibility
+When PA is started from a terminal app, macOS attributes the keyboard-monitoring path to that terminal. Grant **Input Monitoring** to iTerm2 / Terminal.app / your launcher shell or local hotkeys may appear dead even though SSH launches work.
+
+### `fn` does not have one stable macOS keycode
+On the same Mac, `fn` may surface as `FLAGS_CHANGED` keycode `63` or `KEY_DOWN` keycode `179` depending on launch/session context. v0.2.4 normalizes both to canonical `179` and handles both event shapes.
+
+### SSH launches can emit duplicate events
+In some SSH-launched runs, one physical modifier press produces both `FLAGS_CHANGED` and an immediate `KEY_DOWN`. v0.2.4 suppresses the duplicate `KEY_DOWN` so recording does not start and stop on the same press.
+
+### Interrupting speech must be synchronous
+If Stop is only queued onto the audio thread, `rodio::Sink::sleep_until_end()` can keep the current TTS clip playing. v0.2.4 stores the current sink and calls `sink.stop()` synchronously when the hotkey starts a new recording.
 
 ---
 

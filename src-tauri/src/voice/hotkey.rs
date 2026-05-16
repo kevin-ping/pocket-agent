@@ -1,5 +1,5 @@
 use tauri::AppHandle;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 
 /// Global flag: when true, the main hotkey listener ignores keys (capture in progress)
 static CAPTURING: AtomicBool = AtomicBool::new(false);
@@ -10,6 +10,19 @@ static HOTKEY_CODE: AtomicI64 = AtomicI64::new(60);
 /// Tracks whether a modifier-key hotkey (e.g. RightShift) is currently held down
 /// Prevents the release (flags changed) from toggling recording off immediately
 static MODIFIER_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// After capturing a modifier hotkey, swallow the very next FLAGS_CHANGED release event
+/// so it doesn't immediately toggle recording or poison MODIFIER_HELD state.
+static SUPPRESS_CAPTURE_RELEASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// macOS CGEventTap handle stored globally so the callback can re-enable the tap
+/// after kCGEventTapDisabledByTimeout / kCGEventTapDisabledByUserInput.
+static EVENT_TAP_PTR: AtomicUsize = AtomicUsize::new(0);
+
+/// When a modifier hotkey press is handled via FLAGS_CHANGED, some environments
+/// (notably SSH-launched app sessions) also deliver an immediate KEY_DOWN for the
+/// same physical press. Swallow that one duplicate to avoid start-then-stop.
+static SUPPRESS_NEXT_KEYDOWN: AtomicBool = AtomicBool::new(false);
 
 /// Double-click detection: timestamp of last hotkey press (in milliseconds)
 static LAST_HOTKEY_PRESS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -38,6 +51,8 @@ mod macos_raw {
     const KCG_HID_EVENT_TAP: u32 = 0;
     const KCG_HEAD_INSERT_EVENT_TAP: u32 = 0;
     const KCG_EVENT_TAP_OPTION_LISTEN_ONLY: u32 = 1;
+    const KCG_EVENT_TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFFFFFE;
+    const KCG_EVENT_TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFFFFFF;
     const ESC_KEYCODE: i64 = 53;
 
     type CGEventRef = *mut c_void;
@@ -81,6 +96,7 @@ mod macos_raw {
 
         fn CFRelease(cf: *mut c_void);
         fn CFMachPortInvalidate(port: CFMachPortRef);
+        fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     }
 
     struct HotkeyCtx {
@@ -94,6 +110,15 @@ mod macos_raw {
         event: CGEventRef,
         user_info: *mut c_void,
     ) -> CGEventRef {
+        if etype == KCG_EVENT_TAP_DISABLED_BY_TIMEOUT || etype == KCG_EVENT_TAP_DISABLED_BY_USER_INPUT {
+            let tap = super::EVENT_TAP_PTR.load(Ordering::SeqCst) as CFMachPortRef;
+            if !tap.is_null() {
+                CGEventTapEnable(tap, true);
+                eprintln!("[hotkey] event tap disabled by macOS, re-enabled");
+            }
+            return event;
+        }
+
         if etype != KCG_EVENT_KEY_DOWN && etype != KCG_EVENT_KEY_UP && etype != KCG_EVENT_FLAGS_CHANGED {
             return event;
         }
@@ -105,23 +130,27 @@ mod macos_raw {
                 eprintln!("[capture] event: etype={}, kc={}", etype, kc);
                 // Skip FLAGS_CHANGED for non-modifier keys (fn/globe key fires both,
                 // prefer the KEY_DOWN which has the canonical keycode 179)
-                if etype == KCG_EVENT_FLAGS_CHANGED && !(kc == 55 || kc == 56 || kc == 57 || kc == 58 || kc == 59 || kc == 60) {
+                if etype == KCG_EVENT_FLAGS_CHANGED && !(kc == 55 || kc == 56 || kc == 57 || kc == 58 || kc == 59 || kc == 60 || kc == 63) {
                     return event;
                 }
                 if kc != ESC_KEYCODE {
                     super::CAPTURING.store(false, Ordering::SeqCst);
-                    // If we captured a modifier key via FLAGS_CHANGED, mark it as held
-                    // so the subsequent release event doesn't trigger a false toggle
+                    // If we captured a modifier key via FLAGS_CHANGED, swallow the
+                    // subsequent release event once. Do NOT poison MODIFIER_HELD, or the
+                    // first real press of the new hotkey gets mistaken for a release.
                     if etype == KCG_EVENT_FLAGS_CHANGED {
-                        super::MODIFIER_HELD.store(true, Ordering::SeqCst);
+                        super::SUPPRESS_CAPTURE_RELEASE.store(true, Ordering::SeqCst);
                     }
+                    // Normalize fn key keycode: FLAGS_CHANGED reports 63, KEY_DOWN reports 179
+                    // Use 179 as canonical so hotkey matching works consistently
+                    let store_kc = if kc == 63 { 179 } else { kc };
                     // Store in atomic for poll_capture AND emit event
                     // (belt & suspenders — poll is the primary path)
-                    super::CAPTURED_KEY.store(kc, Ordering::SeqCst);
-                    let name = keycode_to_name(kc);
+                    super::CAPTURED_KEY.store(store_kc, Ordering::SeqCst);
+                    let name = keycode_to_name(store_kc);
                     let ctx = &*(user_info as *const HotkeyCtx);
-                    let _ = ctx.app.emit("hotkey-captured", (kc, name));
-                    eprintln!("[capture] keycode={} stored + emitted", kc);
+                    let _ = ctx.app.emit("hotkey-captured", (store_kc, name));
+                    eprintln!("[capture] keycode={} (raw={}) stored + emitted", store_kc, kc);
                 } else {
                     // Escape cancels capture
                     super::CAPTURING.store(false, Ordering::SeqCst);
@@ -134,10 +163,18 @@ mod macos_raw {
             return event;
         }
 
-        let keycode = CGEventGetIntegerValueField(event, KCG_KEYBOARD_EVENT_KEYCODE);
+        let mut keycode = CGEventGetIntegerValueField(event, KCG_KEYBOARD_EVENT_KEYCODE);
+        // Normalize fn key: FLAGS_CHANGED reports kc=63, canonical is 179
+        if keycode == 63 { keycode = 179; }
 
         let ctx = &*(user_info as *const HotkeyCtx);
         let active = ctx.is_active.load(Ordering::SeqCst);
+
+        // Swallow the immediate release that follows modifier-hotkey capture even if
+        // HOTKEY_CODE has not been updated to the newly captured key yet.
+        if etype == KCG_EVENT_FLAGS_CHANGED && super::SUPPRESS_CAPTURE_RELEASE.swap(false, Ordering::SeqCst) {
+            return event;
+        }
 
         // Escape during recording -> cancel
         if keycode == ESC_KEYCODE && etype == KCG_EVENT_KEY_DOWN && active {
@@ -160,6 +197,9 @@ mod macos_raw {
         }
 
         if etype == KCG_EVENT_KEY_DOWN {
+            if super::SUPPRESS_NEXT_KEYDOWN.swap(false, Ordering::SeqCst) {
+                return event;
+            }
             // Regular key (fn/globe) — check double-click mode setting
             let double_click_mode = super::DOUBLE_CLICK_MODE.load(Ordering::SeqCst);
             
@@ -206,16 +246,13 @@ mod macos_raw {
                 }
             }
         } else if etype == KCG_EVENT_FLAGS_CHANGED {
-            // Skip keys that also fire KEY_DOWN (e.g. fn/globe key = 179)
-            // These are already handled above by the KEY_DOWN path
-            if keycode == 179 {
-                return event;
-            }
-            // Modifier key (Shift/Ctrl/Cmd/Option) — check for double-click
+            // fn key (179) locally ONLY fires FLAGS_CHANGED (never KEY_DOWN),
+            // so it must be handled right here in the modifier path.
             let held = super::MODIFIER_HELD.load(Ordering::SeqCst);
             if !held {
                 // This is a press event (first flags changed for this key)
                 super::MODIFIER_HELD.store(true, Ordering::SeqCst);
+                super::SUPPRESS_NEXT_KEYDOWN.store(true, Ordering::SeqCst);
                 
                 let double_click_mode = super::DOUBLE_CLICK_MODE.load(Ordering::SeqCst);
                 
@@ -318,6 +355,8 @@ mod macos_raw {
             return;
         }
 
+        super::EVENT_TAP_PTR.store(tap as usize, Ordering::SeqCst);
+
         // Tap created successfully — spawn run loop thread to process events.
         // The tap is already warm; just attach it to the thread's run loop.
         // Cast raw ptrs to usize to satisfy Send bound (*mut c_void is !Send)
@@ -386,6 +425,7 @@ mod macos_raw {
             115 => "Home".into(),
             // Special
             60 => "RightShift".into(),
+            63 => "fn".into(),
             179 => "fn".into(),
             _ => "".into(),
         }
@@ -412,6 +452,9 @@ pub fn spawn_hotkey_listener(app: AppHandle, hotkey_code: i64) {
 pub fn start_capture() {
     CAPTURED_KEY.store(-1, Ordering::SeqCst);
     CAPTURING.store(true, Ordering::SeqCst);
+    SUPPRESS_CAPTURE_RELEASE.store(false, Ordering::SeqCst);
+    SUPPRESS_NEXT_KEYDOWN.store(false, Ordering::SeqCst);
+    MODIFIER_HELD.store(false, Ordering::SeqCst);
     eprintln!("[capture] capture mode activated, waiting for key...");
 }
 
