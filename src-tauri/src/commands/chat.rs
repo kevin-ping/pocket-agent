@@ -7,6 +7,8 @@ use std::process::Command;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
+
+static CURRENT_AUDIO_SINK: std::sync::OnceLock<std::sync::Mutex<Option<std::sync::Arc<rodio::Sink>>>> = std::sync::OnceLock::new();
 use tauri::{AppHandle, Emitter, State};
 
 /// Maximum concurrent audio items in the pipeline.
@@ -31,6 +33,10 @@ static AUDIO_SENDER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sende
 static AUDIO_GENERATION: AtomicU64 = AtomicU64::new(0);
 static AUDIO_QUEUE_DEPTH: AtomicUsize = AtomicUsize::new(0);
 
+fn current_audio_sink() -> &'static Mutex<Option<std::sync::Arc<rodio::Sink>>> {
+    CURRENT_AUDIO_SINK.get_or_init(|| Mutex::new(None))
+}
+
 fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
     AUDIO_SENDER.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::channel::<AudioCmd>();
@@ -40,16 +46,26 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                 for cmd in rx {
                     match cmd {
                         AudioCmd::Stop => {
-                            eprintln!("[AUDIO] stop requested");
-                            crate::commands::chat::audio_queue_reset();
+                            // stop_audio_queue() already interrupted the current sink and
+                            // invalidated queued generations synchronously on the caller thread.
                         }
                         AudioCmd::Speak { text, emotion, voice, format, app, generation } => {
+                            if generation != AUDIO_GENERATION.load(Ordering::SeqCst) {
+                                audio_queue_release(generation);
+                                continue;
+                            }
+
                             let (rate, volume) = emotion_to_prosody(&emotion);
                             let char_count = text.chars().count();
 
                             // 1. Generate TTS first (takes time, don't start typewriter yet)
                             let tts_file = tts_path(&format);
                             let tts_ok = generate_tts_to(&text, &tts_file, &voice, rate, volume);
+
+                            if generation != AUDIO_GENERATION.load(Ordering::SeqCst) {
+                                audio_queue_release(generation);
+                                continue;
+                            }
 
                             // 2. Emit text events AFTER TTS generation, RIGHT BEFORE playback
                             //    so typewriter and audio start nearly simultaneously
@@ -69,6 +85,8 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                                     Ok((stream, stream_handle)) => {
                                         match rodio::Sink::try_new(&stream_handle) {
                                             Ok(sink) => {
+                                                let sink = std::sync::Arc::new(sink);
+                                                *current_audio_sink().lock().unwrap() = Some(sink.clone());
                                                 if let Ok(file) = std::fs::File::open(&tts_file) {
                                                     match rodio::Decoder::new(std::io::BufReader::new(file)) {
                                                         Ok(source) => {
@@ -78,7 +96,7 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                                                         Err(e) => eprintln!("[AUDIO] decode: {}", e),
                                                     }
                                                 }
-                                                sink.detach();
+                                                *current_audio_sink().lock().unwrap() = None;
                                                 drop(stream); // release audio device
                                             }
                                             Err(e) => { eprintln!("[AUDIO] sink: {}", e); drop(stream); }
@@ -89,7 +107,7 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                             }
 
                             // 4. Release queue slot
-                            audio_queue_release();
+                            audio_queue_release(generation);
                             eprintln!("[AUDIO] done (gen={})", generation);
 
                             // 5. Notify frontend
@@ -105,6 +123,13 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
 
 /// Stop the pipeline and reset queue counter. Called on fn-key press.
 pub fn stop_audio_queue() {
+    eprintln!("[AUDIO] stop requested");
+    AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst);
+    audio_queue_reset();
+    let sink = current_audio_sink().lock().unwrap().take();
+    if let Some(sink) = sink {
+        sink.stop();
+    }
     let _ = audio_sender().lock().unwrap().send(AudioCmd::Stop);
 }
 
@@ -125,8 +150,22 @@ fn audio_queue_reserve() -> bool {
 }
 
 /// Release a slot after playback finishes.
-fn audio_queue_release() {
-    AUDIO_QUEUE_DEPTH.fetch_sub(1, Ordering::SeqCst);
+fn audio_queue_release(generation: u64) {
+    if generation != AUDIO_GENERATION.load(Ordering::SeqCst) {
+        return;
+    }
+    loop {
+        let current = AUDIO_QUEUE_DEPTH.load(Ordering::SeqCst);
+        if current == 0 {
+            return;
+        }
+        if AUDIO_QUEUE_DEPTH
+            .compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return;
+        }
+    }
 }
 
 /// Reset counter on stop/cancel.

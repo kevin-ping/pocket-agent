@@ -2,7 +2,7 @@
 
 > A minimal desktop AI voice companion that lives on your screen — press a key, speak, get things done.
 >
-> **v0.2.3** — see [releases/0.2.3.md](releases/0.2.3.md) for changelog
+> **v0.2.4** — see [releases/0.2.4.md](releases/0.2.4.md) for changelog
 
 Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust**. It connects to a local AI agent gateway ([Hermes](https://github.com/nousresearch/hermes) or [OpenClaw](https://github.com/nousresearch/openclaw)) via SSE streaming for real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
 
@@ -70,6 +70,8 @@ Press **Escape** during recording to cancel. Minimum recording: 1.5s. Maximum: 3
 - **OpenClaw support** — connect to OpenClaw gateway with multi-agent routing (openclaw/agent-a, openclaw/agent-b, etc.); server connection configured via `.env` only
 - **Multi-language voice** — configure primary + auxiliary TTS voices, auto-switch based on detected language
 - **Configurable hotkey** — capture any key via Settings, no restart required
+- **Local + SSH hotkey parity** — fn/globe and modifier hotkeys behave consistently whether PA is launched locally or from an SSH session
+- **Interruptible TTS** — pressing the hotkey while PA is speaking stops current audio immediately before recording starts
 - **TTS toggle** — disable voice output for text-only mode
 - **Compact widget** — 220x360px always-on-top window, dark sci-fi aesthetic
 - **macOS native** — global hotkey via CGEventTap, CoreAudio recording, menu bar tray
@@ -234,8 +236,9 @@ On first launch, grant in **System Settings → Privacy & Security**:
 
 1. **Accessibility** — required for global hotkey capture. Add Pocket Agent, then **restart the app**.
 2. **Microphone** — prompted automatically on first recording.
+3. **Input Monitoring** — required when running `npm run tauri dev` from a terminal app (for example iTerm2). Grant it to the terminal you use to launch PA, then restart that terminal.
 
-If Accessibility was denied initially, re-enable it and restart the app.
+If Accessibility was denied initially, re-enable it and restart the app. If local dev hotkeys still do nothing after that, check the terminal app's Input Monitoring permission before debugging the code.
 
 ---
 
@@ -266,6 +269,33 @@ Pocket Agent can display results from tool-using backends (e.g., a web-enabled H
 **Result:**
 
 ![Airline Result](assets/media/airline_result.jpg)
+
+---
+
+## FAQ / Troubleshooting
+
+### Why does the hotkey work when PA is launched over SSH, but not when I run `npm run tauri dev` locally?
+On macOS, local dev mode inherits permissions from the terminal app that launched Tauri. If you start PA from iTerm2, Terminal.app, or another shell, that terminal needs **Input Monitoring** permission in addition to PA's own Accessibility permission. SSH-launched runs can behave differently because they come from another login/session path.
+
+### Why did `fn` behave differently between local and SSH launches?
+macOS can report the same physical `fn` press through different event shapes:
+- local terminal launch: often only `FLAGS_CHANGED` with keycode `63`
+- SSH-launched session: can emit `FLAGS_CHANGED` plus an immediate `KEY_DOWN` with keycode `179`
+
+Pocket Agent v0.2.4 normalizes both to canonical `fn=179`, handles `fn` in both paths, and suppresses the duplicate SSH `KEY_DOWN` so one press only toggles recording once.
+
+### Why would the first hotkey press fail right after changing the hotkey to a modifier?
+That was a capture-state bug. After capturing a modifier key, macOS sends a release event immediately afterward. v0.2.4 consumes that one release before normal hotkey matching so the first real press of the new modifier hotkey is no longer swallowed.
+
+### Why would PA keep talking after I pressed `fn` to interrupt it?
+The old behavior queued a Stop command onto the audio thread, but the playback thread was blocked inside `rodio::Sink::sleep_until_end()`. That meant text output could stop while audio kept playing. v0.2.4 stores the current sink globally and calls `sink.stop()` synchronously from `stop_audio_queue()`, so pressing the hotkey now interrupts TTS immediately and starts recording right away.
+
+### What should I test after upgrading to v0.2.4?
+- Launch locally from your normal terminal app and verify `fn` starts/stops recording
+- Launch from SSH and verify the same single press does not double-trigger
+- Change the hotkey to `fn`, `RightShift`, or another modifier and verify the **first** press works
+- While PA is speaking, press the hotkey and verify TTS stops immediately before recording begins
+- Press `Escape` during recording and verify the capture cancels cleanly
 
 ---
 

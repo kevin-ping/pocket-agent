@@ -1,6 +1,7 @@
 # agent stuff
 .claude
 .codex
+.agents
 .workflow
 CLAUDE.md
 AGENTS.md
