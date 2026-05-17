@@ -66,6 +66,7 @@ pub struct BridgeSendRequest {
     pub session_id: String,
     pub text: String,
     #[serde(default)]
+    #[allow(dead_code)]
     pub user_language: Option<String>,
     #[serde(default)]
     pub context: Option<String>,
