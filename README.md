@@ -78,15 +78,15 @@ Press **Escape** during recording to cancel. Minimum recording: 1.5s. Maximum: 3
 
 ---
 
-### Push API
+### API
 
-Pocket Agent runs a local HTTP server on port `8650` for receiving push messages from external sources (Hermes cron jobs, scripts, etc.):
+Pocket Agent runs a local HTTP server on port `8650`.
 
-- **POST /push** — `{"text": "...", "emotion": "cheerful"}` → speaks and displays the message
+- **POST /push** — push message for TTS playback
+- **POST /bridge/send** — bridge third-party apps to Hermes
 - **GET /health** — health check
-- Auth via `API_SERVER_KEY` Bearer token
 
-See [releases/0.1.1.md](releases/0.1.1.md) for full API details.
+See [docs/API_MANUAL.md](docs/API_MANUAL.md) for full API details.
 
 ---
 

@@ -243,6 +243,56 @@ fn select_voice(text: &str, primary: &str, aux1: &str, aux2: &str, fixed_lang: &
     primary.to_string()
 }
 
+pub fn build_bridge_session_key(source: &str, session_id: &str) -> String {
+    format!("bridge:{}:{}", source.trim(), session_id.trim())
+}
+
+fn build_ui_turn_text(text: &str, primary: &str, aux1: &str, aux2: &str, fixed: &str) -> String {
+    let forced_suffix = if !fixed.is_empty() {
+        let voice = match fixed {
+            "aux1" if !aux1.is_empty() => aux1,
+            "aux2" if !aux2.is_empty() => aux2,
+            _ => primary,
+        };
+        let lang_code = voice.split('-').next().unwrap_or("zh");
+        let lang_name = match lang_code {
+            "zh" => "Chinese",
+            "ja" => "Japanese",
+            "ko" => "Korean",
+            "en" => "English",
+            "fr" => "French",
+            "de" => "German",
+            "es" => "Spanish",
+            _ => "Chinese",
+        };
+        format!(" Please reply in {}.", lang_name)
+    } else {
+        let detected = detect_language(text);
+        let lang_name = match detected {
+            "en" => "English",
+            "ja" => "Japanese",
+            "ko" => "Korean",
+            _ => "Chinese",
+        };
+        format!(" Please reply in {}.", lang_name)
+    };
+    format!("{}{}", text, forced_suffix)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HermesTurnMode {
+    Ui,
+    Bridge,
+}
+
+struct HermesTurnRequest {
+    text: String,
+    session_id: String,
+    voice_hint: Option<String>,
+    context: Option<String>,
+    mode: HermesTurnMode,
+}
+
 #[derive(serde::Serialize, Clone)]
 struct ChatStreamPayload {
     delta: String,
@@ -383,6 +433,169 @@ fn push_to_self(text: &str, emotion: &str, voice: &str) {
     });
 }
 
+fn emit_text_without_tts(app: &AppHandle, full_response: &str, emotion: &str) {
+    let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
+        emotion: emotion.to_string(),
+        total_chars: full_response.chars().count(),
+        has_audio: false,
+    });
+    for ch in full_response.chars() {
+        let _ = app.emit("chat-stream", ChatStreamPayload { delta: ch.to_string() });
+    }
+    let _ = app.emit("chat-stream-end", ());
+}
+
+async fn run_hermes_turn(
+    app: &AppHandle,
+    client: &HermesClient,
+    request: &HermesTurnRequest,
+) -> Result<String, String> {
+    let mut full_response = String::new();
+    let max_retries = 2;
+    // Event name prefix: bridge mode uses "bridge-" prefix, UI mode uses "chat-"
+    let evp = |suffix: &str| -> String {
+        match request.mode {
+            HermesTurnMode::Bridge => format!("bridge-{}", suffix),
+            HermesTurnMode::Ui => format!("chat-{}", suffix),
+        }
+    };
+
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            eprintln!("[SSE] retry {}/{}", attempt, max_retries);
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+
+        eprintln!(
+            "[SSE] >>> sending to LLM [{}] (mode: {:?}, session: {})",
+            chrono::Local::now().format("%H:%M:%S%.3f"),
+            request.mode,
+            request.session_id,
+        );
+        let mut stream = match client
+            .chat_stream(
+                &request.text,
+                request.voice_hint.as_deref(),
+                request.context.as_deref(),
+                Some(&request.session_id),
+            )
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                if attempt < max_retries {
+                    continue;
+                }
+                return Err(e);
+            }
+        };
+        let mut received_data = false;
+        let mut reasoning_buffer = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(StreamEvent::Content(delta)) => {
+                    if !reasoning_buffer.is_empty() {
+                        let _ = app.emit(&evp("thinking"), reasoning_buffer.clone());
+                        reasoning_buffer.clear();
+                    }
+                    if !received_data {
+                        eprintln!("[SSE] <<< first token from LLM [{}]", chrono::Local::now().format("%H:%M:%S%.3f"));
+                    }
+                    received_data = true;
+                    full_response.push_str(&delta);
+                }
+                Ok(StreamEvent::Reasoning(text)) => {
+                    if !received_data {
+                        eprintln!("[SSE] <<< first reasoning from LLM [{}]: {}...", chrono::Local::now().format("%H:%M:%S%.3f"), &text[..text.len().min(60)]);
+                    }
+                    received_data = true;
+                    reasoning_buffer.push_str(&text);
+                    if reasoning_buffer.contains('\n') || reasoning_buffer.len() >= 60 {
+                        let _ = app.emit(&evp("thinking"), reasoning_buffer.clone());
+                        reasoning_buffer.clear();
+                    }
+                }
+                Ok(StreamEvent::ToolCallStart { id, name }) => {
+                    if !reasoning_buffer.is_empty() {
+                        let _ = app.emit(&evp("thinking"), reasoning_buffer.clone());
+                        reasoning_buffer.clear();
+                    }
+                    if !received_data {
+                        eprintln!("[SSE] <<< first tool call from LLM [{}]: {}", chrono::Local::now().format("%H:%M:%S%.3f"), name);
+                    }
+                    received_data = true;
+                    let _ = app.emit(&evp("tool-call"), serde_json::json!({
+                        "id": id,
+                        "name": name
+                    }).to_string());
+                }
+                Err(e) => {
+                    if !received_data && attempt < max_retries {
+                        eprintln!("[SSE] no data received, will retry");
+                        break;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        eprintln!("[SSE] <<< stream complete [{}] ({} chars)", chrono::Local::now().format("%H:%M:%S%.3f"), full_response.len());
+        break;
+    }
+
+    let full_response = if std::env::var("ENABLE_LOCAL_COMMANDS").as_deref() == Ok("true") {
+        execute_commands(&full_response)
+    } else {
+        strip_cmd_tags(&full_response)
+    };
+
+    Ok(full_response)
+}
+
+pub async fn dispatch_bridge_message(
+    app: AppHandle,
+    source: String,
+    session_id: String,
+    text: String,
+    context: Option<String>,
+    show_thinking: bool,
+) -> Result<(), String> {
+    let api_key = get_api_key();
+    let api_agent = get_api_agent();
+    let client = HermesClient::new(&get_api_url(), api_key, api_agent);
+    let bridge_session = build_bridge_session_key(&source, &session_id);
+
+    if show_thinking {
+        app.emit("bridge-thinking-start", ()).map_err(|e| e.to_string())?;
+    }
+
+    let request = HermesTurnRequest {
+        text,
+        session_id: bridge_session,
+        voice_hint: None,
+        context,
+        mode: HermesTurnMode::Bridge,
+    };
+
+    match run_hermes_turn(&app, &client, &request).await {
+        Ok(full_response) => {
+            if full_response.trim().is_empty() {
+                let _ = app.emit("bridge-turn-finished", ());
+                return Ok(());
+            }
+            // Push response to internal /push endpoint to trigger TTS + display
+            let emotion = detect_emotion(&full_response);
+            push_to_self(&full_response, &emotion, "zh-CN-XiaoxiaoNeural");
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app.emit("bridge-turn-error", e.clone());
+            Err(e)
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn send_message(
     app: AppHandle,
@@ -406,53 +619,20 @@ pub async fn send_message(
     let user_lang = user_language.unwrap_or_else(|| "zh".to_string());
     let fixed = fixed_lang.unwrap_or_default();
     let mut hint = build_voice_hint(&primary, &aux1, &aux2, &user_lang, &fixed);
-    // In auto mode (no forced language), append language-follow instruction
-    // so LLM does not drift to a different language from recent context
     if fixed.is_empty() {
-        hint.push_str("\n\nIMPORTANT: You MUST respond in the SAME language the user writes in. If the user writes in Chinese, respond in Chinese. If the user writes in English, respond in English. Never switch languages based on previous conversation context.");
+        hint.push_str("
+
+IMPORTANT: You MUST respond in the SAME language the user writes in. If the user writes in Chinese, respond in Chinese. If the user writes in English, respond in English. Never switch languages based on previous conversation context.");
     }
 
-    // Append language instruction to user message — LLMs obey user-message
-    // instructions far more reliably than system prompts.
-    // If fixed language is set, use that; otherwise detect from user's input.
-    let forced_suffix = if !fixed.is_empty() {
-        let voice = match fixed.as_str() {
-            "aux1" if !aux1.is_empty() => &aux1,
-            "aux2" if !aux2.is_empty() => &aux2,
-            _ => &primary,
-        };
-        let lang_code = voice.split('-').next().unwrap_or("zh");
-        let lang_name = match lang_code {
-            "zh" => "Chinese",
-            "ja" => "Japanese",
-            "ko" => "Korean",
-            "en" => "English",
-            "fr" => "French",
-            "de" => "German",
-            "es" => "Spanish",
-            _ => "Chinese",
-        };
-        format!(" Please reply in {}.", lang_name)
-    } else {
-        let detected = detect_language(&text);
-        let lang_name = match detected {
-            "en" => "English",
-            "ja" => "Japanese",
-            "ko" => "Korean",
-            _ => "Chinese",
-        };
-        format!(" Please reply in {}.", lang_name)
-    };
-    let text = format!("{}{}", text, forced_suffix);
+    let text = build_ui_turn_text(&text, &primary, &aux1, &aux2, &fixed);
 
     app.emit("chat-thinking-start", ()).map_err(|e| e.to_string())?;
 
-    // Dynamic session_id: base-{yyyy-mm-dd} — auto-rotates daily
     let base_id = state.session_id.lock().unwrap().clone();
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let session_id = format!("{}-{}", base_id, today);
 
-    // Read yesterday's daily summary for context continuity
     let yesterday = (chrono::Local::now() - chrono::TimeDelta::days(1)).format("%Y-%m-%d").to_string();
     let summary_path = format!("{}/.hermes/pa-summaries/{}.md",
         std::env::var("HOME").unwrap_or_default(), yesterday);
@@ -460,90 +640,21 @@ pub async fn send_message(
     if daily_summary.is_some() {
         eprintln!("[SSE] loaded daily summary from {}", summary_path);
     }
-    let mut full_response = String::new();
-    let max_retries = 2;
 
-    for attempt in 0..=max_retries {
-        if attempt > 0 {
-            eprintln!("[SSE] retry {}/{}", attempt, max_retries);
-            std::thread::sleep(std::time::Duration::from_secs(2));
+    let request = HermesTurnRequest {
+        text,
+        session_id,
+        voice_hint: Some(hint),
+        context: daily_summary,
+        mode: HermesTurnMode::Ui,
+    };
+
+    let full_response = match run_hermes_turn(&app, &client, &request).await {
+        Ok(response) => response,
+        Err(e) => {
+            app.emit("chat-stream-error", e.clone()).map_err(|emit_err| emit_err.to_string())?;
+            return Err(e);
         }
-
-        eprintln!("[SSE] >>> sending to LLM [{}] (session: {})", chrono::Local::now().format("%H:%M:%S%.3f"), session_id);
-        let mut stream = match client.chat_stream(&text, Some(&hint), daily_summary.as_deref(), Some(&session_id)).await {
-            Ok(s) => s,
-            Err(e) => {
-                if attempt < max_retries { continue; }
-                return Err(e);
-            }
-        };
-        let mut received_data = false;
-
-        // Reasoning text comes in many tiny chunks — buffer and batch emit
-        let mut reasoning_buffer = String::new();
-        let stream_ended_normally;
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(StreamEvent::Content(delta)) => {
-                    // Flush any remaining reasoning before content starts
-                    if !reasoning_buffer.is_empty() {
-                        let _ = app.emit("chat-thinking", reasoning_buffer.clone());
-                        reasoning_buffer.clear();
-                    }
-                    if !received_data {
-                        eprintln!("[SSE] <<< first token from LLM [{}]", chrono::Local::now().format("%H:%M:%S%.3f"));
-                    }
-                    received_data = true;
-                    full_response.push_str(&delta);
-                }
-                Ok(StreamEvent::Reasoning(text)) => {
-                    if !received_data {
-                        eprintln!("[SSE] <<< first reasoning from LLM [{}]: {}...", chrono::Local::now().format("%H:%M:%S%.3f"), &text[..text.len().min(60)]);
-                    }
-                    received_data = true;
-                    // Buffer reasoning text; emit when we hit a paragraph boundary or buffer is large
-                    reasoning_buffer.push_str(&text);
-                    if reasoning_buffer.contains('\n') || reasoning_buffer.len() >= 60 {
-                        let _ = app.emit("chat-thinking", reasoning_buffer.clone());
-                        reasoning_buffer.clear();
-                    }
-                }
-                Ok(StreamEvent::ToolCallStart { id, name }) => {
-                    // Flush remaining reasoning before tool call
-                    if !reasoning_buffer.is_empty() {
-                        let _ = app.emit("chat-thinking", reasoning_buffer.clone());
-                        reasoning_buffer.clear();
-                    }
-                    if !received_data {
-                        eprintln!("[SSE] <<< first tool call from LLM [{}]: {}", chrono::Local::now().format("%H:%M:%S%.3f"), name);
-                    }
-                    received_data = true;
-                    // Emit tool call event to frontend
-                    let _ = app.emit("chat-tool-call", serde_json::json!({
-                        "id": id,
-                        "name": name
-                    }).to_string());
-                }
-                Err(e) => {
-                    if !received_data && attempt < max_retries {
-                        eprintln!("[SSE] no data received, will retry");
-                        break;
-                    }
-                    app.emit("chat-stream-error", e.clone()).map_err(|e| e.to_string())?;
-                    return Err(e);
-                }
-            }
-        }
-        stream_ended_normally = true;
-        eprintln!("[SSE] <<< stream complete [{}] ({} chars)", chrono::Local::now().format("%H:%M:%S%.3f"), full_response.len());
-
-        if received_data || stream_ended_normally { break; }
-    }
-
-    let full_response = if std::env::var("ENABLE_LOCAL_COMMANDS").as_deref() == Ok("true") {
-        execute_commands(&full_response)
-    } else {
-        strip_cmd_tags(&full_response)
     };
 
     if full_response.trim().is_empty() {
@@ -551,7 +662,6 @@ pub async fn send_message(
         return Ok(());
     }
 
-    // Save assistant message to history
     if let Err(e) = super::history::save_message("assistant", &full_response) {
         eprintln!("[history] failed to save assistant message: {}", e);
     }
@@ -562,18 +672,7 @@ pub async fn send_message(
         let voice = select_voice(&full_response, &primary, &aux1, &aux2, &fixed);
         push_to_self(&full_response, &emotion, &voice);
     } else {
-        // TTS disabled: show typewriter effect and speaking animation, but don't generate audio
-        // Emit speaking-start to trigger typewriter and animation
-        let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
-            emotion: emotion.clone(),
-            total_chars: full_response.chars().count(),
-            has_audio: false,
-        });
-        // Stream the text character by character for typewriter effect
-        for ch in full_response.chars() {
-            let _ = app.emit("chat-stream", ChatStreamPayload { delta: ch.to_string() });
-        }
-        let _ = app.emit("chat-stream-end", ());
+        emit_text_without_tts(&app, &full_response, &emotion);
     }
 
     Ok(())
@@ -662,4 +761,27 @@ fn execute_commands(text: &str) -> String {
     let clean = re.replace_all(text, "").to_string();
     let space_re = regex::Regex::new(r"  +").unwrap();
     space_re.replace_all(&clean.trim(), " ").to_string()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bridge_session_keys_are_namespaced() {
+        assert_eq!(build_bridge_session_key("chess-app", "game-001"), "bridge:chess-app:game-001");
+    }
+
+    #[test]
+    fn ui_turn_text_appends_detected_language_instruction() {
+        let text = build_ui_turn_text(
+            "hello world",
+            "zh-CN-XiaoxiaoNeural",
+            "",
+            "",
+            "",
+        );
+        assert_eq!(text, "hello world Please reply in English.");
+    }
 }

@@ -62,6 +62,41 @@
   let audioLevelTimer: ReturnType<typeof setInterval> | null = null;
   let firstStreamDelta = false;
   let lastSpeakingHadAudio = true;
+  let bridgeThinkingActive = false;
+  let bridgeFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function clearBridgeFallbackTimer() {
+    if (bridgeFallbackTimer) {
+      clearTimeout(bridgeFallbackTimer);
+      bridgeFallbackTimer = null;
+    }
+  }
+
+  function stopBridgeThinking(message?: string) {
+    clearBridgeFallbackTimer();
+    if (!bridgeThinkingActive) return;
+    bridgeThinkingActive = false;
+    islandMode = 'idle';
+    spiritPhase = 0;
+    chatStore.clearThinkingSteps();
+    characterState.toIdle();
+    if (message) {
+      chatStore.setError(message);
+    }
+  }
+
+  function startBridgeThinking() {
+    bridgeThinkingActive = true;
+    clearBridgeFallbackTimer();
+    islandMode = 'thinking';
+    spiritPhase = 2;
+    firstStreamDelta = false;
+    characterState.toThinking();
+    chatStore.addThinkingStep('🤔 正在思考...');
+    bridgeFallbackTimer = setTimeout(() => {
+      stopBridgeThinking('暂时还没有收到 Hermes 回推');
+    }, 30000);
+  }
 
   // When typewriter finishes (isStreaming→false) with no audio, stop SPEAKING animation
   $: if (!$chatStore.isStreaming && $chatStore.messages.length > 0 && !lastSpeakingHadAudio) {
@@ -166,6 +201,45 @@
         spiritPhase = 0;
       }),
 
+      listen('bridge-thinking-start', () => {
+        startBridgeThinking();
+      }),
+      listen('bridge-push-received', () => {
+        // Full cleanup: clear timer + all UI state (same as stopBridgeThinking but silent)
+        clearBridgeFallbackTimer();
+        if (!bridgeThinkingActive) return;
+        bridgeThinkingActive = false;
+        islandMode = 'idle';
+        spiritPhase = 0;
+        chatStore.clearThinkingSteps();
+        characterState.toIdle();
+      }),
+
+      // Bridge-mode intermediate events (reasoning + tool calls from Hermes via bridge)
+      listen<string>("bridge-thinking", (e) => {
+        chatStore.updateLastThinkingStep(e.payload);
+      }),
+      listen<string>("bridge-tool-call", (e) => {
+        try {
+          const payload = JSON.parse(e.payload);
+          let toolName = payload.name
+            .replace(/^mcp_tradingview_/, "")
+            .replace(/^mcp_/, "")
+            .replace(/_/g, " ");
+          chatStore.addThinkingStep(`🔧 查询 ${toolName}...`);
+        } catch {
+          chatStore.addThinkingStep("🔧 正在执行操作...");
+        }
+      }),
+      listen('bridge-turn-finished', () => {
+        if (bridgeThinkingActive) {
+          stopBridgeThinking('暂时还没有收到 Hermes 回推');
+        }
+      }),
+      listen<string>('bridge-turn-error', (e) => {
+        stopBridgeThinking(`Hermes 转发失败: ${e.payload}`);
+      }),
+
       listen('fn-key-down', () => {
         islandMode = 'recording';
         spiritPhase = 0;
@@ -239,6 +313,8 @@
       listen<{ text: string; emotion: string; voice: string | null }>("api-push", (e) => {
         const { text, emotion, voice } = e.payload;
         if (!text.trim()) return;
+        clearBridgeFallbackTimer();
+        bridgeThinkingActive = false;
         spiritPhase = 3;
         firstStreamDelta = false;
         invoke("speak_text", {
@@ -316,6 +392,7 @@
   onDestroy(() => {
     unlisten.forEach((fn) => fn());
     if (audioLevelTimer) clearInterval(audioLevelTimer);
+    clearBridgeFallbackTimer();
   });
 </script>
 

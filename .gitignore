@@ -3,8 +3,10 @@
 .codex
 .agents
 .workflow
+.auto-work
 CLAUDE.md
 AGENTS.md
+tmp
 
 # project
 node_modules/
