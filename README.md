@@ -2,7 +2,7 @@
 
 > A minimal desktop AI voice companion that lives on your screen — press a key, speak, get things done.
 >
-> **v0.2.4** — see [releases/0.2.4.md](releases/0.2.4.md) for changelog
+> **v0.2.5** — see [releases/0.2.5.md](releases/0.2.5.md) for changelog
 
 Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust**. It connects to a local AI agent gateway ([Hermes](https://github.com/nousresearch/hermes) or [OpenClaw](https://github.com/nousresearch/openclaw)) via SSE streaming for real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
 
@@ -51,7 +51,7 @@ Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust*
 1. **Press hotkey** (default: `fn`) — macOS CGEventTap captures the global hotkey
 2. **Recording starts** — pre-warmed cpal Stream Daemon activates instantly (~11ms latency)
 3. **Press hotkey again** — recording stops, WAV saved to temp file
-4. **STT** — faster-whisper transcribes locally (auto language detection)
+4. **STT** — faster-whisper transcribes locally (auto language detection, configurable model via `STT_MODEL`)
 5. **Send to backend** — text + voice hint streamed to configured gateway (Hermes :8642 or OpenClaw :18789) via `/v1/chat/completions`
 6. **TTS playback** — edge-tts generates audio, rodio plays it via system speakers
 
@@ -78,15 +78,15 @@ Press **Escape** during recording to cancel. Minimum recording: 1.5s. Maximum: 3
 
 ---
 
-### Push API
+### API
 
-Pocket Agent runs a local HTTP server on port `8650` for receiving push messages from external sources (Hermes cron jobs, scripts, etc.):
+Pocket Agent runs a local HTTP server on port `8650`.
 
-- **POST /push** — `{"text": "...", "emotion": "cheerful"}` → speaks and displays the message
+- **POST /push** — push message for TTS playback
+- **POST /bridge/send** — bridge third-party apps to Hermes
 - **GET /health** — health check
-- Auth via `API_SERVER_KEY` Bearer token
 
-See [releases/0.1.1.md](releases/0.1.1.md) for full API details.
+See [docs/API_MANUAL.md](docs/API_MANUAL.md) for full API details.
 
 ---
 
@@ -220,6 +220,7 @@ API_AGENT=my-agent         # agent name
 # ENABLE_LOCAL_COMMANDS=true
 # EDGE_TTS_BIN=/path/to/edge-tts
 # STT_PYTHON=/path/to/python3
+# STT_MODEL=base  # Whisper model: tiny | base | small
 ```
 
 3. **Run in development mode:**
@@ -315,6 +316,7 @@ pocket-agent/
 │       │   ├── DynamicIsland.svelte # Recording indicator
 │       │   ├── Icon.svelte       # SVG inline icon component (Lucide style)
 │       │   ├── RecordingCapsule.svelte # Active recording timer
+│       │   ├── StatusPanel.svelte  # Thinking steps & status display
 │       │   └── SettingsPanel.svelte # Settings (General / Voice)
 │       ├── stores/
 │       │   ├── chat.ts           # Chat message store

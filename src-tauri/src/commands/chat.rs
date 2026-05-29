@@ -12,7 +12,7 @@ static CURRENT_AUDIO_SINK: std::sync::OnceLock<std::sync::Mutex<Option<std::sync
 use tauri::{AppHandle, Emitter, State};
 
 /// Maximum concurrent audio items in the pipeline.
-const MAX_AUDIO_QUEUE: usize = 3;
+const MAX_AUDIO_QUEUE: usize = 10;
 
 /// Jobs sent to the dedicated speak thread.
 /// The thread processes them sequentially: TTS generate -> emit events -> play audio.
@@ -24,11 +24,26 @@ enum AudioCmd {
         format: String,
         app: AppHandle,
         generation: u64,
+        /// If true, emit chat-stream text events (used by push API).
+        /// If false, only generate TTS and play (used by streaming TTS, text already displayed).
+        show_text: bool,
     },
     Stop,
 }
 
+/// A prepared TTS audio file ready for playback.
+struct PreparedAudio {
+    tts_file: String,
+    text: String,
+    text_len: usize,
+    generation: u64,
+    show_text: bool,
+    emotion: String,
+    app: AppHandle,
+}
+
 static AUDIO_SENDER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<AudioCmd>>> = std::sync::OnceLock::new();
+
 
 static AUDIO_GENERATION: AtomicU64 = AtomicU64::new(0);
 static AUDIO_QUEUE_DEPTH: AtomicUsize = AtomicUsize::new(0);
@@ -40,83 +55,108 @@ fn current_audio_sink() -> &'static Mutex<Option<std::sync::Arc<rodio::Sink>>> {
 fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
     AUDIO_SENDER.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::channel::<AudioCmd>();
-        std::thread::Builder::new()
-            .name("speak-pipeline".to_string())
-            .spawn(move || {
-                for cmd in rx {
-                    match cmd {
-                        AudioCmd::Stop => {
-                            // stop_audio_queue() already interrupted the current sink and
-                            // invalidated queued generations synchronously on the caller thread.
+        let (prep_tx, prep_rx) = std::sync::mpsc::channel::<PreparedAudio>();
+
+        // === Thread 1: TTS Generator ===
+        // Receives AudioCmd::Speak, generates TTS, sends PreparedAudio to player
+        {
+            let prep_tx = prep_tx.clone();
+            std::thread::Builder::new()
+                .name("tts-gen".to_string())
+                .spawn(move || {
+                    for cmd in rx {
+                        match cmd {
+                            AudioCmd::Stop => {}
+                            AudioCmd::Speak { text, emotion, voice, format, app, generation, show_text } => {
+                                if generation != AUDIO_GENERATION.load(Ordering::SeqCst) {
+                                    audio_queue_release(generation);
+                                    continue;
+                                }
+
+                                let (rate, volume) = emotion_to_prosody(&emotion);
+                                let tts_file = tts_path(&format);
+                                let tts_ok = generate_tts_to(&text, &tts_file, &voice, rate, volume);
+                                eprintln!("[TTS-GEN] gen={} chars={} ok={}", generation, text.chars().count(), tts_ok);
+
+                                let text_len = text.chars().count();
+                                let _ = prep_tx.send(PreparedAudio {
+                                    tts_file,
+                                    text,
+                                    text_len,
+                                    generation,
+                                    show_text,
+                                    emotion,
+                                    app,
+                                });
+                            }
                         }
-                        AudioCmd::Speak { text, emotion, voice, format, app, generation } => {
-                            if generation != AUDIO_GENERATION.load(Ordering::SeqCst) {
-                                audio_queue_release(generation);
-                                continue;
-                            }
+                    }
+                })
+                .expect("failed to spawn tts-gen thread");
+        }
 
-                            let (rate, volume) = emotion_to_prosody(&emotion);
-                            let char_count = text.chars().count();
+        // === Thread 2: Audio Player ===
+        // Takes pre-generated audio files and plays them immediately
+        std::thread::Builder::new()
+            .name("audio-player".to_string())
+            .spawn(move || {
+                for prep in prep_rx {
+                    if prep.generation != AUDIO_GENERATION.load(Ordering::SeqCst) {
+                        audio_queue_release(prep.generation);
+                        continue;
+                    }
 
-                            // 1. Generate TTS first (takes time, don't start typewriter yet)
-                            let tts_file = tts_path(&format);
-                            let tts_ok = generate_tts_to(&text, &tts_file, &voice, rate, volume);
+                    // Emit text events for push API
+                    if prep.show_text {
+                        let _ = prep.app.emit("chat-speaking-start", TypewriterStartPayload {
+                            emotion: prep.emotion.clone(),
+                            total_chars: prep.text_len,
+                            has_audio: true,
+                        });
+                        let _ = prep.app.emit("chat-stream", ChatStreamPayload {
+                            delta: prep.text.clone(),
+                        });
+                        let _ = prep.app.emit("chat-stream-end", ());
+                    }
 
-                            if generation != AUDIO_GENERATION.load(Ordering::SeqCst) {
-                                audio_queue_release(generation);
-                                continue;
-                            }
+                    let tts_ok = !prep.tts_file.is_empty() && Path::new(&prep.tts_file).exists();
+                    eprintln!("[PLAYER] gen={} chars={} audio={}", prep.generation, prep.text_len, tts_ok);
 
-                            // 2. Emit text events AFTER TTS generation, RIGHT BEFORE playback
-                            //    so typewriter and audio start nearly simultaneously
-                            let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
-                                emotion: emotion.clone(),
-                                total_chars: char_count,
-                                has_audio: true,
-                            });
-                            let _ = app.emit("chat-stream", ChatStreamPayload { delta: text.clone() });
-                            let _ = app.emit("chat-stream-end", ());
-                            eprintln!("[SPEAK] emotion={} voice={} rate={} vol={} chars={} audio={}",
-                                emotion, voice, rate, volume, char_count, tts_ok);
-
-                            // 3. Play audio
-                            if tts_ok {
-                                match rodio::OutputStream::try_default() {
-                                    Ok((stream, stream_handle)) => {
-                                        match rodio::Sink::try_new(&stream_handle) {
-                                            Ok(sink) => {
-                                                let sink = std::sync::Arc::new(sink);
-                                                *current_audio_sink().lock().unwrap() = Some(sink.clone());
-                                                if let Ok(file) = std::fs::File::open(&tts_file) {
-                                                    match rodio::Decoder::new(std::io::BufReader::new(file)) {
-                                                        Ok(source) => {
-                                                            sink.append(source);
-                                                            sink.sleep_until_end();
-                                                        }
-                                                        Err(e) => eprintln!("[AUDIO] decode: {}", e),
-                                                    }
+                    if tts_ok {
+                        match rodio::OutputStream::try_default() {
+                            Ok((stream, stream_handle)) => {
+                                match rodio::Sink::try_new(&stream_handle) {
+                                    Ok(sink) => {
+                                        let sink = std::sync::Arc::new(sink);
+                                        *current_audio_sink().lock().unwrap() = Some(sink.clone());
+                                        if let Ok(file) = std::fs::File::open(&prep.tts_file) {
+                                            match rodio::Decoder::new(std::io::BufReader::new(file)) {
+                                                Ok(source) => {
+                                                    sink.append(source);
+                                                    sink.sleep_until_end();
                                                 }
-                                                *current_audio_sink().lock().unwrap() = None;
-                                                drop(stream); // release audio device
+                                                Err(e) => eprintln!("[AUDIO] decode: {}", e),
                                             }
-                                            Err(e) => { eprintln!("[AUDIO] sink: {}", e); drop(stream); }
                                         }
+                                        *current_audio_sink().lock().unwrap() = None;
+                                        drop(stream);
                                     }
-                                    Err(e) => eprintln!("[AUDIO] no output: {}", e),
+                                    Err(e) => { eprintln!("[AUDIO] sink: {}", e); drop(stream); }
                                 }
                             }
-
-                            // 4. Release queue slot
-                            audio_queue_release(generation);
-                            eprintln!("[AUDIO] done (gen={})", generation);
-
-                            // 5. Notify frontend
-                            let _ = app.emit("chat-audio-done", ());
+                            Err(e) => eprintln!("[AUDIO] no output: {}", e),
                         }
+                    }
+
+                    audio_queue_release(prep.generation);
+                    let remaining = AUDIO_QUEUE_DEPTH.load(Ordering::SeqCst);
+                    eprintln!("[AUDIO] done (gen={}, remaining={})", prep.generation, remaining);
+                    if prep.generation == AUDIO_GENERATION.load(Ordering::SeqCst) && remaining == 0 {
+                        let _ = prep.app.emit("chat-audio-done", ());
                     }
                 }
             })
-            .expect("failed to spawn speak-pipeline thread");
+            .expect("failed to spawn audio-player thread");
         Mutex::new(tx)
     })
 }
@@ -243,6 +283,58 @@ fn select_voice(text: &str, primary: &str, aux1: &str, aux2: &str, fixed_lang: &
     primary.to_string()
 }
 
+pub fn build_bridge_session_key(source: &str, session_id: &str) -> String {
+    format!("bridge:{}:{}", source.trim(), session_id.trim())
+}
+
+fn build_ui_turn_text(text: &str, primary: &str, aux1: &str, aux2: &str, fixed: &str) -> String {
+    let forced_suffix = if !fixed.is_empty() {
+        let voice = match fixed {
+            "aux1" if !aux1.is_empty() => aux1,
+            "aux2" if !aux2.is_empty() => aux2,
+            _ => primary,
+        };
+        let lang_code = voice.split('-').next().unwrap_or("zh");
+        let lang_name = match lang_code {
+            "zh" => "Chinese",
+            "ja" => "Japanese",
+            "ko" => "Korean",
+            "en" => "English",
+            "fr" => "French",
+            "de" => "German",
+            "es" => "Spanish",
+            _ => "Chinese",
+        };
+        format!(" Please reply in {}.", lang_name)
+    } else {
+        let detected = detect_language(text);
+        let lang_name = match detected {
+            "en" => "English",
+            "ja" => "Japanese",
+            "ko" => "Korean",
+            _ => "Chinese",
+        };
+        format!(" Please reply in {}.", lang_name)
+    };
+    format!("{}{}", text, forced_suffix)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HermesTurnMode {
+    Ui,
+    Bridge,
+}
+
+struct HermesTurnRequest {
+    text: String,
+    session_id: String,
+    voice_hint: Option<String>,
+    context: Option<String>,
+    mode: HermesTurnMode,
+    /// Optional callback for streaming TTS: called with each complete sentence as LLM streams
+    on_sentence: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
+}
+
 #[derive(serde::Serialize, Clone)]
 struct ChatStreamPayload {
     delta: String,
@@ -306,6 +398,50 @@ fn generate_tts_to(text: &str, path: &str, voice: &str, rate: &str, volume: &str
     }
 }
 
+
+/// Split text into sentences for streaming TTS.
+/// Returns complete sentences + remaining buffer.
+/// Sentences end at: 。！？!? and also \n
+/// The ASCII period '.' is only a sentence boundary when NOT part of a number (e.g. "2.54").
+fn split_sentences(buffer: &str) -> (Vec<String>, String) {
+    let mut sentences = Vec::new();
+    let chars: Vec<char> = buffer.chars().collect();
+    let mut last_split = 0;
+
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+
+        // Check if this is a sentence-ending char
+        let is_end = matches!(ch, '。' | '！' | '？' | '!' | '?' | '\n');
+
+        // Special handling for ASCII period: skip if it's a decimal point (digit.digit)
+        let is_period = ch == '.';
+        let is_decimal = if is_period {
+            let prev_digit = i > 0 && chars[i - 1].is_ascii_digit();
+            let next_digit = i + 1 < chars.len() && chars[i + 1].is_ascii_digit();
+            prev_digit && next_digit
+        } else {
+            false
+        };
+
+        if (is_end || (is_period && !is_decimal)) && (i - last_split + 1) >= 2 {
+            let end = i + 1;
+            let sentence: String = chars[last_split..end].iter().collect();
+            let trimmed = sentence.trim();
+            if !trimmed.is_empty() {
+                sentences.push(trimmed.to_string());
+            }
+            last_split = end;
+        }
+
+        i += 1;
+    }
+
+    let remaining: String = chars[last_split..].iter().collect();
+    (sentences, remaining)
+}
+
 fn detect_emotion(text: &str) -> String {
     let t = text.to_lowercase();
     let t_chars: Vec<char> = t.chars().collect();
@@ -343,10 +479,17 @@ fn speak_internal(
     voice: &str,
     format: &str,
     generation: u64,
+    show_text: bool,
 ) -> bool {
-    if !audio_queue_reserve() {
-        eprintln!("[SPEAK] queue full, dropping {} chars", text.chars().count());
-        return false;
+    // Wait for a queue slot (blocking) instead of dropping sentences
+    let max_wait = std::time::Duration::from_secs(30);
+    let start = std::time::Instant::now();
+    while !audio_queue_reserve() {
+        if start.elapsed() > max_wait {
+            eprintln!("[SPEAK] queue wait timeout, dropping {} chars", text.chars().count());
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
     let _ = audio_sender().lock().unwrap().send(AudioCmd::Speak {
         text: text.to_string(),
@@ -355,6 +498,7 @@ fn speak_internal(
         format: format.to_string(),
         app: app.clone(),
         generation,
+        show_text,
     });
     true
 }
@@ -383,6 +527,197 @@ fn push_to_self(text: &str, emotion: &str, voice: &str) {
     });
 }
 
+fn emit_text_without_tts(app: &AppHandle, full_response: &str, emotion: &str) {
+    let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
+        emotion: emotion.to_string(),
+        total_chars: full_response.chars().count(),
+        has_audio: false,
+    });
+    for ch in full_response.chars() {
+        let _ = app.emit("chat-stream", ChatStreamPayload { delta: ch.to_string() });
+    }
+    let _ = app.emit("chat-stream-end", ());
+}
+
+async fn run_hermes_turn(
+    app: &AppHandle,
+    client: &HermesClient,
+    request: &HermesTurnRequest,
+) -> Result<String, String> {
+    let mut full_response = String::new();
+    let mut sentence_buffer = String::new();
+    let max_retries = 2;
+    // Event name prefix: bridge mode uses "bridge-" prefix, UI mode uses "chat-"
+    let evp = |suffix: &str| -> String {
+        match request.mode {
+            HermesTurnMode::Bridge => format!("bridge-{}", suffix),
+            HermesTurnMode::Ui => format!("chat-{}", suffix),
+        }
+    };
+
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            eprintln!("[SSE] retry {}/{}", attempt, max_retries);
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+
+        eprintln!(
+            "[SSE] >>> sending to LLM [{}] (mode: {:?}, session: {})",
+            chrono::Local::now().format("%H:%M:%S%.3f"),
+            request.mode,
+            request.session_id,
+        );
+        let mut stream = match client
+            .chat_stream(
+                &request.text,
+                request.voice_hint.as_deref(),
+                request.context.as_deref(),
+                Some(&request.session_id),
+            )
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                if attempt < max_retries {
+                    continue;
+                }
+                return Err(e);
+            }
+        };
+        let mut received_data = false;
+        let mut reasoning_buffer = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(StreamEvent::Content(delta)) => {
+                    if !reasoning_buffer.is_empty() {
+                        let _ = app.emit(&evp("thinking"), reasoning_buffer.clone());
+                        reasoning_buffer.clear();
+                    }
+                    if !received_data {
+                        eprintln!("[SSE] <<< first token from LLM [{}]", chrono::Local::now().format("%H:%M:%S%.3f"));
+                    }
+                    received_data = true;
+                    full_response.push_str(&delta);
+
+                    // UI mode: emit chat-stream delta so frontend can display text
+                    // in real-time while TTS plays in parallel via on_sentence.
+                    // Bridge mode skips this — it uses bridge-* events and push_to_self.
+                    if request.mode == HermesTurnMode::Ui {
+                        let _ = app.emit("chat-stream", ChatStreamPayload { delta: delta.clone() });
+                    }
+
+                    // Stream TTS: split into sentences as they arrive
+                    if let Some(ref cb) = request.on_sentence {
+                        sentence_buffer.push_str(&delta);
+                        let (sentences, leftover) = split_sentences(&sentence_buffer);
+                        for s in &sentences {
+                            cb(s);
+                        }
+                        sentence_buffer = leftover;
+                    }
+                }
+                Ok(StreamEvent::Reasoning(text)) => {
+                    if !received_data {
+                        eprintln!("[SSE] <<< first reasoning from LLM [{}]: {}...", chrono::Local::now().format("%H:%M:%S%.3f"), &text[..text.len().min(60)]);
+                    }
+                    received_data = true;
+                    reasoning_buffer.push_str(&text);
+                    if reasoning_buffer.contains('\n') || reasoning_buffer.len() >= 60 {
+                        let _ = app.emit(&evp("thinking"), reasoning_buffer.clone());
+                        reasoning_buffer.clear();
+                    }
+                }
+                Ok(StreamEvent::ToolCallStart { id, name }) => {
+                    if !reasoning_buffer.is_empty() {
+                        let _ = app.emit(&evp("thinking"), reasoning_buffer.clone());
+                        reasoning_buffer.clear();
+                    }
+                    if !received_data {
+                        eprintln!("[SSE] <<< first tool call from LLM [{}]: {}", chrono::Local::now().format("%H:%M:%S%.3f"), name);
+                    }
+                    received_data = true;
+                    let _ = app.emit(&evp("tool-call"), serde_json::json!({
+                        "id": id,
+                        "name": name
+                    }).to_string());
+                }
+                Err(e) => {
+                    if !received_data && attempt < max_retries {
+                        eprintln!("[SSE] no data received, will retry");
+                        break;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        // Flush remaining sentence_buffer
+        if let Some(ref cb) = request.on_sentence {
+            let trimmed = sentence_buffer.trim();
+            if !trimmed.is_empty() {
+                eprintln!("[SSE] flushing last sentence ({} chars)", trimmed.len());
+                cb(trimmed);
+            }
+        }
+
+        eprintln!("[SSE] <<< stream complete [{}] ({} chars)", chrono::Local::now().format("%H:%M:%S%.3f"), full_response.len());
+        break;
+    }
+
+    let full_response = if std::env::var("ENABLE_LOCAL_COMMANDS").as_deref() == Ok("true") {
+        execute_commands(&full_response)
+    } else {
+        strip_cmd_tags(&full_response)
+    };
+
+    Ok(full_response)
+}
+
+pub async fn dispatch_bridge_message(
+    app: AppHandle,
+    source: String,
+    session_id: String,
+    text: String,
+    context: Option<String>,
+    show_thinking: bool,
+) -> Result<(), String> {
+    let api_key = get_api_key();
+    let api_agent = get_api_agent();
+    let client = HermesClient::new(&get_api_url(), api_key, api_agent);
+    let bridge_session = build_bridge_session_key(&source, &session_id);
+
+    if show_thinking {
+        app.emit("bridge-thinking-start", ()).map_err(|e| e.to_string())?;
+    }
+
+    let request = HermesTurnRequest {
+        text,
+        session_id: bridge_session,
+        voice_hint: None,
+        context,
+        mode: HermesTurnMode::Bridge,
+        on_sentence: None,
+    };
+
+    match run_hermes_turn(&app, &client, &request).await {
+        Ok(full_response) => {
+            if full_response.trim().is_empty() {
+                let _ = app.emit("bridge-turn-finished", ());
+                return Ok(());
+            }
+            // Push response to internal /push endpoint to trigger TTS + display
+            let emotion = detect_emotion(&full_response);
+            push_to_self(&full_response, &emotion, "zh-CN-XiaoxiaoNeural");
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app.emit("bridge-turn-error", e.clone());
+            Err(e)
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn send_message(
     app: AppHandle,
@@ -406,53 +741,20 @@ pub async fn send_message(
     let user_lang = user_language.unwrap_or_else(|| "zh".to_string());
     let fixed = fixed_lang.unwrap_or_default();
     let mut hint = build_voice_hint(&primary, &aux1, &aux2, &user_lang, &fixed);
-    // In auto mode (no forced language), append language-follow instruction
-    // so LLM does not drift to a different language from recent context
     if fixed.is_empty() {
-        hint.push_str("\n\nIMPORTANT: You MUST respond in the SAME language the user writes in. If the user writes in Chinese, respond in Chinese. If the user writes in English, respond in English. Never switch languages based on previous conversation context.");
+        hint.push_str("
+
+IMPORTANT: You MUST respond in the SAME language the user writes in. If the user writes in Chinese, respond in Chinese. If the user writes in English, respond in English. Never switch languages based on previous conversation context.");
     }
 
-    // Append language instruction to user message — LLMs obey user-message
-    // instructions far more reliably than system prompts.
-    // If fixed language is set, use that; otherwise detect from user's input.
-    let forced_suffix = if !fixed.is_empty() {
-        let voice = match fixed.as_str() {
-            "aux1" if !aux1.is_empty() => &aux1,
-            "aux2" if !aux2.is_empty() => &aux2,
-            _ => &primary,
-        };
-        let lang_code = voice.split('-').next().unwrap_or("zh");
-        let lang_name = match lang_code {
-            "zh" => "Chinese",
-            "ja" => "Japanese",
-            "ko" => "Korean",
-            "en" => "English",
-            "fr" => "French",
-            "de" => "German",
-            "es" => "Spanish",
-            _ => "Chinese",
-        };
-        format!(" Please reply in {}.", lang_name)
-    } else {
-        let detected = detect_language(&text);
-        let lang_name = match detected {
-            "en" => "English",
-            "ja" => "Japanese",
-            "ko" => "Korean",
-            _ => "Chinese",
-        };
-        format!(" Please reply in {}.", lang_name)
-    };
-    let text = format!("{}{}", text, forced_suffix);
+    let text = build_ui_turn_text(&text, &primary, &aux1, &aux2, &fixed);
 
     app.emit("chat-thinking-start", ()).map_err(|e| e.to_string())?;
 
-    // Dynamic session_id: base-{yyyy-mm-dd} — auto-rotates daily
     let base_id = state.session_id.lock().unwrap().clone();
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let session_id = format!("{}-{}", base_id, today);
 
-    // Read yesterday's daily summary for context continuity
     let yesterday = (chrono::Local::now() - chrono::TimeDelta::days(1)).format("%Y-%m-%d").to_string();
     let summary_path = format!("{}/.hermes/pa-summaries/{}.md",
         std::env::var("HOME").unwrap_or_default(), yesterday);
@@ -460,90 +762,58 @@ pub async fn send_message(
     if daily_summary.is_some() {
         eprintln!("[SSE] loaded daily summary from {}", summary_path);
     }
-    let mut full_response = String::new();
-    let max_retries = 2;
 
-    for attempt in 0..=max_retries {
-        if attempt > 0 {
-            eprintln!("[SSE] retry {}/{}", attempt, max_retries);
-            std::thread::sleep(std::time::Duration::from_secs(2));
-        }
+    // Streaming TTS: sentence-level callback
+    let tts_on = tts_enabled.unwrap_or(true);
 
-        eprintln!("[SSE] >>> sending to LLM [{}] (session: {})", chrono::Local::now().format("%H:%M:%S%.3f"), session_id);
-        let mut stream = match client.chat_stream(&text, Some(&hint), daily_summary.as_deref(), Some(&session_id)).await {
-            Ok(s) => s,
-            Err(e) => {
-                if attempt < max_retries { continue; }
-                return Err(e);
-            }
-        };
-        let mut received_data = false;
-
-        // Reasoning text comes in many tiny chunks — buffer and batch emit
-        let mut reasoning_buffer = String::new();
-        let stream_ended_normally;
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(StreamEvent::Content(delta)) => {
-                    // Flush any remaining reasoning before content starts
-                    if !reasoning_buffer.is_empty() {
-                        let _ = app.emit("chat-thinking", reasoning_buffer.clone());
-                        reasoning_buffer.clear();
-                    }
-                    if !received_data {
-                        eprintln!("[SSE] <<< first token from LLM [{}]", chrono::Local::now().format("%H:%M:%S%.3f"));
-                    }
-                    received_data = true;
-                    full_response.push_str(&delta);
-                }
-                Ok(StreamEvent::Reasoning(text)) => {
-                    if !received_data {
-                        eprintln!("[SSE] <<< first reasoning from LLM [{}]: {}...", chrono::Local::now().format("%H:%M:%S%.3f"), &text[..text.len().min(60)]);
-                    }
-                    received_data = true;
-                    // Buffer reasoning text; emit when we hit a paragraph boundary or buffer is large
-                    reasoning_buffer.push_str(&text);
-                    if reasoning_buffer.contains('\n') || reasoning_buffer.len() >= 60 {
-                        let _ = app.emit("chat-thinking", reasoning_buffer.clone());
-                        reasoning_buffer.clear();
-                    }
-                }
-                Ok(StreamEvent::ToolCallStart { id, name }) => {
-                    // Flush remaining reasoning before tool call
-                    if !reasoning_buffer.is_empty() {
-                        let _ = app.emit("chat-thinking", reasoning_buffer.clone());
-                        reasoning_buffer.clear();
-                    }
-                    if !received_data {
-                        eprintln!("[SSE] <<< first tool call from LLM [{}]: {}", chrono::Local::now().format("%H:%M:%S%.3f"), name);
-                    }
-                    received_data = true;
-                    // Emit tool call event to frontend
-                    let _ = app.emit("chat-tool-call", serde_json::json!({
-                        "id": id,
-                        "name": name
-                    }).to_string());
-                }
-                Err(e) => {
-                    if !received_data && attempt < max_retries {
-                        eprintln!("[SSE] no data received, will retry");
-                        break;
-                    }
-                    app.emit("chat-stream-error", e.clone()).map_err(|e| e.to_string())?;
-                    return Err(e);
-                }
-            }
-        }
-        stream_ended_normally = true;
-        eprintln!("[SSE] <<< stream complete [{}] ({} chars)", chrono::Local::now().format("%H:%M:%S%.3f"), full_response.len());
-
-        if received_data || stream_ended_normally { break; }
+    // When TTS is on, emit speaking-start early so frontend initializes typewriter
+    // and stream state BEFORE chat-stream deltas arrive from run_hermes_turn.
+    // When TTS is off, emit_text_without_tts handles the full lifecycle below.
+    if tts_on {
+        let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
+            emotion: "friendly".to_string(),
+            total_chars: 0,
+            has_audio: true,
+        });
     }
 
-    let full_response = if std::env::var("ENABLE_LOCAL_COMMANDS").as_deref() == Ok("true") {
-        execute_commands(&full_response)
+    let speak_generation = AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let speak_app = app.clone();
+    let speak_format = "wav".to_string();
+
+    let on_sentence: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>> = if tts_on {
+        Some(std::sync::Arc::new(move |sentence: &str| {
+            // TTS only: generate and play audio. speaking-start is emitted
+            // in send_message() before run_hermes_turn() to guarantee ordering.
+            // Non-blocking: skip sentence if queue is saturated to avoid stalling
+            // the stream delta handler. Logged so we can tune MAX_AUDIO_QUEUE.
+            if is_queue_full() {
+                eprintln!("[SPEAK] queue full, skipping {} chars", sentence.chars().count());
+                return;
+            }
+            let emotion = detect_emotion(sentence);
+            let voice = select_voice(sentence, &primary, &aux1, &aux2, &fixed);
+            speak_internal(&speak_app, sentence, &emotion, &voice, &speak_format, speak_generation, false);
+        }))
     } else {
-        strip_cmd_tags(&full_response)
+        None
+    };
+
+    let request = HermesTurnRequest {
+        text,
+        session_id,
+        voice_hint: Some(hint),
+        context: daily_summary,
+        mode: HermesTurnMode::Ui,
+        on_sentence,
+    };
+
+    let full_response = match run_hermes_turn(&app, &client, &request).await {
+        Ok(response) => response,
+        Err(e) => {
+            app.emit("chat-stream-error", e.clone()).map_err(|emit_err| emit_err.to_string())?;
+            return Err(e);
+        }
     };
 
     if full_response.trim().is_empty() {
@@ -551,29 +821,17 @@ pub async fn send_message(
         return Ok(());
     }
 
-    // Save assistant message to history
     if let Err(e) = super::history::save_message("assistant", &full_response) {
         eprintln!("[history] failed to save assistant message: {}", e);
     }
 
-    let tts_enabled = tts_enabled.unwrap_or(true);
-    let emotion = detect_emotion(&full_response);
-    if tts_enabled {
-        let voice = select_voice(&full_response, &primary, &aux1, &aux2, &fixed);
-        push_to_self(&full_response, &emotion, &voice);
-    } else {
-        // TTS disabled: show typewriter effect and speaking animation, but don't generate audio
-        // Emit speaking-start to trigger typewriter and animation
-        let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
-            emotion: emotion.clone(),
-            total_chars: full_response.chars().count(),
-            has_audio: false,
-        });
-        // Stream the text character by character for typewriter effect
-        for ch in full_response.chars() {
-            let _ = app.emit("chat-stream", ChatStreamPayload { delta: ch.to_string() });
-        }
+    // TTS on: chat-stream deltas were emitted during run_hermes_turn, now signal end.
+    // TTS off: emit_text_without_tts handles speaking-start + chat-stream + chat-stream-end.
+    if tts_on {
         let _ = app.emit("chat-stream-end", ());
+    } else {
+        let emotion = detect_emotion(&full_response);
+        emit_text_without_tts(&app, &full_response, &emotion);
     }
 
     Ok(())
@@ -621,7 +879,7 @@ pub async fn speak_text(
     let voice = override_voice.unwrap_or_else(|| select_voice(&text, &primary, &aux1, &aux2, ""));
     let emotion_str = emotion.unwrap_or_else(|| detect_emotion(&text));
 
-    speak_internal(&app, &text, &emotion_str, &voice, &format, generation);
+    speak_internal(&app, &text, &emotion_str, &voice, &format, generation, true);
 
     Ok(())
 }
@@ -662,4 +920,27 @@ fn execute_commands(text: &str) -> String {
     let clean = re.replace_all(text, "").to_string();
     let space_re = regex::Regex::new(r"  +").unwrap();
     space_re.replace_all(&clean.trim(), " ").to_string()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bridge_session_keys_are_namespaced() {
+        assert_eq!(build_bridge_session_key("chess-app", "game-001"), "bridge:chess-app:game-001");
+    }
+
+    #[test]
+    fn ui_turn_text_appends_detected_language_instruction() {
+        let text = build_ui_turn_text(
+            "hello world",
+            "zh-CN-XiaoxiaoNeural",
+            "",
+            "",
+            "",
+        );
+        assert_eq!(text, "hello world Please reply in English.");
+    }
 }
