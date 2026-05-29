@@ -56,6 +56,7 @@ pub fn run() {
             voice::hotkey::check_accessibility(handle);
             voice::hotkey::spawn_hotkey_listener(handle.clone(), config.hotkey_code);
             voice::record::prewarm();
+            voice::stt::ensure_stt_server();
 
             // Start local API server for push notifications (port 8650)
             {
@@ -102,6 +103,7 @@ pub fn run() {
                             let _ = app.emit("tray-open-history", ());
                         }
                         "tray-quit" => {
+                            voice::stt::shutdown_stt_server();
                             app.exit(0);
                         }
                         _ => {}
@@ -130,6 +132,11 @@ pub fn run() {
             voice::hotkey::update_hotkey,
             voice::hotkey::set_double_click_mode,
         ])
+        .on_window_event(|_window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                voice::stt::shutdown_stt_server();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
