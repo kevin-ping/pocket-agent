@@ -98,6 +98,22 @@
     }, 30000);
   }
 
+  const DEBUG_UI_STATE = String(import.meta.env.VITE_PA_DEBUG_UI || '').toLowerCase() === 'true';
+  function debugState(event: string, extra?: Record<string, unknown>) {
+    if (!DEBUG_UI_STATE) return;
+    const now = new Date().toISOString().slice(11, 23);
+    console.debug(`[PA-UI][${now}] ${event}`, {
+      islandMode,
+      spiritPhase,
+      firstStreamDelta,
+      bridgeThinkingActive,
+      characterState: get(characterState),
+      chatStreaming: $chatStore.isStreaming,
+      messageCount: $chatStore.messages.length,
+      ...(extra || {}),
+    });
+  }
+
   // When typewriter finishes (isStreaming→false) with no audio, stop SPEAKING animation
   $: if (!$chatStore.isStreaming && $chatStore.messages.length > 0 && !lastSpeakingHadAudio) {
     const cs = get(characterState);
@@ -143,19 +159,24 @@
 
   async function setupListeners() {
     unlisten = await Promise.all([
-      listen('chat-thinking-start', () => { characterState.toThinking(); chatStore.addThinkingStep('🤔 正在思考...'); }),
+      listen('chat-thinking-start', () => { characterState.toThinking(); chatStore.addThinkingStep('🤔 正在思考...'); debugState('chat-thinking-start'); }),
       listen<{ emotion: string; total_chars: number; has_audio: boolean }>('chat-speaking-start', (e) => {
+        debugState('chat-speaking-start', e.payload as unknown as Record<string, unknown>);
         lastSpeakingHadAudio = e.payload.has_audio;
+        islandMode = 'idle';
         characterState.toSpeaking();
         chatStore.clearThinkingSteps();
         spiritPhase = 3;
-        chatStore.startStream();
+        if (!$chatStore.isStreaming) {
+          chatStore.startStream();
+        }
         chatStore.startTypewriter(e.payload.emotion);
         if (!e.payload.has_audio && !$layoutStore.expanded) {
           layoutStore.toggle();
         }
       }),
       listen<{ delta: string }>('chat-stream', (e) => {
+        if (!firstStreamDelta) debugState('chat-stream:first-delta', { deltaPreview: e.payload.delta.slice(0, 40) });
         chatStore.appendDelta(e.payload.delta);
         if (!firstStreamDelta) {
           firstStreamDelta = true;
@@ -163,6 +184,7 @@
         }
       }),
       listen('chat-stream-end', () => {
+        debugState('chat-stream-end');
         islandMode = 'idle';
         chatStore.endStream();
         if (get(characterState) !== 'speaking') {
@@ -171,6 +193,8 @@
         }
       }),
       listen('chat-audio-done', () => {
+        debugState('chat-audio-done');
+        chatStore.endStream();
         characterState.transition('speaking', 'idle');
         spiritPhase = 0;
       }),
@@ -195,6 +219,7 @@
         }
       }),
       listen<string>('chat-stream-error', (e) => {
+        debugState('chat-stream-error', { error: e.payload });
         islandMode = 'idle';
         chatStore.setError(e.payload);
         characterState.toIdle();
@@ -202,9 +227,11 @@
       }),
 
       listen('bridge-thinking-start', () => {
+        debugState('bridge-thinking-start');
         startBridgeThinking();
       }),
       listen('bridge-push-received', () => {
+        debugState('bridge-push-received');
         // Full cleanup: clear timer + all UI state (same as stopBridgeThinking but silent)
         clearBridgeFallbackTimer();
         if (!bridgeThinkingActive) return;
@@ -232,15 +259,18 @@
         }
       }),
       listen('bridge-turn-finished', () => {
+        debugState('bridge-turn-finished');
         if (bridgeThinkingActive) {
           stopBridgeThinking('暂时还没有收到 Hermes 回推');
         }
       }),
       listen<string>('bridge-turn-error', (e) => {
+        debugState('bridge-turn-error', { error: e.payload });
         stopBridgeThinking(`Hermes 转发失败: ${e.payload}`);
       }),
 
       listen('fn-key-down', () => {
+        debugState('fn-key-down');
         islandMode = 'recording';
         spiritPhase = 0;
         firstStreamDelta = false;
@@ -258,6 +288,7 @@
         }, 150);
       }),
       listen('fn-key-up', () => {
+        debugState('fn-key-up');
         islandMode = 'thinking';
         spiritPhase = 1;
         characterState.toThinking();
@@ -271,6 +302,7 @@
         });
       }),
       listen('voice-cancel', () => {
+        debugState('voice-cancel');
         islandMode = 'idle';
         spiritPhase = 0;
         characterState.toIdle();
@@ -278,6 +310,7 @@
         invoke('cancel_voice_recording').catch(console.error);
       }),
       listen<{ text: string; language: string }>('stt-result', (e) => {
+        debugState('stt-result', { language: e.payload.language, len: e.payload.text.length });
         islandMode = 'thinking';
         if (e.payload.text.trim()) {
           handleSendMessage(e.payload.text, e.payload.language);
@@ -289,6 +322,7 @@
         }
       }),
       listen<{ error: string }>('stt-error', (e) => {
+        debugState('stt-error', { error: e.payload.error });
         islandMode = 'idle';
         spiritPhase = 0;
         console.warn('[STT]', e.payload.error);
@@ -311,6 +345,7 @@
       // Only call speak_text — text display is handled by the speak_text
       // Rust side which emits chat-speaking-start (typewriter) + chat-stream (delta).
       listen<{ text: string; emotion: string; voice: string | null }>("api-push", (e) => {
+        debugState('api-push', { emotion: e.payload.emotion, hasVoice: !!e.payload.voice, len: e.payload.text.length });
         const { text, emotion, voice } = e.payload;
         if (!text.trim()) return;
         clearBridgeFallbackTimer();

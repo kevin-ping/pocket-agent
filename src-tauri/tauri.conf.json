@@ -19,7 +19,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "resources/stt-helper": "resources/stt-helper"
+      "resources/stt-helper": "resources/stt-helper",
+      "resources/stt-server.py": "resources/stt-server.py"
     },
     "macOS": {
       "minimumSystemVersion": "12.0",

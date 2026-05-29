@@ -2,7 +2,7 @@
 
 > A minimal desktop AI voice companion that lives on your screen — press a key, speak, get things done.
 >
-> **v0.2.4** — see [releases/0.2.4.md](releases/0.2.4.md) for changelog
+> **v0.2.5** — see [releases/0.2.5.md](releases/0.2.5.md) for changelog
 
 Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust**. It connects to a local AI agent gateway ([Hermes](https://github.com/nousresearch/hermes) or [OpenClaw](https://github.com/nousresearch/openclaw)) via SSE streaming for real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
 
@@ -315,6 +315,7 @@ pocket-agent/
 │       │   ├── DynamicIsland.svelte # Recording indicator
 │       │   ├── Icon.svelte       # SVG inline icon component (Lucide style)
 │       │   ├── RecordingCapsule.svelte # Active recording timer
+│       │   ├── StatusPanel.svelte  # Thinking steps & status display
 │       │   └── SettingsPanel.svelte # Settings (General / Voice)
 │       ├── stores/
 │       │   ├── chat.ts           # Chat message store
