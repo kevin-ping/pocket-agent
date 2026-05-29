@@ -10,6 +10,7 @@
   import Icon from './lib/components/Icon.svelte';
   import ChatPanel from './lib/components/ChatPanel.svelte';
   import SettingsPanel from './lib/components/SettingsPanel.svelte';
+  import StatusPanel from './lib/components/StatusPanel.svelte';
 
   import { characterState } from './lib/stores/character';
   import { chatStore } from './lib/stores/chat';
@@ -461,6 +462,7 @@
       on:expand={() => layoutStore.toggle()}
     />
     <DynamicIsland mode={islandMode} audioLevel={audioLevel} />
+    <div class="status-row"><StatusPanel /></div>
   </div>
 
   <!-- Chat panel on RIGHT (default, when avatar is on the left side of screen) -->
@@ -582,4 +584,5 @@
     transition: background 0.1s;
   }
   .guide-btn:hover { background: rgba(160, 168, 255, 0.35); }
+  .status-row { margin-top: 4px; flex-shrink: 0; }
 </style>
