@@ -15,7 +15,7 @@ t0 = time.time()
 
 try:
     print(f"[stt] loading model...", file=sys.stderr, flush=True)
-    model = WhisperModel("small", device="cpu", compute_type="int8")
+    model = WhisperModel("tiny", device="cpu", compute_type="int8")
     print(f"[stt] model loaded ({time.time()-t0:.1f}s), transcribing...", file=sys.stderr, flush=True)
     t1 = time.time()
     segments, info = model.transcribe(wav_path, beam_size=5)
