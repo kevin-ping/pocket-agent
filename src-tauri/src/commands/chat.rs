@@ -267,7 +267,7 @@ fn voice_lang(voice: &str) -> &str {
     voice.split('-').next().unwrap_or("zh")
 }
 
-fn select_voice(text: &str, primary: &str, aux1: &str, aux2: &str, fixed_lang: &str) -> String {
+fn select_voice(text: &str, primary: &str, aux1: &str, aux2: &str, fixed_lang: &str, user_lang: &str) -> String {
     if !fixed_lang.is_empty() {
         let forced_voice = match fixed_lang {
             "aux1" if !aux1.is_empty() => aux1,
@@ -286,11 +286,24 @@ fn select_voice(text: &str, primary: &str, aux1: &str, aux2: &str, fixed_lang: &
             // Fall through to auto-detection below
         }
     }
-    let detected = detect_language(text);
-    eprintln!("[TTS] detected language: {}", detected);
+    // Use user input language (not sentence content) to select voice.
+    // This ensures Chinese input → all Chinese voice, English input → all English voice.
+    // Only fallback to content detection if user_lang doesn't match any configured voice.
+    let lang = if !user_lang.is_empty() { user_lang } else { detect_language(text) };
+    eprintln!("[TTS] user_lang={}, using lang: {}", user_lang, lang);
     for v in &[primary, aux1, aux2] {
-        if !v.is_empty() && voice_lang(v) == detected {
+        if !v.is_empty() && voice_lang(v) == lang {
             return v.to_string();
+        }
+    }
+    // Fallback: try content-based detection if user_lang didn't match
+    let detected = detect_language(text);
+    if detected != lang {
+        eprintln!("[TTS] user_lang {} has no matching voice, fallback to detected: {}", lang, detected);
+        for v in &[primary, aux1, aux2] {
+            if !v.is_empty() && voice_lang(v) == detected {
+                return v.to_string();
+            }
         }
     }
     primary.to_string()
@@ -545,15 +558,18 @@ fn push_to_self(text: &str, emotion: &str, voice: &str) {
 }
 
 fn emit_text_without_tts(app: &AppHandle, full_response: &str, emotion: &str) {
+    let cleaned = strip_all_cmd_tags(full_response);
+    if cleaned.is_empty() { return; }
+
     // Text-only fallback: no audio plays, but UI still wants the "speaking" animation
     // while text streams. Fire chat-audio-playing alongside speaking-start.
     let _ = app.emit("chat-audio-playing", ());
     let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
         emotion: emotion.to_string(),
-        total_chars: full_response.chars().count(),
+        total_chars: cleaned.chars().count(),
         has_audio: false,
     });
-    for ch in full_response.chars() {
+    for ch in cleaned.chars() {
         let _ = app.emit("chat-stream", ChatStreamPayload { delta: ch.to_string() });
     }
     let _ = app.emit("chat-stream-end", ());
@@ -741,8 +757,13 @@ pub async fn dispatch_bridge_message(
                 return Ok(());
             }
             // Push response to internal /push endpoint to trigger TTS + display
-            let emotion = detect_emotion(&full_response);
-            push_to_self(&full_response, &emotion, "zh-CN-XiaoxiaoNeural");
+            let cleaned = strip_all_cmd_tags(&full_response);
+            if cleaned.is_empty() {
+                let _ = app.emit("bridge-turn-finished", ());
+                return Ok(());
+            }
+            let emotion = detect_emotion(&cleaned);
+            push_to_self(&cleaned, &emotion, "zh-CN-XiaoxiaoNeural");
             Ok(())
         }
         Err(e) => {
@@ -824,15 +845,13 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
         Some(std::sync::Arc::new(move |sentence: &str| {
             // TTS only: generate and play audio. speaking-start is emitted
             // in send_message() before run_hermes_turn() to guarantee ordering.
-            // Non-blocking: skip sentence if queue is saturated to avoid stalling
-            // the stream delta handler. Logged so we can tune MAX_AUDIO_QUEUE.
-            if is_queue_full() {
-                eprintln!("[SPEAK] queue full, skipping {} chars", sentence.chars().count());
-                return;
-            }
+            // speak_internal handles queue waiting (30s blocking) so no sentence
+            // is dropped — it just waits for the pipeline to catch up.
             let emotion = detect_emotion(sentence);
-            let voice = select_voice(sentence, &primary, &aux1, &aux2, &fixed);
-            speak_internal(&speak_app, sentence, &emotion, &voice, &speak_format, speak_generation, false);
+            let clean_sentence = strip_all_cmd_tags(sentence);
+            if clean_sentence.is_empty() { return; }
+            let voice = select_voice(&clean_sentence, &primary, &aux1, &aux2, &fixed, &user_lang);
+            speak_internal(&speak_app, &clean_sentence, &emotion, &voice, &speak_format, speak_generation, false);
         }))
     } else {
         None
@@ -951,7 +970,7 @@ pub async fn speak_text(
     let aux2 = tts_aux2_voice.unwrap_or_default();
     let generation = AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
-    let voice = override_voice.unwrap_or_else(|| select_voice(&text, &primary, &aux1, &aux2, ""));
+    let voice = override_voice.unwrap_or_else(|| select_voice(&text, &primary, &aux1, &aux2, "", ""));
     let emotion_str = emotion.unwrap_or_else(|| detect_emotion(&text));
 
     speak_internal(&app, &text, &emotion_str, &voice, &format, generation, true);
@@ -994,7 +1013,7 @@ pub async fn speak_status(
 
     let voice = override_voice
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| select_voice(&text, &primary, &aux1, &aux2, ""));
+        .unwrap_or_else(|| select_voice(&text, &primary, &aux1, &aux2, "", ""));
     let _ = audio_sender().lock().unwrap().send(AudioCmd::Speak {
         text: text.clone(),
         emotion: "neutral".to_string(),
@@ -1015,6 +1034,28 @@ fn strip_cmd_tags(text: &str) -> String {
     let clean = re.replace_all(text, "").to_string();
     let space_re = regex::Regex::new(r"  +").unwrap();
     space_re.replace_all(&clean.trim(), " ").to_string()
+}
+
+/// Comprehensive CMD filter for streaming deltas and TTS input.
+/// Covers: [LOCAL_CMD ...], [CMD:...], residual "CMD]...", and
+/// orphaned lines starting with executing:/OK/ERROR/FAILED.
+/// Returns cleaned text with multi-space collapsed.
+fn strip_all_cmd_tags(text: &str) -> String {
+    let full_re = regex::Regex::new(r#"\[LOCAL_CMD[\s\S]*?\]"#).unwrap();
+    let cmd_re = regex::Regex::new(r#"\[CMD:[^\]]*\]"#).unwrap();
+    let resid_re = regex::Regex::new(r#"CMD\][^\n]*"#).unwrap();
+    let kw_re = regex::Regex::new(r#"(?m)^(executing:|OK|ERROR|FAILED)\s[^\n]*\n?"#).unwrap();
+
+    let s = full_re.replace_all(text, "").to_string();
+    let s = cmd_re.replace_all(&s, "").to_string();
+    let s = resid_re.replace_all(&s, "").to_string();
+    let s = kw_re.replace_all(&s, "").to_string();
+
+    let space_re = regex::Regex::new(r"  +").unwrap();
+    let blank_re = regex::Regex::new(r"\n{3,}").unwrap();
+    let s = space_re.replace_all(&s, " ").to_string();
+    let s = blank_re.replace_all(&s, "\n\n").to_string();
+    s.trim().to_string()
 }
 
 /// Extract [CMD:...] tags from text, execute them, return text with tags removed.
