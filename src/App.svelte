@@ -265,7 +265,7 @@
     return undefined;
   }
 
-  type StatusKind = { kind: 'thinking' } | { kind: 'querying'; name: string } | { kind: 'executing' };
+  type StatusKind = { kind: 'thinking' } | { kind: 'querying'; name: string } | { kind: 'executing' } | { kind: 'running-command' };
   function speakStatus(kind: StatusKind) {
     cancelPendingStatusSpeech();
     const s = get(settingsStore);
@@ -274,6 +274,7 @@
     const p = STATUS_PHRASES[lang] ?? STATUS_PHRASES.zh;
     const text = kind.kind === 'thinking' ? p.thinking
                : kind.kind === 'executing' ? p.executing
+               : kind.kind === 'running-command' ? p.runningCommand
                : p.querying(kind.name);
     if (!text || text === lastSpokenStatus) return;
     lastSpokenStatus = text;
@@ -289,6 +290,10 @@
   }
 
   async function setupListeners() {
+    chatStore.setOnCmdDetected(() => {
+      chatStore.addThinkingStep('🔧 运行命令');
+      speakStatus({ kind: 'running-command' });
+    });
     unlisten = await Promise.all([
       listen('chat-thinking-start', () => {
         characterState.toThinking();

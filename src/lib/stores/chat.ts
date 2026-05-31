@@ -64,9 +64,47 @@ let scriptDetected: boolean = false;
 let streamEnding = false;
 // Collapse runs of 3+ newlines (LLM tool-call segment stitching) to a single blank line.
 let trailingNewlines = 0;
+// CMD-strip state: swallow [CMD:...] and [LOCAL_CMD ...] tokens from the displayed stream.
+// Tokens may straddle delta boundaries, so we buffer chars that might be opener prefixes.
+let inCmd = false;
+let cmdHold = '';
+let onCmdDetected: (() => void) | null = null;
 // hold refs to store functions so timer callbacks can use them
 let storeUpdate: any;
 let storeFinalize: (() => void) | null = null;
+
+// Streaming filter that hides CMD tokens from chat display.
+// Backend still sends raw deltas; TTS and history are stripped server-side.
+function filterCmd(delta: string): string {
+  let out = '';
+  for (const ch of delta) {
+    if (inCmd) {
+      if (ch === ']') inCmd = false;
+      continue;
+    }
+    if (cmdHold.length === 0 && ch !== '[') {
+      out += ch;
+      continue;
+    }
+    cmdHold += ch;
+    if (cmdHold === '[CMD:' || cmdHold === '[LOCAL_CMD') {
+      cmdHold = '';
+      inCmd = true;
+      onCmdDetected?.();
+      continue;
+    }
+    if (!'[CMD:'.startsWith(cmdHold) && !'[LOCAL_CMD'.startsWith(cmdHold)) {
+      out += cmdHold;
+      cmdHold = '';
+    }
+  }
+  return out;
+}
+
+function resetCmdState() {
+  inCmd = false;
+  cmdHold = '';
+}
 
 function pullNextUnit(chars: string[]): string {
   if (chars.length === 0) return '';
@@ -160,7 +198,12 @@ function createChatStore() {
 
     startStream: () => {
       trailingNewlines = 0;
+      resetCmdState();
       update((s) => ({ ...s, streamingContent: '', isStreaming: true, error: null, thinkingSteps: [] }));
+    },
+
+    setOnCmdDetected: (cb: (() => void) | null) => {
+      onCmdDetected = cb;
     },
 
     /** Add an intermediate step shown during LLM thinking/tool-calling phase */
@@ -215,7 +258,8 @@ function createChatStore() {
     },
 
     appendDelta: (delta: string) => {
-      for (const ch of delta) {
+      const clean = filterCmd(delta);
+      for (const ch of clean) {
         if (ch === '\n') {
           if (trailingNewlines >= 2) continue;
           trailingNewlines++;
@@ -247,6 +291,12 @@ function createChatStore() {
     },
 
     endStream: () => {
+      // Flush any held opener-prefix that turned out not to be a CMD (e.g. trailing "[").
+      if (!inCmd && cmdHold.length > 0) {
+        for (const ch of cmdHold) pendingChars.push(ch);
+        cmdHold = '';
+        if (!typewriterTimer && pendingChars.length > 0) startTimer();
+      }
       streamEnding = true;
       if (!typewriterTimer) finalizeStream();
     },
@@ -256,6 +306,7 @@ function createChatStore() {
       if (pendingChars.length > 0) pendingChars = [];
       streamEnding = false;
       trailingNewlines = 0;
+      resetCmdState();
       update((s) => ({ ...s, isStreaming: false, streamingContent: '', error: msg, thinkingSteps: [] }));
     },
 
@@ -264,6 +315,7 @@ function createChatStore() {
       if (pendingChars.length > 0) pendingChars = [];
       streamEnding = false;
       trailingNewlines = 0;
+      resetCmdState();
       set({ messages: [], streamingContent: '', isStreaming: false, error: null, thinkingSteps: [] });
     },
   };

@@ -236,14 +236,14 @@ export function t(voice: string): Strings {
 }
 
 // ── Status TTS phrases (spoken; intentionally short and natural) ──
-export const STATUS_PHRASES: Record<LangKey, { thinking: string; querying: (n: string) => string; executing: string }> = {
-  zh: { thinking: '正在思考',  querying: (n) => `查询 ${n}`,            executing: '正在执行操作' },
-  en: { thinking: 'Thinking', querying: (n) => `Calling ${n}`,         executing: 'Working on it' },
-  ja: { thinking: '考え中',    querying: (n) => `${n} を呼び出し中`,   executing: '実行中' },
-  ko: { thinking: '생각 중',   querying: (n) => `${n} 호출 중`,         executing: '실행 중' },
-  fr: { thinking: 'Réflexion', querying: (n) => `Appel de ${n}`,        executing: 'En cours' },
-  de: { thinking: 'Denke nach', querying: (n) => `${n} wird aufgerufen`, executing: 'In Arbeit' },
-  es: { thinking: 'Pensando',  querying: (n) => `Llamando a ${n}`,      executing: 'Procesando' },
+export const STATUS_PHRASES: Record<LangKey, { thinking: string; querying: (n: string) => string; executing: string; runningCommand: string }> = {
+  zh: { thinking: '正在思考',  querying: (n) => `查询 ${n}`,            executing: '正在执行操作',    runningCommand: '运行命令' },
+  en: { thinking: 'Thinking', querying: (n) => `Calling ${n}`,         executing: 'Working on it',  runningCommand: 'Running command' },
+  ja: { thinking: '考え中',    querying: (n) => `${n} を呼び出し中`,   executing: '実行中',          runningCommand: 'コマンド実行中' },
+  ko: { thinking: '생각 중',   querying: (n) => `${n} 호출 중`,         executing: '실행 중',         runningCommand: '명령 실행 중' },
+  fr: { thinking: 'Réflexion', querying: (n) => `Appel de ${n}`,        executing: 'En cours',       runningCommand: 'Exécution de la commande' },
+  de: { thinking: 'Denke nach', querying: (n) => `${n} wird aufgerufen`, executing: 'In Arbeit',     runningCommand: 'Befehl wird ausgeführt' },
+  es: { thinking: 'Pensando',  querying: (n) => `Llamando a ${n}`,      executing: 'Procesando',     runningCommand: 'Ejecutando comando' },
 };
 
 /** Detect dominant language of a short text via Unicode ranges. */
