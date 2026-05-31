@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """stt-helper: uses faster_whisper for local STT. Returns JSON with text + detected language."""
+import os
 import sys
 import json
+
+# Workaround for libiomp5 double-load on macOS (faster_whisper/ctranslate2 vs numpy/MKL).
+# Must be set before importing faster_whisper.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 from faster_whisper import WhisperModel
 
 if len(sys.argv) != 2:

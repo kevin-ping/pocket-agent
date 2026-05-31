@@ -17,6 +17,10 @@ import tempfile
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+# Workaround for libiomp5 double-load on macOS (faster_whisper/ctranslate2 vs numpy/MKL).
+# Must be set before importing faster_whisper.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 from faster_whisper import WhisperModel
 
 

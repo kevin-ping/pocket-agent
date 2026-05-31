@@ -41,6 +41,9 @@ interface Strings {
   ariaCloseSettings: string;
   ariaAvatar: string;
   ariaVolume: string;
+  breakConfirmTitle: string;
+  breakConfirmBreak: string;
+  breakConfirmContinue: string;
 }
 
 const translations: Record<string, Strings> = {
@@ -83,6 +86,9 @@ const translations: Record<string, Strings> = {
     ariaCloseSettings: '关闭设置',
     ariaAvatar: '头像',
     ariaVolume: '音量',
+    breakConfirmTitle: '当前对话还在进行中，是否打断？',
+    breakConfirmBreak: '打断',
+    breakConfirmContinue: '继续等待',
   },
   en: {
     hint: 'Press {key} to talk, press again to stop, or type below',
@@ -123,6 +129,9 @@ const translations: Record<string, Strings> = {
     ariaCloseSettings: 'Close settings',
     ariaAvatar: 'Avatar',
     ariaVolume: 'Volume',
+    breakConfirmTitle: 'A conversation is still in progress. Interrupt it?',
+    breakConfirmBreak: 'Interrupt',
+    breakConfirmContinue: 'Keep waiting',
   },
   ja: {
     hint: '{key}キーで話す、もう一度で終了、または下に入力',
@@ -163,6 +172,9 @@ const translations: Record<string, Strings> = {
     ariaCloseSettings: '設定を閉じる',
     ariaAvatar: 'アバター',
     ariaVolume: '音量',
+    breakConfirmTitle: '会話がまだ進行中です。中断しますか？',
+    breakConfirmBreak: '中断',
+    breakConfirmContinue: '待つ',
   },
   ko: {
     hint: '{key} 키를 눌러 말하기, 다시 눌러 끝내기, 또는 아래에 입력',
@@ -203,13 +215,16 @@ const translations: Record<string, Strings> = {
     ariaCloseSettings: '설정 닫기',
     ariaAvatar: '아바타',
     ariaVolume: '볼륨',
+    breakConfirmTitle: '대화가 아직 진행 중입니다. 중단하시겠습니까?',
+    breakConfirmBreak: '중단',
+    breakConfirmContinue: '계속 기다리기',
   },
 };
 
 // Fallback to zh for unsupported languages
 const TRANSLATIONS: Record<string, Strings> = { ...translations };
 
-function langFromVoice(voice: string): LangKey {
+export function langFromVoice(voice: string): LangKey {
   const code = voice.split('-')[0];
   if (code in TRANSLATIONS) return code as LangKey;
   return 'zh';
@@ -220,4 +235,32 @@ export function t(voice: string): Strings {
   return TRANSLATIONS[lang] ?? TRANSLATIONS.zh;
 }
 
-export type { Strings };
+// ── Status TTS phrases (spoken; intentionally short and natural) ──
+export const STATUS_PHRASES: Record<LangKey, { thinking: string; querying: (n: string) => string; executing: string }> = {
+  zh: { thinking: '正在思考',  querying: (n) => `查询 ${n}`,            executing: '正在执行操作' },
+  en: { thinking: 'Thinking', querying: (n) => `Calling ${n}`,         executing: 'Working on it' },
+  ja: { thinking: '考え中',    querying: (n) => `${n} を呼び出し中`,   executing: '実行中' },
+  ko: { thinking: '생각 중',   querying: (n) => `${n} 호출 중`,         executing: '실행 중' },
+  fr: { thinking: 'Réflexion', querying: (n) => `Appel de ${n}`,        executing: 'En cours' },
+  de: { thinking: 'Denke nach', querying: (n) => `${n} wird aufgerufen`, executing: 'In Arbeit' },
+  es: { thinking: 'Pensando',  querying: (n) => `Llamando a ${n}`,      executing: 'Procesando' },
+};
+
+/** Detect dominant language of a short text via Unicode ranges. */
+export function detectLang(text: string): LangKey {
+  let zh = 0, ja = 0, ko = 0, en = 0;
+  for (const ch of text) {
+    const code = ch.codePointAt(0)!;
+    if (code >= 0x3040 && code <= 0x30FF) ja++;
+    else if (code >= 0xAC00 && code <= 0xD7AF) ko++;
+    else if (code >= 0x4E00 && code <= 0x9FFF) zh++;
+    else if ((code >= 0x41 && code <= 0x5A) || (code >= 0x61 && code <= 0x7A)) en++;
+  }
+  if (ja > 0) return 'ja';
+  if (ko > 0) return 'ko';
+  if (zh > en && zh > 0) return 'zh';
+  if (en > 0) return 'en';
+  return 'zh';
+}
+
+export type { Strings, LangKey };

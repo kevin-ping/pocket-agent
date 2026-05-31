@@ -50,14 +50,7 @@
 
   .status-content {
     padding: 6px 10px;
-    max-height: 78px;
-    overflow-y: auto;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(160, 168, 255, 0.2) transparent;
   }
-  .status-content::-webkit-scrollbar       { width: 2px; }
-  .status-content::-webkit-scrollbar-track { background: transparent; }
-  .status-content::-webkit-scrollbar-thumb { background: rgba(160, 168, 255, 0.2); border-radius: 1px; }
 
   .steps {
     display: flex;

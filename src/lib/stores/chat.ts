@@ -62,6 +62,8 @@ let currentSpeed: number = EMOTION_SPEEDS.friendly;
 let currentEmotion: string = 'friendly';
 let scriptDetected: boolean = false;
 let streamEnding = false;
+// Collapse runs of 3+ newlines (LLM tool-call segment stitching) to a single blank line.
+let trailingNewlines = 0;
 // hold refs to store functions so timer callbacks can use them
 let storeUpdate: any;
 let storeFinalize: (() => void) | null = null;
@@ -101,7 +103,12 @@ function startTimer() {
       return;
     }
     const chunk = pullNextUnit(pendingChars);
-    if (chunk && storeUpdate) storeUpdate((s: any) => ({ ...s, streamingContent: s.streamingContent + chunk }));
+    if (chunk && storeUpdate) storeUpdate((s: any) => ({
+      ...s,
+      // Strip leading whitespace when streamingContent is still empty, to avoid
+      // an empty line at the top when the LLM starts its response with "\n".
+      streamingContent: s.streamingContent ? s.streamingContent + chunk : chunk.replace(/^\s+/, ''),
+    }));
   }, currentSpeed);
 }
 
@@ -151,8 +158,10 @@ function createChatStore() {
         messages: [...s.messages, { role: 'assistant', content, timestamp: Date.now() }],
       })),
 
-    startStream: () =>
-      update((s) => ({ ...s, streamingContent: '', isStreaming: true, error: null, thinkingSteps: [] })),
+    startStream: () => {
+      trailingNewlines = 0;
+      update((s) => ({ ...s, streamingContent: '', isStreaming: true, error: null, thinkingSteps: [] }));
+    },
 
     /** Add an intermediate step shown during LLM thinking/tool-calling phase */
     addThinkingStep: (step: string) =>
@@ -164,7 +173,9 @@ function createChatStore() {
         return { ...s, thinkingSteps: [...s.thinkingSteps, step] };
       }),
 
-    /** Update the last thinking step in-place (reasoning comes as many tiny chunks) */
+    /** Update the last thinking step in-place (reasoning comes as many tiny chunks).
+     *  Once a tool (🔧) step has been added, ignore further reasoning so the visible
+     *  sequence is 🤔 → 🔧 → 🔧 → 🔧 instead of 🤔 → 🔧 → 🤔 → 🔧 → 🤔. */
     updateLastThinkingStep: (text: string) =>
       update((s) => {
         if (s.thinkingSteps.length === 0) {
@@ -176,7 +187,7 @@ function createChatStore() {
           updated[updated.length - 1] = `🤔 ${text}`;
           return { ...s, thinkingSteps: updated };
         }
-        return { ...s, thinkingSteps: [...s.thinkingSteps, `🤔 ${text}`] };
+        return s;
       }),
 
     /** Clear all thinking steps — called when final text arrives */
@@ -191,16 +202,28 @@ function createChatStore() {
       if (pendingChars.length > 0) {
         const remaining = pendingChars.join('');
         pendingChars = [];
-        update((s) => ({ ...s, streamingContent: s.streamingContent + remaining }));
+        update((s) => ({
+          ...s,
+          streamingContent: s.streamingContent ? s.streamingContent + remaining : remaining.replace(/^\s+/, ''),
+        }));
       }
       streamEnding = false;
       scriptDetected = false;
+      trailingNewlines = 0;
       currentEmotion = emotion;
       currentSpeed = EMOTION_SPEEDS[emotion] ?? EMOTION_SPEEDS.friendly;
     },
 
     appendDelta: (delta: string) => {
-      for (const ch of delta) pendingChars.push(ch);
+      for (const ch of delta) {
+        if (ch === '\n') {
+          if (trailingNewlines >= 2) continue;
+          trailingNewlines++;
+        } else if (ch !== '\r') {
+          trailingNewlines = 0;
+        }
+        pendingChars.push(ch);
+      }
 
       // Detect script once we have enough text
       if (!scriptDetected && pendingChars.length >= 8) {
@@ -232,6 +255,7 @@ function createChatStore() {
       if (typewriterTimer) { clearInterval(typewriterTimer); typewriterTimer = null; }
       if (pendingChars.length > 0) pendingChars = [];
       streamEnding = false;
+      trailingNewlines = 0;
       update((s) => ({ ...s, isStreaming: false, streamingContent: '', error: msg, thinkingSteps: [] }));
     },
 
@@ -239,6 +263,7 @@ function createChatStore() {
       if (typewriterTimer) { clearInterval(typewriterTimer); typewriterTimer = null; }
       if (pendingChars.length > 0) pendingChars = [];
       streamEnding = false;
+      trailingNewlines = 0;
       set({ messages: [], streamingContent: '', isStreaming: false, error: null, thinkingSteps: [] });
     },
   };

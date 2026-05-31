@@ -54,6 +54,11 @@ pub fn start_voice_recording(
         }
     }
 
+    // Destructive actions deferred from the hotkey thread so the break-confirmation
+    // popup can intercept them: stop any in-progress TTS, then warm up the mic.
+    crate::commands::chat::stop_audio_queue();
+    crate::voice::record::pre_start();
+
     let handle = match take_pre_started() {
         Some(h) => h,
         None => start_recording()?,

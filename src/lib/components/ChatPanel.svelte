@@ -95,7 +95,7 @@
   let isBusy = $derived($chatStore.isStreaming || $characterState === 'thinking');
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey && inputText.trim() && !isBusy) {
+    if (e.key === 'Enter' && !e.shiftKey && inputText.trim()) {
       e.preventDefault();
       onSend(inputText.trim());
       inputText = '';
@@ -103,7 +103,7 @@
   }
 
   function handleSendClick() {
-    if (inputText.trim() && !isBusy) {
+    if (inputText.trim()) {
       onSend(inputText.trim());
       inputText = '';
     }
@@ -122,15 +122,7 @@
   <!-- Content area -->
   <div class="content-area" bind:this={contentEl} class:error={isError}>
     <div class="message-content">
-      {#if $chatStore.isStreaming && $chatStore.thinkingSteps.length > 0 && !$chatStore.streamingContent}
-        <!-- LLM thinking/tool-calling phase: show intermediate steps -->
-        <div class="thinking-steps">
-          {#each $chatStore.thinkingSteps as step}
-            <span class="thinking-step">{step}</span>
-          {/each}
-        </div>
-        <span class="cursor" aria-hidden="true">▋</span>
-      {:else if $chatStore.isStreaming}
+      {#if $chatStore.isStreaming}
         <p class="message-text" class:error-text={isError}>
           {@html sanitizeHtml($chatStore.streamingContent)}<span class="cursor" aria-hidden="true">▋</span>
         </p>
@@ -149,7 +141,6 @@
       placeholder={isBusy ? t($settingsStore.tts_primary_voice).inputBusy : t($settingsStore.tts_primary_voice).inputPlaceholder}
       bind:value={inputText}
       onkeydown={handleKeydown}
-      disabled={isBusy}
       maxlength={500}
       autocomplete="off"
       spellcheck="false"
@@ -158,7 +149,7 @@
     <button
       class="send-btn"
       onclick={handleSendClick}
-      disabled={isBusy || !inputText.trim()}
+      disabled={!inputText.trim()}
       aria-label="发送"
     >
       ↑
@@ -287,25 +278,6 @@
   .error-text { color: rgba(255, 120, 120, 0.9) !important; }
 
   .message-content { width: 100%; }
-
-  .thinking-steps {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .thinking-step {
-    font-size: 11px;
-    line-height: 1.5;
-    color: rgba(160, 168, 255, 0.7);
-    animation: fade-in-step 0.3s ease-out;
-    word-break: break-word;
-  }
-
-  @keyframes fade-in-step {
-    from { opacity: 0; transform: translateY(-4px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
 
   @keyframes blink-cursor {
     0%, 100% { opacity: 1; }

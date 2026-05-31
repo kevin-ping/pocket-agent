@@ -3,7 +3,7 @@
   import { get } from 'svelte/store';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { invoke } from '@tauri-apps/api/core';
-  import { getCurrentWindow, LogicalPosition } from '@tauri-apps/api/window';
+  import { getCurrentWindow, LogicalPosition, LogicalSize } from '@tauri-apps/api/window';
 
   import AvatarIcon from './lib/components/AvatarIcon.svelte';
   import DynamicIsland from './lib/components/DynamicIsland.svelte';
@@ -11,11 +11,13 @@
   import ChatPanel from './lib/components/ChatPanel.svelte';
   import SettingsPanel from './lib/components/SettingsPanel.svelte';
   import StatusPanel from './lib/components/StatusPanel.svelte';
+  import BreakConfirmModal from './lib/components/BreakConfirmModal.svelte';
 
   import { characterState } from './lib/stores/character';
   import { chatStore } from './lib/stores/chat';
   import { settingsStore } from './lib/stores/settings';
   import { layoutStore } from './lib/stores/layout';
+  import { STATUS_PHRASES, langFromVoice, detectLang, type LangKey } from './lib/i18n';
 
   const appWindow = getCurrentWindow();
 
@@ -28,10 +30,22 @@
 
   // ─── Chat send ───
   async function handleSendMessage(text: string, userLanguage?: string) {
+    if (isTurnActive()) {
+      requestNewTurn(() => { handleSendMessageImpl(text, userLanguage); });
+      return;
+    }
+    return handleSendMessageImpl(text, userLanguage);
+  }
+
+  async function handleSendMessageImpl(text: string, userLanguage?: string) {
+    // Update current input language for status TTS (explicit param from STT wins,
+    // otherwise detect from typed text).
+    currentInputLang = (userLanguage as LangKey | undefined) ?? detectLang(text);
+
     chatStore.addUserMessage(text);
     // Save user message to history
     invoke('save_chat_message', { role: 'user', content: text }).catch(e => console.error('Failed to save user message:', e));
-    
+
     chatStore.startStream();
     characterState.toThinking();
     islandMode = 'thinking';
@@ -79,6 +93,8 @@
     bridgeThinkingActive = false;
     islandMode = 'idle';
     spiritPhase = 0;
+    cancelPendingStatusSpeech();
+    lastSpokenStatus = null;
     chatStore.clearThinkingSteps();
     characterState.toIdle();
     if (message) {
@@ -94,6 +110,8 @@
     firstStreamDelta = false;
     characterState.toThinking();
     chatStore.addThinkingStep('🤔 正在思考...');
+    cancelPendingStatusSpeech();
+    pendingStatusSpeech = setTimeout(() => speakStatus({ kind: 'thinking' }), 250);
     bridgeFallbackTimer = setTimeout(() => {
       stopBridgeThinking('暂时还没有收到 Hermes 回推');
     }, 30000);
@@ -123,6 +141,21 @@
       spiritPhase = 0;
       lastSpeakingHadAudio = true;  // reset guard
     }
+  }
+
+  // Grow window vertically to fit the status panel while expanded so 🤔 + 🔧 lines stay visible.
+  const STATUS_BASE_H = 188;     // matches layout.ts CHAT_H
+  const STATUS_LINE_H = 17;      // 10.5 px font * 1.45 line-height ≈ 15 + 2 px gap
+  const STATUS_BLOCK_PAD = 18;   // 6+6 content padding + 6 .status-row margin-top
+  const STATUS_EXPANDED_W = 400; // 108 (AVATAR_W) + 12 (GAP) + 280 (CHAT_W)
+  $: extraStatusH = $chatStore.thinkingSteps.length === 0
+    ? 0
+    : STATUS_BLOCK_PAD + $chatStore.thinkingSteps.length * STATUS_LINE_H;
+  $: if ($layoutStore.expanded && !$layoutStore.resizing) {
+    const targetH = STATUS_BASE_H + extraStatusH;
+    queueMicrotask(() => {
+      appWindow.setSize(new LogicalSize(STATUS_EXPANDED_W, targetH)).catch(() => {});
+    });
   }
 
   // ─── Settings panel ───
@@ -158,16 +191,116 @@
   // ─── Event listeners ───
   let unlisten: UnlistenFn[] = [];
 
+  // ─── Status TTS ───
+  let pendingStatusSpeech: ReturnType<typeof setTimeout> | null = null;
+  let lastSpokenStatus: string | null = null;
+  // Most-recent user-input language; status TTS uses this so spoken phrases
+  // match the language the user is actually using.
+  let currentInputLang: LangKey = 'zh';
+
+  function cancelPendingStatusSpeech() {
+    if (pendingStatusSpeech) { clearTimeout(pendingStatusSpeech); pendingStatusSpeech = null; }
+  }
+
+  // ─── Break / interrupt current turn ───
+  let showBreakConfirm = false;
+  let pendingBreakAction: (() => void) | null = null;
+
+  function isTurnActive(): boolean {
+    const s = get(chatStore);
+    return s.isStreaming || s.thinkingSteps.length > 0 || bridgeThinkingActive;
+  }
+
+  function requestNewTurn(action: () => void) {
+    if (!isTurnActive()) { action(); return; }
+    pendingBreakAction = action;
+    showBreakConfirm = true;
+  }
+
+  async function confirmBreak() {
+    showBreakConfirm = false;
+    cancelPendingStatusSpeech();
+    lastSpokenStatus = null;
+    try { await invoke('discard_pending_turn'); } catch (e) { console.error(e); }
+    chatStore.endStream();
+    chatStore.clearThinkingSteps();
+    bridgeThinkingActive = false;
+    clearBridgeFallbackTimer();
+    islandMode = 'idle';
+    spiritPhase = 0;
+    characterState.toIdle();
+    const action = pendingBreakAction;
+    pendingBreakAction = null;
+    action?.();
+  }
+
+  async function cancelBreak() {
+    showBreakConfirm = false;
+    pendingBreakAction = null;
+    // The hotkey thread already flipped is_active=true before the popup showed,
+    // so reset it here — otherwise the next press is interpreted as "stop".
+    try { await invoke('reset_hotkey_active_state'); } catch (e) { console.error(e); }
+  }
+
+  function autoCloseBreakConfirm() {
+    if (showBreakConfirm) cancelBreak();
+  }
+
+  // Resolve which language status TTS should use this turn.
+  // Forced language wins; otherwise fall back to whatever the user just typed/said.
+  function getStatusLang(): LangKey {
+    const s = get(settingsStore);
+    if (s.fixed_lang === 'primary' && s.tts_primary_voice) return langFromVoice(s.tts_primary_voice);
+    if (s.fixed_lang === 'aux1' && s.tts_aux1_voice) return langFromVoice(s.tts_aux1_voice);
+    if (s.fixed_lang === 'aux2' && s.tts_aux2_voice) return langFromVoice(s.tts_aux2_voice);
+    return currentInputLang;
+  }
+
+  // Pick a configured voice that matches the target language; undefined → backend auto-picks.
+  function pickVoiceForLang(lang: LangKey): string | undefined {
+    const s = get(settingsStore);
+    for (const v of [s.tts_primary_voice, s.tts_aux1_voice, s.tts_aux2_voice]) {
+      if (v && langFromVoice(v) === lang) return v;
+    }
+    return undefined;
+  }
+
+  type StatusKind = { kind: 'thinking' } | { kind: 'querying'; name: string } | { kind: 'executing' };
+  function speakStatus(kind: StatusKind) {
+    cancelPendingStatusSpeech();
+    const s = get(settingsStore);
+    if (!s.tts_enabled) return;
+    const lang = getStatusLang();
+    const p = STATUS_PHRASES[lang] ?? STATUS_PHRASES.zh;
+    const text = kind.kind === 'thinking' ? p.thinking
+               : kind.kind === 'executing' ? p.executing
+               : p.querying(kind.name);
+    if (!text || text === lastSpokenStatus) return;
+    lastSpokenStatus = text;
+    invoke("speak_status", {
+      text,
+      overrideVoice: pickVoiceForLang(lang),
+      ttsFormat: s.tts_format,
+      ttsPrimaryVoice: s.tts_primary_voice,
+      ttsAux1Voice: s.tts_aux1_voice,
+      ttsAux2Voice: s.tts_aux2_voice,
+      ttsEnabled: s.tts_enabled,
+    }).catch(console.error);
+  }
+
   async function setupListeners() {
     unlisten = await Promise.all([
-      listen('chat-thinking-start', () => { characterState.toThinking(); chatStore.addThinkingStep('🤔 正在思考...'); debugState('chat-thinking-start'); }),
+      listen('chat-thinking-start', () => {
+        characterState.toThinking();
+        chatStore.addThinkingStep('🤔 正在思考...');
+        cancelPendingStatusSpeech();
+        pendingStatusSpeech = setTimeout(() => speakStatus({ kind: 'thinking' }), 250);
+        debugState('chat-thinking-start');
+      }),
       listen<{ emotion: string; total_chars: number; has_audio: boolean }>('chat-speaking-start', (e) => {
+        cancelPendingStatusSpeech();
         debugState('chat-speaking-start', e.payload as unknown as Record<string, unknown>);
         lastSpeakingHadAudio = e.payload.has_audio;
-        islandMode = 'idle';
-        characterState.toSpeaking();
-        chatStore.clearThinkingSteps();
-        spiritPhase = 3;
         if (!$chatStore.isStreaming) {
           chatStore.startStream();
         }
@@ -176,7 +309,17 @@
           layoutStore.toggle();
         }
       }),
+      listen('chat-audio-playing', () => {
+        cancelPendingStatusSpeech();
+        lastSpokenStatus = null;
+        debugState('chat-audio-playing');
+        islandMode = 'idle';
+        characterState.toSpeaking();
+        chatStore.clearThinkingSteps();
+        spiritPhase = 3;
+      }),
       listen<{ delta: string }>('chat-stream', (e) => {
+        cancelPendingStatusSpeech();
         if (!firstStreamDelta) debugState('chat-stream:first-delta', { deltaPreview: e.payload.delta.slice(0, 40) });
         chatStore.appendDelta(e.payload.delta);
         if (!firstStreamDelta) {
@@ -185,19 +328,24 @@
         }
       }),
       listen('chat-stream-end', () => {
+        cancelPendingStatusSpeech();
+        lastSpokenStatus = null;
         debugState('chat-stream-end');
         islandMode = 'idle';
         chatStore.endStream();
-        if (get(characterState) !== 'speaking') {
+        // If audio is expected, let chat-audio-playing / chat-audio-done drive the transition.
+        if (!lastSpeakingHadAudio && get(characterState) !== 'speaking') {
           characterState.toIdle();
           spiritPhase = 0;
         }
+        autoCloseBreakConfirm();
       }),
       listen('chat-audio-done', () => {
         debugState('chat-audio-done');
         chatStore.endStream();
         characterState.transition('speaking', 'idle');
         spiritPhase = 0;
+        autoCloseBreakConfirm();
       }),
 
       // LLM intermediate thinking/reasoning updates (in-place update of last 🤔 step)
@@ -207,24 +355,31 @@
 
       // Tool call start notification
       listen<string>('chat-tool-call', (e) => {
+        cancelPendingStatusSpeech();
         try {
           const payload = JSON.parse(e.payload);
           // Clean up tool name: strip common prefixes
           let toolName = payload.name
             .replace(/^mcp_tradingview_/, '')
             .replace(/^mcp_/, '')
-            .replace(/_/g, ' ');
+            .replace(/_/g, ' ')
+            .trim();
           chatStore.addThinkingStep(`🔧 查询 ${toolName}...`);
+          if (toolName) speakStatus({ kind: 'querying', name: toolName });
         } catch {
           chatStore.addThinkingStep(`🔧 正在执行操作...`);
+          speakStatus({ kind: 'executing' });
         }
       }),
       listen<string>('chat-stream-error', (e) => {
+        cancelPendingStatusSpeech();
+        lastSpokenStatus = null;
         debugState('chat-stream-error', { error: e.payload });
         islandMode = 'idle';
         chatStore.setError(e.payload);
         characterState.toIdle();
         spiritPhase = 0;
+        autoCloseBreakConfirm();
       }),
 
       listen('bridge-thinking-start', () => {
@@ -239,6 +394,8 @@
         bridgeThinkingActive = false;
         islandMode = 'idle';
         spiritPhase = 0;
+        cancelPendingStatusSpeech();
+        lastSpokenStatus = null;
         chatStore.clearThinkingSteps();
         characterState.toIdle();
       }),
@@ -248,15 +405,19 @@
         chatStore.updateLastThinkingStep(e.payload);
       }),
       listen<string>("bridge-tool-call", (e) => {
+        cancelPendingStatusSpeech();
         try {
           const payload = JSON.parse(e.payload);
           let toolName = payload.name
             .replace(/^mcp_tradingview_/, "")
             .replace(/^mcp_/, "")
-            .replace(/_/g, " ");
+            .replace(/_/g, " ")
+            .trim();
           chatStore.addThinkingStep(`🔧 查询 ${toolName}...`);
+          if (toolName) speakStatus({ kind: 'querying', name: toolName });
         } catch {
           chatStore.addThinkingStep("🔧 正在执行操作...");
+          speakStatus({ kind: 'executing' });
         }
       }),
       listen('bridge-turn-finished', () => {
@@ -264,29 +425,33 @@
         if (bridgeThinkingActive) {
           stopBridgeThinking('暂时还没有收到 Hermes 回推');
         }
+        autoCloseBreakConfirm();
       }),
       listen<string>('bridge-turn-error', (e) => {
         debugState('bridge-turn-error', { error: e.payload });
         stopBridgeThinking(`Hermes 转发失败: ${e.payload}`);
+        autoCloseBreakConfirm();
       }),
 
       listen('fn-key-down', () => {
         debugState('fn-key-down');
-        islandMode = 'recording';
-        spiritPhase = 0;
-        firstStreamDelta = false;
-        characterState.toListening();
-        chatStore.clear();
-        invoke('start_voice_recording').catch(console.error);
-        // Start polling audio level for visual feedback
-        audioLevel = 0;
-        if (audioLevelTimer) clearInterval(audioLevelTimer);
-        audioLevelTimer = setInterval(async () => {
-          try {
-            const level = await invoke<number>('get_audio_level');
-            audioLevel = level;
-          } catch {}
-        }, 150);
+        requestNewTurn(() => {
+          islandMode = 'recording';
+          spiritPhase = 0;
+          firstStreamDelta = false;
+          characterState.toListening();
+          chatStore.clear();
+          invoke('start_voice_recording').catch(console.error);
+          // Start polling audio level for visual feedback
+          audioLevel = 0;
+          if (audioLevelTimer) clearInterval(audioLevelTimer);
+          audioLevelTimer = setInterval(async () => {
+            try {
+              const level = await invoke<number>('get_audio_level');
+              audioLevel = level;
+            } catch {}
+          }, 150);
+        });
       }),
       listen('fn-key-up', () => {
         debugState('fn-key-up');
@@ -349,6 +514,7 @@
         debugState('api-push', { emotion: e.payload.emotion, hasVoice: !!e.payload.voice, len: e.payload.text.length });
         const { text, emotion, voice } = e.payload;
         if (!text.trim()) return;
+        currentInputLang = voice ? langFromVoice(voice) : detectLang(text);
         clearBridgeFallbackTimer();
         bridgeThinkingActive = false;
         spiritPhase = 3;
@@ -440,39 +606,45 @@
   role="application"
   aria-label="Pocket Agent"
 >
-  <!-- Chat panel on LEFT (when avatar is on the right side of screen) -->
-  {#if $layoutStore.expanded && $layoutStore.avatarSide === 'right'}
-    <ChatPanel
-      side="left"
-      onSend={handleSendMessage}
-      onCollapse={() => layoutStore.toggle()}
-    />
-    <div class="gap"></div>
-  {/if}
+  <div class="main-row">
+    <!-- Chat panel on LEFT (when avatar is on the right side of screen) -->
+    {#if $layoutStore.expanded && $layoutStore.avatarSide === 'right'}
+      <ChatPanel
+        side="left"
+        onSend={handleSendMessage}
+        onCollapse={() => layoutStore.toggle()}
+      />
+      <div class="gap"></div>
+    {/if}
 
-  <!-- Avatar icon (always visible, handles drag) -->
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div
-    class="avatar-zone"
-    on:mousedown={handleAvatarDragStart}
-  >
-    <AvatarIcon
-      avatarImage={$settingsStore.avatar_image ?? null}
-      spiritPhase={spiritPhase}
-      on:expand={() => layoutStore.toggle()}
-    />
-    <DynamicIsland mode={islandMode} audioLevel={audioLevel} />
-    <div class="status-row"><StatusPanel /></div>
+    <!-- Avatar icon (always visible, handles drag) -->
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div
+      class="avatar-zone"
+      on:mousedown={handleAvatarDragStart}
+    >
+      <AvatarIcon
+        avatarImage={$settingsStore.avatar_image ?? null}
+        spiritPhase={spiritPhase}
+        on:expand={() => layoutStore.toggle()}
+      />
+      <DynamicIsland mode={islandMode} audioLevel={audioLevel} />
+    </div>
+
+    <!-- Chat panel on RIGHT (default, when avatar is on the left side of screen) -->
+    {#if $layoutStore.expanded && $layoutStore.avatarSide === 'left'}
+      <div class="gap"></div>
+      <ChatPanel
+        side="right"
+        onSend={handleSendMessage}
+        onCollapse={() => layoutStore.toggle()}
+      />
+    {/if}
   </div>
 
-  <!-- Chat panel on RIGHT (default, when avatar is on the left side of screen) -->
-  {#if $layoutStore.expanded && $layoutStore.avatarSide === 'left'}
-    <div class="gap"></div>
-    <ChatPanel
-      side="right"
-      onSend={handleSendMessage}
-      onCollapse={() => layoutStore.toggle()}
-    />
+  <!-- Status panel: spans avatar + chat width, only when expanded -->
+  {#if $layoutStore.expanded}
+    <div class="status-row"><StatusPanel /></div>
   {/if}
 
 
@@ -480,6 +652,13 @@
   {#if showSettings}
     <SettingsPanel bind:visible={showSettings} onclose={closeSettings} />
   {/if}
+
+  <!-- Break confirm modal: shown when user triggers a new turn while one is in progress -->
+  <BreakConfirmModal
+    visible={showBreakConfirm}
+    onbreak={confirmBreak}
+    oncancel={cancelBreak}
+  />
 
   <!-- Accessibility guide overlay -->
   {#if showAccessibilityGuide}
@@ -517,10 +696,17 @@
     width: 100%;
     height: 100%;
     display: flex;
-    flex-direction: row;
-    align-items: center;
+    flex-direction: column;
+    align-items: stretch;
     background: transparent;
     position: relative;
+  }
+
+  .main-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    width: 100%;
   }
 
   .avatar-zone {
@@ -584,5 +770,5 @@
     transition: background 0.1s;
   }
   .guide-btn:hover { background: rgba(160, 168, 255, 0.35); }
-  .status-row { margin-top: 4px; flex-shrink: 0; }
+  .status-row { margin-top: 6px; width: 100%; flex-shrink: 0; }
 </style>

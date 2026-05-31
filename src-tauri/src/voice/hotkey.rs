@@ -1,5 +1,19 @@
 use tauri::AppHandle;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
+
+/// Shared handle to the hotkey state machine's `is_active` flag, so Tauri commands
+/// (e.g. cancel-popup recovery) can reset it from outside the event-tap callback.
+static HOTKEY_ACTIVE_STATE: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+/// Reset the hotkey press/release toggle to `false`. Called when the user cancels
+/// the break-confirmation popup: the prior press already flipped the toggle, so
+/// without this the next press would be interpreted as "stop" instead of "start".
+pub fn reset_active_state() {
+    if let Some(flag) = HOTKEY_ACTIVE_STATE.get() {
+        flag.store(false, Ordering::SeqCst);
+    }
+}
 
 /// Global flag: when true, the main hotkey listener ignores keys (capture in progress)
 static CAPTURING: AtomicBool = AtomicBool::new(false);
@@ -217,8 +231,6 @@ mod macos_raw {
                     // Double-click: toggle recording state
                     if !active {
                         if ctx.is_active.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                            crate::voice::record::pre_start();
-                            crate::commands::chat::stop_audio_queue();
                             eprintln!("[hotkey] double-click mode: start recording");
                             let _ = ctx.app.emit("fn-key-down", ());
                         }
@@ -233,8 +245,6 @@ mod macos_raw {
                 // Single-click mode: toggle on every press (start/stop)
                 if !active {
                     if ctx.is_active.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                        crate::voice::record::pre_start();
-                        crate::commands::chat::stop_audio_queue();
                         eprintln!("[hotkey] single-click mode: start recording");
                         let _ = ctx.app.emit("fn-key-down", ());
                     }
@@ -270,8 +280,6 @@ mod macos_raw {
                         // Double-click: toggle recording state
                         if !active {
                             if ctx.is_active.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                                crate::voice::record::pre_start();
-                                crate::commands::chat::stop_audio_queue();
                                 eprintln!("[hotkey] modifier double-click mode: start recording");
                                 let _ = ctx.app.emit("fn-key-down", ());
                             }
@@ -286,8 +294,6 @@ mod macos_raw {
                     // Single-click mode: toggle on every press (start/stop)
                     if !active {
                         if ctx.is_active.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                            crate::voice::record::pre_start();
-                            crate::commands::chat::stop_audio_queue();
                             eprintln!("[hotkey] modifier single-click mode: start recording");
                             let _ = ctx.app.emit("fn-key-down", ());
                         }
@@ -326,9 +332,12 @@ mod macos_raw {
 
         // Create context and tap synchronously — pays the kernel init cost here
         // so the event pipeline is warm when the user first presses the hotkey.
+        let is_active = super::HOTKEY_ACTIVE_STATE
+            .get_or_init(|| Arc::new(AtomicBool::new(false)))
+            .clone();
         let ctx = Box::new(HotkeyCtx {
             app,
-            is_active: Arc::new(AtomicBool::new(false)),
+            is_active,
         });
         let ctx_ptr = Box::into_raw(ctx) as *mut c_void;
 
@@ -555,9 +564,12 @@ mod rdev_impl {
         std::thread::Builder::new()
             .name("hotkey-listener".to_string())
             .spawn(move || {
+                let is_active = super::HOTKEY_ACTIVE_STATE
+                    .get_or_init(|| Arc::new(AtomicBool::new(false)))
+                    .clone();
                 let state = Arc::new(HotkeyState {
                     app,
-                    is_active: Arc::new(AtomicBool::new(false)),
+                    is_active,
                 });
 
                 let callback = move |event: rdev::Event| {
@@ -567,8 +579,6 @@ mod rdev_impl {
                             let s = state.clone();
                             if !s.is_active.load(Ordering::SeqCst) {
                                 s.is_active.store(true, Ordering::SeqCst);
-                                crate::voice::record::pre_start();
-                                crate::commands::chat::stop_audio_queue();
                                 let _ = s.app.emit("fn-key-down", ());
                             } else {
                                 s.is_active.store(false, Ordering::SeqCst);

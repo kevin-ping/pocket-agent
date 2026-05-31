@@ -27,6 +27,9 @@ enum AudioCmd {
         /// If true, emit chat-stream text events (used by push API).
         /// If false, only generate TTS and play (used by streaming TTS, text already displayed).
         show_text: bool,
+        /// If true, this is a status announcement: skip all chat-audio-* events so
+        /// the StatusPanel isn't cleared and the character isn't transitioned to "speaking".
+        silent: bool,
     },
     Stop,
 }
@@ -38,6 +41,7 @@ struct PreparedAudio {
     text_len: usize,
     generation: u64,
     show_text: bool,
+    silent: bool,
     emotion: String,
     app: AppHandle,
 }
@@ -47,6 +51,7 @@ static AUDIO_SENDER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sende
 
 static AUDIO_GENERATION: AtomicU64 = AtomicU64::new(0);
 static AUDIO_QUEUE_DEPTH: AtomicUsize = AtomicUsize::new(0);
+static TURN_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 fn current_audio_sink() -> &'static Mutex<Option<std::sync::Arc<rodio::Sink>>> {
     CURRENT_AUDIO_SINK.get_or_init(|| Mutex::new(None))
@@ -67,7 +72,7 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                     for cmd in rx {
                         match cmd {
                             AudioCmd::Stop => {}
-                            AudioCmd::Speak { text, emotion, voice, format, app, generation, show_text } => {
+                            AudioCmd::Speak { text, emotion, voice, format, app, generation, show_text, silent } => {
                                 if generation != AUDIO_GENERATION.load(Ordering::SeqCst) {
                                     audio_queue_release(generation);
                                     continue;
@@ -85,6 +90,7 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                                     text_len,
                                     generation,
                                     show_text,
+                                    silent,
                                     emotion,
                                     app,
                                 });
@@ -132,6 +138,13 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                                         if let Ok(file) = std::fs::File::open(&prep.tts_file) {
                                             match rodio::Decoder::new(std::io::BufReader::new(file)) {
                                                 Ok(source) => {
+                                                    // Signal real audio start — frontend uses this
+                                                    // (not chat-speaking-start) to switch to speaking animation.
+                                                    // Skip for status announcements so the StatusPanel
+                                                    // isn't cleared mid-turn.
+                                                    if !prep.silent {
+                                                        let _ = prep.app.emit("chat-audio-playing", ());
+                                                    }
                                                     sink.append(source);
                                                     sink.sleep_until_end();
                                                 }
@@ -151,7 +164,7 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                     audio_queue_release(prep.generation);
                     let remaining = AUDIO_QUEUE_DEPTH.load(Ordering::SeqCst);
                     eprintln!("[AUDIO] done (gen={}, remaining={})", prep.generation, remaining);
-                    if prep.generation == AUDIO_GENERATION.load(Ordering::SeqCst) && remaining == 0 {
+                    if !prep.silent && prep.generation == AUDIO_GENERATION.load(Ordering::SeqCst) && remaining == 0 {
                         let _ = prep.app.emit("chat-audio-done", ());
                     }
                 }
@@ -333,6 +346,9 @@ struct HermesTurnRequest {
     mode: HermesTurnMode,
     /// Optional callback for streaming TTS: called with each complete sentence as LLM streams
     on_sentence: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
+    /// Generation captured at turn start. The streaming loop breaks out cleanly
+    /// when `TURN_GENERATION` advances past this value.
+    turn_gen: u64,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -499,6 +515,7 @@ fn speak_internal(
         app: app.clone(),
         generation,
         show_text,
+        silent: false,
     });
     true
 }
@@ -528,6 +545,9 @@ fn push_to_self(text: &str, emotion: &str, voice: &str) {
 }
 
 fn emit_text_without_tts(app: &AppHandle, full_response: &str, emotion: &str) {
+    // Text-only fallback: no audio plays, but UI still wants the "speaking" animation
+    // while text streams. Fire chat-audio-playing alongside speaking-start.
+    let _ = app.emit("chat-audio-playing", ());
     let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
         emotion: emotion.to_string(),
         total_chars: full_response.chars().count(),
@@ -588,6 +608,11 @@ async fn run_hermes_turn(
         let mut reasoning_buffer = String::new();
 
         while let Some(chunk) = stream.next().await {
+            if request.turn_gen != TURN_GENERATION.load(Ordering::SeqCst) {
+                eprintln!("[SSE] turn superseded (gen={}, current={}) — exiting loop",
+                    request.turn_gen, TURN_GENERATION.load(Ordering::SeqCst));
+                return Ok(full_response);
+            }
             match chunk {
                 Ok(StreamEvent::Content(delta)) => {
                     if !reasoning_buffer.is_empty() {
@@ -691,6 +716,8 @@ pub async fn dispatch_bridge_message(
         app.emit("bridge-thinking-start", ()).map_err(|e| e.to_string())?;
     }
 
+    let my_turn_gen = TURN_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+
     let request = HermesTurnRequest {
         text,
         session_id: bridge_session,
@@ -698,10 +725,17 @@ pub async fn dispatch_bridge_message(
         context,
         mode: HermesTurnMode::Bridge,
         on_sentence: None,
+        turn_gen: my_turn_gen,
     };
 
     match run_hermes_turn(&app, &client, &request).await {
         Ok(full_response) => {
+            let superseded = my_turn_gen != TURN_GENERATION.load(Ordering::SeqCst);
+            if superseded {
+                // A newer turn (or discard_pending_turn) has bumped past us.
+                // The new turn will emit its own terminal events — stay silent.
+                return Ok(());
+            }
             if full_response.trim().is_empty() {
                 let _ = app.emit("bridge-turn-finished", ());
                 return Ok(());
@@ -712,6 +746,9 @@ pub async fn dispatch_bridge_message(
             Ok(())
         }
         Err(e) => {
+            if my_turn_gen != TURN_GENERATION.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             let _ = app.emit("bridge-turn-error", e.clone());
             Err(e)
         }
@@ -748,6 +785,8 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
     }
 
     let text = build_ui_turn_text(&text, &primary, &aux1, &aux2, &fixed);
+
+    let my_turn_gen = TURN_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
     app.emit("chat-thinking-start", ()).map_err(|e| e.to_string())?;
 
@@ -806,15 +845,37 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
         context: daily_summary,
         mode: HermesTurnMode::Ui,
         on_sentence,
+        turn_gen: my_turn_gen,
     };
 
     let full_response = match run_hermes_turn(&app, &client, &request).await {
         Ok(response) => response,
         Err(e) => {
+            // If a newer turn superseded us, swallow the error — the new turn owns the UI.
+            if my_turn_gen != TURN_GENERATION.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             app.emit("chat-stream-error", e.clone()).map_err(|emit_err| emit_err.to_string())?;
             return Err(e);
         }
     };
+
+    let was_interrupted = my_turn_gen != TURN_GENERATION.load(Ordering::SeqCst);
+
+    if was_interrupted {
+        // The new turn will emit its own chat-stream-end / chat-stream-error.
+        // Save the partial response (if any) with the interrupted marker so history stays coherent.
+        let trimmed = full_response.trim();
+        let content = if trimmed.is_empty() {
+            "[已被用户打断，无回复]".to_string()
+        } else {
+            format!("{} [已被用户打断]", trimmed)
+        };
+        if let Err(e) = super::history::save_message("assistant", &content) {
+            eprintln!("[history] failed to save interrupted message: {}", e);
+        }
+        return Ok(());
+    }
 
     if full_response.trim().is_empty() {
         let _ = app.emit("chat-stream-end", ());
@@ -835,6 +896,20 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn discard_pending_turn() {
+    TURN_GENERATION.fetch_add(1, Ordering::SeqCst);
+    AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Reset the hotkey state machine's press/release toggle. Called by the frontend
+/// when the user cancels the break-confirmation popup, so the next hotkey press is
+/// interpreted as "start" instead of "stop".
+#[tauri::command]
+pub fn reset_hotkey_active_state() {
+    crate::voice::hotkey::reset_active_state();
 }
 
 #[tauri::command]
@@ -880,6 +955,56 @@ pub async fn speak_text(
     let emotion_str = emotion.unwrap_or_else(|| detect_emotion(&text));
 
     speak_internal(&app, &text, &emotion_str, &voice, &format, generation, true);
+
+    Ok(())
+}
+
+/// Speak a short status announcement (e.g. "正在思考", "查询 weather").
+/// Differs from `speak_text`:
+///   - Does NOT emit chat-speaking-start/chat-stream/chat-stream-end, so the
+///     text never appears in the chat box (status stays in the StatusPanel only).
+///   - Does NOT bump AUDIO_GENERATION; uses the current one so the in-flight
+///     response audio captured by `send_message` is not invalidated.
+///   - Non-blocking: drops the announcement if the queue is full.
+#[tauri::command]
+pub async fn speak_status(
+    app: AppHandle,
+    text: String,
+    override_voice: Option<String>,
+    tts_format: Option<String>,
+    tts_primary_voice: Option<String>,
+    tts_aux1_voice: Option<String>,
+    tts_aux2_voice: Option<String>,
+    tts_enabled: Option<bool>,
+) -> Result<(), String> {
+    if text.trim().is_empty() { return Ok(()); }
+    if !tts_enabled.unwrap_or(true) { return Ok(()); }
+
+    let format = tts_format.unwrap_or_else(|| "wav".to_string());
+    let primary = tts_primary_voice.unwrap_or_else(|| "zh-CN-XiaoxiaoNeural".to_string());
+    let aux1 = tts_aux1_voice.unwrap_or_default();
+    let aux2 = tts_aux2_voice.unwrap_or_default();
+
+    let generation = AUDIO_GENERATION.load(Ordering::SeqCst);
+
+    if !audio_queue_reserve() {
+        eprintln!("[STATUS-TTS] queue full, skipping {} chars", text.chars().count());
+        return Ok(());
+    }
+
+    let voice = override_voice
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| select_voice(&text, &primary, &aux1, &aux2, ""));
+    let _ = audio_sender().lock().unwrap().send(AudioCmd::Speak {
+        text: text.clone(),
+        emotion: "neutral".to_string(),
+        voice,
+        format,
+        app: app.clone(),
+        generation,
+        show_text: false,
+        silent: true,
+    });
 
     Ok(())
 }

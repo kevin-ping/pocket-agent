@@ -4,6 +4,7 @@
 .agents
 .workflow
 .auto-work
+.skills
 CLAUDE.md
 AGENTS.md
 tmp
@@ -16,6 +17,7 @@ src-tauri/gen/
 src-tauri/api-*
 .DS_Store
 *.log
+*.bak
 
 # settings
 .env
