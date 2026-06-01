@@ -56,7 +56,24 @@ pub fn run() {
             voice::hotkey::check_accessibility(handle);
             voice::hotkey::spawn_hotkey_listener(handle.clone(), config.hotkey_code);
             voice::record::prewarm();
-            voice::stt::ensure_stt_server();
+
+            // Bootstrap PA-owned venv at ~/.pocket-agent/venv (independent from
+            // hermes-agent). Runs on a dedicated thread so the UI thread is not
+            // blocked during the 3-10 minute first-launch pip install. Emits
+            // venv-setup-* events to the frontend for progress display. Only
+            // start the STT server once the venv is ready.
+            {
+                let venv_handle = handle.clone();
+                std::thread::Builder::new()
+                    .name("venv-bootstrap".to_string())
+                    .spawn(move || {
+                        match voice::venv::ensure_venv(&venv_handle) {
+                            Ok(()) => voice::stt::ensure_stt_server(),
+                            Err(e) => eprintln!("[venv] bootstrap failed: {}", e),
+                        }
+                    })
+                    .ok();
+            }
 
             // Start local API server for push notifications (port 8650)
             {

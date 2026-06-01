@@ -9,50 +9,25 @@ static STT_CHILD: Mutex<Option<Child>> = Mutex::new(None);
 const STT_SERVER_URL: &str = "http://127.0.0.1:8651";
 
 fn helper_path() -> PathBuf {
-    // app bundle: .app/Contents/MacOS/pocket-agent → .app/Contents/Resources/stt-helper
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(macos_dir) = exe.parent() {
-            if let Some(contents_dir) = macos_dir.parent() {
-                let bundled = contents_dir.join("Resources").join("stt-helper");
-                if bundled.exists() {
-                    return bundled;
-                }
-            }
-        }
-    }
-
-    // dev fallback
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let dev_path = PathBuf::from(manifest_dir).join("resources").join("stt-helper");
-        if dev_path.exists() {
-            return dev_path;
-        }
-    }
-
-    PathBuf::from("src-tauri/resources/stt-helper")
+    crate::voice::venv::resource_path("stt-helper")
 }
 
 fn server_path() -> PathBuf {
-    // Same lookup as helper_path, but for stt-server.py
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(macos_dir) = exe.parent() {
-            if let Some(contents_dir) = macos_dir.parent() {
-                let bundled = contents_dir.join("Resources").join("stt-server.py");
-                if bundled.exists() {
-                    return bundled;
-                }
-            }
-        }
-    }
+    crate::voice::venv::resource_path("stt-server.py")
+}
 
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let dev_path = PathBuf::from(manifest_dir).join("resources").join("stt-server.py");
-        if dev_path.exists() {
-            return dev_path;
-        }
+/// STT_PYTHON env (dev override) > PA's own venv at ~/.pocket-agent/venv/.
+/// Returns None when neither is available — caller decides whether to skip or
+/// fall back to spawning stt-helper directly.
+fn resolve_python() -> Option<String> {
+    if let Ok(p) = std::env::var("STT_PYTHON") {
+        return Some(p);
     }
-
-    PathBuf::from("src-tauri/resources/stt-server.py")
+    let venv_python = crate::voice::venv::venv_python_path();
+    if venv_python.exists() {
+        return Some(venv_python.to_string_lossy().to_string());
+    }
+    None
 }
 
 pub struct SttResult {
@@ -115,7 +90,7 @@ fn transcribe_subprocess(wav_path: &str) -> Result<SttResult, String> {
         return Err(format!("stt-helper 未找到: {}", helper.display()));
     }
 
-    let mut child = if let Ok(python) = std::env::var("STT_PYTHON") {
+    let mut child = if let Some(python) = resolve_python() {
         Command::new(python)
             .arg(&helper)
             .arg(wav_path)
@@ -209,22 +184,21 @@ pub fn ensure_stt_server() {
         return;
     }
 
-    eprintln!("[stt] starting resident STT server...");
-
-    // Resolve python: STT_PYTHON env > venv python > system python3
-    let python = if let Ok(p) = std::env::var("STT_PYTHON") {
-        p
-    } else if let Ok(home) = std::env::var("HOME") {
-        let venv_python = std::path::Path::new(&home)
-            .join(".hermes/hermes-agent/venv/bin/python3");
-        if venv_python.exists() {
-            venv_python.to_string_lossy().to_string()
-        } else {
-            "python3".to_string()
+    // PA-owned venv is the only supported runtime. If it's not ready yet, bail
+    // out — the venv bootstrap thread in lib.rs will retry ensure_stt_server()
+    // after the install finishes.
+    let python = match resolve_python() {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "[stt] PA venv not ready at {}; STT server will start after venv setup completes",
+                crate::voice::venv::venv_python_path().display()
+            );
+            return;
         }
-    } else {
-        "python3".to_string()
     };
+
+    eprintln!("[stt] starting resident STT server...");
 
     // Read STT_MODEL from env (default: base). Lets users switch between tiny/base/small.
     let stt_model = std::env::var("STT_MODEL").unwrap_or_else(|_| "base".to_string());
@@ -279,9 +253,10 @@ pub fn ensure_stt_server() {
                     eprintln!(
                         "[stt] WARNING: resident server did not respond on :8651 within {}s.\n\
                          [stt]   STT will fall back to slow per-utterance subprocess.\n\
-                         [stt]   Likely cause: missing Python deps in {}\n\
-                         [stt]   Fix: {} -m pip install faster-whisper silero-vad onnxruntime",
-                        probe_deadline_s, python_for_hint, python_for_hint,
+                         [stt]   venv python: {}\n\
+                         [stt]   If this persists, delete ~/.pocket-agent/.venv-ready and restart PA\n\
+                         [stt]   to trigger a fresh venv bootstrap.",
+                        probe_deadline_s, python_for_hint,
                     );
                 })
                 .ok();

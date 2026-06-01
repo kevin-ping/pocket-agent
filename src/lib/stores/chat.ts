@@ -17,6 +17,12 @@ interface ChatState {
    *  the StatusPanel but is orthogonal to LLM streaming — never cleared by
    *  startStream/finalizeStream, only by setVoiceStatus(null), clear, or setError. */
   voiceStatus: string | null;
+  /** First-launch PA venv bootstrap (~/.pocket-agent/venv) state. Rendered in
+   *  StatusPanel as an extra row. `idle` and `ready` hide it; `installing` and
+   *  `error` show it with phase + last log line. */
+  voiceSetupState: 'idle' | 'installing' | 'ready' | 'error';
+  voiceSetupPhase: string;
+  voiceSetupDetail: string;
 }
 
 // ── Emotion → ms per char ──
@@ -162,6 +168,9 @@ function createChatStore() {
     error: null,
     thinkingSteps: [],
     voiceStatus: null,
+    voiceSetupState: 'idle',
+    voiceSetupPhase: '',
+    voiceSetupDetail: '',
   });
 
   storeUpdate = update;
@@ -170,6 +179,7 @@ function createChatStore() {
     update((s) => {
       if (!s.streamingContent) return { ...s, isStreaming: false };
       return {
+        ...s,
         messages: [
           ...s.messages,
           { role: 'assistant', content: s.streamingContent, timestamp: Date.now() },
@@ -178,7 +188,6 @@ function createChatStore() {
         isStreaming: false,
         error: null,
         thinkingSteps: [],
-        voiceStatus: s.voiceStatus,
       };
     });
   }
@@ -246,6 +255,9 @@ function createChatStore() {
     /** Set or clear the voice-mode status line (e.g. "🎤 听着…"). Pass null to clear. */
     setVoiceStatus: (text: string | null) =>
       update((s) => (s.voiceStatus === text ? s : { ...s, voiceStatus: text })),
+
+    setVoiceSetup: (patch: Partial<Pick<ChatState, 'voiceSetupState' | 'voiceSetupPhase' | 'voiceSetupDetail'>>) =>
+      update((s) => ({ ...s, ...patch })),
 
     startTypewriter: (emotion: string) => {
       if (typewriterTimer) {
@@ -326,7 +338,15 @@ function createChatStore() {
       streamEnding = false;
       trailingNewlines = 0;
       resetCmdState();
-      set({ messages: [], streamingContent: '', isStreaming: false, error: null, thinkingSteps: [], voiceStatus: null });
+      update((s) => ({
+        ...s,
+        messages: [],
+        streamingContent: '',
+        isStreaming: false,
+        error: null,
+        thinkingSteps: [],
+        voiceStatus: null,
+      }));
     },
   };
 }

@@ -1,9 +1,5 @@
-# Python dependencies for stt-server.py
-# Install into the venv used to launch the server (default: ~/.hermes/hermes-agent/venv).
-#
-#   ~/.hermes/hermes-agent/venv/bin/pip install -r src-tauri/resources/requirements-stt.txt
-#
-# Override the python interpreter with STT_PYTHON if your venv lives elsewhere.
+# Python dependencies for the PA-owned venv at ~/.pocket-agent/venv/.
+# Auto-installed by venv::ensure_venv() on first launch.
 
 # numpy<2 is required: torch / ctranslate2 wheels (pulled in by faster-whisper)
 # are built against the NumPy 1.x C ABI and crash at import on NumPy 2.x.
@@ -11,3 +7,4 @@ numpy<2.0
 faster-whisper>=1.0.0
 silero-vad>=5.1
 onnxruntime>=1.17
+edge-tts>=6.1

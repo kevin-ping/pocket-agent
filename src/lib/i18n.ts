@@ -246,6 +246,14 @@ export interface ConversationLabels {
   micSensitivity: string;
   micSensitivitySuffix: (v: number) => string;
   voiceListening: string;
+  /** First-launch venv bootstrap header, e.g. "🛠 语音环境准备中…" */
+  voiceSetupInstalling: string;
+  /** Per-phase label for setup detail */
+  voiceSetupPhase: (phase: string) => string;
+  /** Toast shown when user presses hotkey while venv install is still running */
+  voiceSetupNotReady: string;
+  /** Setup failed message prefix */
+  voiceSetupError: string;
 }
 
 function fmtSeconds(ms: number): string {
@@ -263,6 +271,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     micSensitivity: '麦克风灵敏度',
     micSensitivitySuffix: (v) => v <= 0.008 ? '高(离麦克风远)' : v <= 0.014 ? '中' : '低(离麦克风近/嘈杂)',
     voiceListening: '听着…',
+    voiceSetupInstalling: '🛠 语音环境准备中（首次启动约 3-10 分钟）',
+    voiceSetupPhase: (p) => p === 'creating-venv' ? '创建虚拟环境' : p === 'upgrading-pip' ? '升级 pip' : p === 'installing-deps' ? '下载安装依赖' : p,
+    voiceSetupNotReady: '语音环境准备中，请稍候…',
+    voiceSetupError: '⚠ 语音环境安装失败',
   },
   en: {
     continuousMode: 'Continuous Conversation',
@@ -274,6 +286,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     micSensitivity: 'Mic Sensitivity',
     micSensitivitySuffix: (v) => v <= 0.008 ? 'High (far from mic)' : v <= 0.014 ? 'Medium' : 'Low (close/noisy)',
     voiceListening: 'Listening…',
+    voiceSetupInstalling: '🛠 Setting up voice environment (first launch, 3-10 min)',
+    voiceSetupPhase: (p) => p === 'creating-venv' ? 'creating virtualenv' : p === 'upgrading-pip' ? 'upgrading pip' : p === 'installing-deps' ? 'downloading dependencies' : p,
+    voiceSetupNotReady: 'Voice setup in progress, please wait…',
+    voiceSetupError: '⚠ Voice environment setup failed',
   },
   ja: {
     continuousMode: '連続会話モード',
@@ -285,6 +301,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     micSensitivity: 'マイク感度',
     micSensitivitySuffix: (v) => v <= 0.008 ? '高（マイクから遠い）' : v <= 0.014 ? '中' : '低（近い/騒がしい）',
     voiceListening: '聞いています…',
+    voiceSetupInstalling: '🛠 音声環境を準備中（初回起動：3-10 分）',
+    voiceSetupPhase: (p) => p === 'creating-venv' ? '仮想環境を作成中' : p === 'upgrading-pip' ? 'pip をアップグレード中' : p === 'installing-deps' ? '依存関係をダウンロード中' : p,
+    voiceSetupNotReady: '音声環境を準備中です。お待ちください…',
+    voiceSetupError: '⚠ 音声環境のセットアップに失敗',
   },
   ko: {
     continuousMode: '연속 대화 모드',
@@ -296,6 +316,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     micSensitivity: '마이크 감도',
     micSensitivitySuffix: (v) => v <= 0.008 ? '높음 (마이크에서 멀리)' : v <= 0.014 ? '중간' : '낮음 (가깝거나 시끄러움)',
     voiceListening: '듣는 중…',
+    voiceSetupInstalling: '🛠 음성 환경 준비 중 (첫 실행, 3-10분)',
+    voiceSetupPhase: (p) => p === 'creating-venv' ? '가상 환경 생성 중' : p === 'upgrading-pip' ? 'pip 업그레이드 중' : p === 'installing-deps' ? '의존성 다운로드 중' : p,
+    voiceSetupNotReady: '음성 환경을 준비 중입니다. 잠시 기다려주세요…',
+    voiceSetupError: '⚠ 음성 환경 설치 실패',
   },
   fr: {
     continuousMode: 'Conversation continue',
@@ -307,6 +331,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     micSensitivity: 'Sensibilité du micro',
     micSensitivitySuffix: (v) => v <= 0.008 ? 'Élevée (loin du micro)' : v <= 0.014 ? 'Moyenne' : 'Faible (proche/bruyant)',
     voiceListening: 'À l\'écoute…',
+    voiceSetupInstalling: '🛠 Préparation de l\'environnement vocal (premier lancement, 3-10 min)',
+    voiceSetupPhase: (p) => p === 'creating-venv' ? 'création de l\'environnement virtuel' : p === 'upgrading-pip' ? 'mise à jour de pip' : p === 'installing-deps' ? 'téléchargement des dépendances' : p,
+    voiceSetupNotReady: 'Préparation en cours, veuillez patienter…',
+    voiceSetupError: '⚠ Échec de l\'installation de l\'environnement vocal',
   },
   de: {
     continuousMode: 'Fortlaufendes Gespräch',
@@ -318,6 +346,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     micSensitivity: 'Mikrofonempfindlichkeit',
     micSensitivitySuffix: (v) => v <= 0.008 ? 'Hoch (weit vom Mikrofon)' : v <= 0.014 ? 'Mittel' : 'Niedrig (nah/laut)',
     voiceListening: 'Höre zu…',
+    voiceSetupInstalling: '🛠 Sprachumgebung wird eingerichtet (Erststart, 3-10 Min)',
+    voiceSetupPhase: (p) => p === 'creating-venv' ? 'erstelle virtuelle Umgebung' : p === 'upgrading-pip' ? 'aktualisiere pip' : p === 'installing-deps' ? 'lade Abhängigkeiten' : p,
+    voiceSetupNotReady: 'Sprachumgebung wird vorbereitet, bitte warten…',
+    voiceSetupError: '⚠ Einrichtung der Sprachumgebung fehlgeschlagen',
   },
   es: {
     continuousMode: 'Conversación continua',
@@ -329,6 +361,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     micSensitivity: 'Sensibilidad del micrófono',
     micSensitivitySuffix: (v) => v <= 0.008 ? 'Alta (lejos del micrófono)' : v <= 0.014 ? 'Media' : 'Baja (cerca/ruidoso)',
     voiceListening: 'Escuchando…',
+    voiceSetupInstalling: '🛠 Configurando entorno de voz (primer arranque, 3-10 min)',
+    voiceSetupPhase: (p) => p === 'creating-venv' ? 'creando entorno virtual' : p === 'upgrading-pip' ? 'actualizando pip' : p === 'installing-deps' ? 'descargando dependencias' : p,
+    voiceSetupNotReady: 'Entorno de voz en preparación, por favor espera…',
+    voiceSetupError: '⚠ Error al configurar el entorno de voz',
   },
 };
 

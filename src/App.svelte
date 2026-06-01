@@ -478,6 +478,11 @@
       listen('fn-key-down', () => {
         debugState('fn-key-down');
         const cfg = get(settingsStore);
+        const setupState = get(chatStore).voiceSetupState;
+        if (setupState === 'installing' || setupState === 'error') {
+          chatStore.setError(convLabels(cfg.tts_primary_voice).voiceSetupNotReady);
+          return;
+        }
         if (cfg.continuous_conversation) {
           if (conversationActive) {
             invoke('stop_continuous_conversation').catch(console.error);
@@ -618,6 +623,31 @@
         chatStore.clearThinkingSteps();
         chatStore.setVoiceStatus(voiceListeningText());
         spiritPhase = 0;
+      }),
+
+      // ─── First-launch PA venv bootstrap (~/.pocket-agent/venv) ───
+      listen('venv-setup-ready', () => {
+        chatStore.setVoiceSetup({ voiceSetupState: 'ready', voiceSetupPhase: '', voiceSetupDetail: '' });
+      }),
+      listen('venv-setup-started', () => {
+        chatStore.setVoiceSetup({ voiceSetupState: 'installing', voiceSetupPhase: '', voiceSetupDetail: '' });
+      }),
+      listen<{ phase: string; detail: string }>('venv-setup-progress', (e) => {
+        chatStore.setVoiceSetup({
+          voiceSetupState: 'installing',
+          voiceSetupPhase: e.payload.phase,
+          voiceSetupDetail: e.payload.detail ?? '',
+        });
+      }),
+      listen('venv-setup-done', () => {
+        chatStore.setVoiceSetup({ voiceSetupState: 'ready', voiceSetupPhase: '', voiceSetupDetail: '' });
+      }),
+      listen<{ phase: string; message: string }>('venv-setup-error', (e) => {
+        chatStore.setVoiceSetup({
+          voiceSetupState: 'error',
+          voiceSetupPhase: e.payload.phase,
+          voiceSetupDetail: e.payload.message ?? '',
+        });
       }),
 
       listen('accessibility-permission-required', () => {
