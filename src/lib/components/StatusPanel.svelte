@@ -5,21 +5,25 @@
   let hasContent = $derived(
     $chatStore.thinkingSteps.length > 0 ||
     $chatStore.isStreaming ||
-    $characterState === 'thinking'
+    $characterState === 'thinking' ||
+    $chatStore.voiceStatus !== null
   );
 </script>
 
   <div class="status-panel" class:visible={hasContent}>
     <div class="status-content">
-      {#if $chatStore.thinkingSteps.length > 0}
-        <div class="steps">
+      <div class="steps">
+        {#if $chatStore.voiceStatus !== null}
+          <span class="step">{$chatStore.voiceStatus}</span>
+        {/if}
+        {#if $chatStore.thinkingSteps.length > 0}
           {#each $chatStore.thinkingSteps as step}
             <span class="step">{step}</span>
           {/each}
-        </div>
-      {:else if $chatStore.isStreaming || $characterState === 'thinking'}
-        <span class="step placeholder">🤔 正在思考...</span>
-      {/if}
+        {:else if $chatStore.isStreaming || $characterState === 'thinking'}
+          <span class="step placeholder">🤔 正在思考...</span>
+        {/if}
+      </div>
     </div>
   </div>
 

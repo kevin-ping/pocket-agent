@@ -2,7 +2,7 @@
   import { fly } from 'svelte/transition';
   import { tick } from 'svelte';
   import { settingsStore, type AppSettings } from '../stores/settings';
-  import { t } from '../i18n';
+  import { t, convLabels } from '../i18n';
   import { invoke } from '@tauri-apps/api/core';
 
   const VOICE_OPTIONS = [
@@ -269,6 +269,76 @@
           </label>
         </div>
       </div>
+
+      <div class="field-row">
+        <span class="field-label">{convLabels($settingsStore.tts_primary_voice).continuousMode}</span>
+        <div class="toggle-wrap">
+          <input type="checkbox" id="continuous-conversation" class="toggle-input" bind:checked={local.continuous_conversation} />
+          <label for="continuous-conversation" class="toggle-track">
+            <span class="toggle-thumb"></span>
+          </label>
+        </div>
+      </div>
+
+      {#if local.continuous_conversation}
+        <div class="field-row">
+          <span class="field-label">
+            {convLabels($settingsStore.tts_primary_voice).silenceTimeout}
+            <span class="volume-pct">{convLabels($settingsStore.tts_primary_voice).silenceSecondsSuffix(local.silence_timeout_secs)}</span>
+          </span>
+          <input
+            class="field-slider"
+            type="range"
+            min="3"
+            max="10"
+            step="1"
+            bind:value={local.silence_timeout_secs}
+            aria-label={convLabels($settingsStore.tts_primary_voice).silenceTimeout}
+          />
+        </div>
+
+        <div class="field-row">
+          <span class="field-label">
+            {convLabels($settingsStore.tts_primary_voice).pauseTolerance}
+            <span class="volume-pct">{convLabels($settingsStore.tts_primary_voice).pauseToleranceMsSuffix(local.pause_tolerance_ms)}</span>
+          </span>
+          <input
+            class="field-slider"
+            type="range"
+            min="500"
+            max="5000"
+            step="100"
+            bind:value={local.pause_tolerance_ms}
+            aria-label={convLabels($settingsStore.tts_primary_voice).pauseTolerance}
+          />
+        </div>
+
+        <div class="field-row">
+          <span class="field-label">
+            {convLabels($settingsStore.tts_primary_voice).micSensitivity}
+            <span class="volume-pct">{convLabels($settingsStore.tts_primary_voice).micSensitivitySuffix(local.speech_rms_threshold)}</span>
+          </span>
+          <input
+            class="field-slider"
+            type="range"
+            min="0.003"
+            max="0.020"
+            step="0.001"
+            bind:value={local.speech_rms_threshold}
+            aria-label={convLabels($settingsStore.tts_primary_voice).micSensitivity}
+          />
+        </div>
+
+        <div class="field-row">
+          <span class="field-label">{convLabels($settingsStore.tts_primary_voice).skipInterruptConfirm}</span>
+          <div class="toggle-wrap">
+            <input type="checkbox" id="skip-interrupt-confirm" class="toggle-input" bind:checked={local.skip_interrupt_confirmation} />
+            <label for="skip-interrupt-confirm" class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </label>
+          </div>
+        </div>
+      {/if}
 
       <!-- ── Appearance section ── -->
       <div class="section-label">{t($settingsStore.tts_primary_voice).appearance}</div>

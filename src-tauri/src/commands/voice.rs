@@ -1,5 +1,5 @@
 use chrono;
-use crate::voice::record::{start_recording, stop_recording_no_handle, take_pre_started, RecordingHandle};
+use crate::voice::record::{lock_capture_gate, start_recording, stop_recording_no_handle, take_pre_started, RecordingHandle, SINGLE_SHOT_RESERVED, STREAMING_ACTIVE};
 use crate::voice::stt::transcribe;
 use std::sync::Mutex;
 use std::sync::Arc;
@@ -39,11 +39,40 @@ impl Default for RecordingState {
     }
 }
 
+/// RAII guard that clears SINGLE_SHOT_RESERVED on drop unless explicitly committed.
+/// Used so any early-return from start_voice_recording (mutex error, daemon start failure,
+/// thread spawn failure) reliably releases the reservation flag.
+struct ReservationGuard {
+    committed: bool,
+}
+impl ReservationGuard {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+impl Drop for ReservationGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            SINGLE_SHOT_RESERVED.store(false, Ordering::Release);
+        }
+    }
+}
+
 #[tauri::command]
 pub fn start_voice_recording(
     app: AppHandle,
     state: State<'_, RecordingState>,
 ) -> Result<(), String> {
+    // Hold the capture gate across the *entire* setup: peer-flag check, slot reservation,
+    // daemon warmup, and final handle commit. Concurrent callers serialize behind it and
+    // observe state.handle == Some on their first check, avoiding the daemon-warmup
+    // window where neither SINGLE_SHOT_RESERVED nor start_ack reliably reflects the truth.
+    // Brief blocking (~10-200ms) on the rare second hotkey press is acceptable.
+    let _gate = lock_capture_gate();
+
+    if STREAMING_ACTIVE.load(Ordering::Acquire) {
+        return Err("连续对话进行中，无法启动单次录音".into());
+    }
     {
         let guard = state
             .handle
@@ -53,6 +82,9 @@ pub fn start_voice_recording(
             return Ok(());
         }
     }
+    // Synchronous reservation visible to start_streaming_capture immediately.
+    SINGLE_SHOT_RESERVED.store(true, Ordering::Release);
+    let reservation = ReservationGuard { committed: false };
 
     // Destructive actions deferred from the hotkey thread so the break-confirmation
     // popup can intercept them: stop any in-progress TTS, then warm up the mic.
@@ -61,7 +93,7 @@ pub fn start_voice_recording(
 
     let handle = match take_pre_started() {
         Some(h) => h,
-        None => start_recording()?,
+        None => start_recording()?, // reservation released by ReservationGuard::drop
     };
 
     {
@@ -69,6 +101,7 @@ pub fn start_voice_recording(
             .handle
             .lock()
             .map_err(|_| "录音状态锁定失败".to_string())?;
+        // Under the held gate, this should never see Some — but keep the check as a defensive belt.
         if guard.is_some() {
             return Ok(());
         }
@@ -94,6 +127,8 @@ pub fn start_voice_recording(
         })
         .map_err(|e| format!("启动超时线程失败: {}", e))?;
 
+    // Recording is live; ownership of the reservation has transferred to stop_recording_internal.
+    reservation.commit();
     eprintln!("[voice] recording started (max {}s)", MAX_RECORDING_SECS);
     Ok(())
 }
@@ -183,4 +218,42 @@ pub async fn cancel_voice_recording(
 #[tauri::command]
 pub fn get_audio_level() -> f32 {
     crate::voice::record::AUDIO_LEVEL.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0
+}
+
+#[tauri::command]
+pub fn start_continuous_conversation(
+    app: AppHandle,
+    silence_timeout_secs: Option<u64>,
+    pause_tolerance_ms: Option<u64>,
+    speech_rms_threshold: Option<f32>,
+) -> Result<(), String> {
+    crate::voice::conversation::start_conversation(
+        app,
+        silence_timeout_secs,
+        pause_tolerance_ms,
+        speech_rms_threshold,
+    )
+}
+
+#[tauri::command]
+pub fn stop_continuous_conversation() -> Result<(), String> {
+    crate::voice::conversation::stop_conversation();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn notify_conversation_tts_started() -> Result<(), String> {
+    crate::voice::conversation::on_tts_started();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn notify_conversation_tts_done() -> Result<(), String> {
+    crate::voice::conversation::on_tts_done();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn is_continuous_conversation_active() -> bool {
+    crate::voice::conversation::is_active()
 }

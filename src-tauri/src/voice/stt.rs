@@ -101,10 +101,9 @@ fn transcribe_http(wav_path: &str) -> Result<SttResult, String> {
     let text = v["text"].as_str().unwrap_or("").to_string();
     let language = v["language"].as_str().unwrap_or("zh").to_string();
 
-    if text.is_empty() {
-        return Err("识别结果为空".to_string());
-    }
-
+    // Empty text is a legitimate outcome (VAD short-circuit on silent audio).
+    // Return Ok with empty text — callers decide policy (single-shot shows a toast,
+    // continuous mode stays in Listening).
     Ok(SttResult { text, language })
 }
 
@@ -150,15 +149,13 @@ fn transcribe_subprocess(wav_path: &str) -> Result<SttResult, String> {
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if stdout.is_empty() {
-            return Err("识别结果为空".to_string());
+            // Empty subprocess output — treat as empty result (consistent with HTTP path).
+            return Ok(SttResult { text: String::new(), language: String::new() });
         }
 
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&stdout) {
             let text = v["text"].as_str().unwrap_or("").to_string();
             let language = v["language"].as_str().unwrap_or("zh").to_string();
-            if text.is_empty() {
-                return Err("识别结果为空".to_string());
-            }
             Ok(SttResult { text, language })
         } else {
             Ok(SttResult {
@@ -249,6 +246,45 @@ pub fn ensure_stt_server() {
                 *guard = Some(child);
             }
             eprintln!("[stt] STT server spawned (pid={}, python={})", pid, python);
+
+            // Poll /health for up to 6s in a background thread. If the server
+            // never comes up, print one high-visibility hint with the venv path
+            // and the exact pip install command — instead of silently slipping
+            // into the ~13s subprocess fallback on every utterance.
+            let python_for_hint = python.clone();
+            std::thread::Builder::new()
+                .name("stt-health-probe".to_string())
+                .spawn(move || {
+                    let client = match reqwest::blocking::Client::builder()
+                        .timeout(std::time::Duration::from_millis(500))
+                        .build()
+                    {
+                        Ok(c) => c,
+                        Err(_) => return,
+                    };
+                    let url = format!("{}/health", STT_SERVER_URL);
+                    // 30 s covers cold-boot of faster_whisper + Whisper "base"
+                    // model load on a typical laptop. Tune up only if the user
+                    // is on a much slower disk / first-ever model download.
+                    let probe_deadline_s: u64 = 30;
+                    let deadline = std::time::Instant::now()
+                        + std::time::Duration::from_secs(probe_deadline_s);
+                    while std::time::Instant::now() < deadline {
+                        if client.get(&url).send().map(|r| r.status().is_success()).unwrap_or(false) {
+                            eprintln!("[stt] resident server healthy on :8651");
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                    eprintln!(
+                        "[stt] WARNING: resident server did not respond on :8651 within {}s.\n\
+                         [stt]   STT will fall back to slow per-utterance subprocess.\n\
+                         [stt]   Likely cause: missing Python deps in {}\n\
+                         [stt]   Fix: {} -m pip install faster-whisper silero-vad onnxruntime",
+                        probe_deadline_s, python_for_hint, python_for_hint,
+                    );
+                })
+                .ok();
         }
         Err(e) => eprintln!("[stt] failed to spawn STT server: {}", e),
     }

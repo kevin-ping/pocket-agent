@@ -235,6 +235,107 @@ export function t(voice: string): Strings {
   return TRANSLATIONS[lang] ?? TRANSLATIONS.zh;
 }
 
+// ── Continuous-conversation UI labels (per LangKey; covers all 7 supported) ──
+export interface ConversationLabels {
+  continuousMode: string;
+  silenceTimeout: string;
+  skipInterruptConfirm: string;
+  silenceSecondsSuffix: (n: number) => string;
+  pauseTolerance: string;
+  pauseToleranceMsSuffix: (n: number) => string;
+  micSensitivity: string;
+  micSensitivitySuffix: (v: number) => string;
+  voiceListening: string;
+}
+
+function fmtSeconds(ms: number): string {
+  return (ms / 1000).toFixed(1);
+}
+
+export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
+  zh: {
+    continuousMode: '连续对话模式',
+    silenceTimeout: '静默退出秒数',
+    skipInterruptConfirm: '打断时跳过确认',
+    silenceSecondsSuffix: (n) => `${n}秒`,
+    pauseTolerance: '停顿容忍度',
+    pauseToleranceMsSuffix: (ms) => `${fmtSeconds(ms)}秒`,
+    micSensitivity: '麦克风灵敏度',
+    micSensitivitySuffix: (v) => v <= 0.008 ? '高(离麦克风远)' : v <= 0.014 ? '中' : '低(离麦克风近/嘈杂)',
+    voiceListening: '听着…',
+  },
+  en: {
+    continuousMode: 'Continuous Conversation',
+    silenceTimeout: 'Silence Timeout',
+    skipInterruptConfirm: 'Skip Interrupt Confirmation',
+    silenceSecondsSuffix: (n) => `${n}s`,
+    pauseTolerance: 'Pause Tolerance',
+    pauseToleranceMsSuffix: (ms) => `${fmtSeconds(ms)}s`,
+    micSensitivity: 'Mic Sensitivity',
+    micSensitivitySuffix: (v) => v <= 0.008 ? 'High (far from mic)' : v <= 0.014 ? 'Medium' : 'Low (close/noisy)',
+    voiceListening: 'Listening…',
+  },
+  ja: {
+    continuousMode: '連続会話モード',
+    silenceTimeout: '無音タイムアウト',
+    skipInterruptConfirm: '中断時に確認をスキップ',
+    silenceSecondsSuffix: (n) => `${n}秒`,
+    pauseTolerance: '間の許容時間',
+    pauseToleranceMsSuffix: (ms) => `${fmtSeconds(ms)}秒`,
+    micSensitivity: 'マイク感度',
+    micSensitivitySuffix: (v) => v <= 0.008 ? '高（マイクから遠い）' : v <= 0.014 ? '中' : '低（近い/騒がしい）',
+    voiceListening: '聞いています…',
+  },
+  ko: {
+    continuousMode: '연속 대화 모드',
+    silenceTimeout: '무음 타임아웃',
+    skipInterruptConfirm: '중단 시 확인 건너뛰기',
+    silenceSecondsSuffix: (n) => `${n}초`,
+    pauseTolerance: '일시 정지 허용',
+    pauseToleranceMsSuffix: (ms) => `${fmtSeconds(ms)}초`,
+    micSensitivity: '마이크 감도',
+    micSensitivitySuffix: (v) => v <= 0.008 ? '높음 (마이크에서 멀리)' : v <= 0.014 ? '중간' : '낮음 (가깝거나 시끄러움)',
+    voiceListening: '듣는 중…',
+  },
+  fr: {
+    continuousMode: 'Conversation continue',
+    silenceTimeout: 'Délai de silence',
+    skipInterruptConfirm: "Ignorer la confirmation d'interruption",
+    silenceSecondsSuffix: (n) => `${n}s`,
+    pauseTolerance: 'Tolérance de pause',
+    pauseToleranceMsSuffix: (ms) => `${fmtSeconds(ms)}s`,
+    micSensitivity: 'Sensibilité du micro',
+    micSensitivitySuffix: (v) => v <= 0.008 ? 'Élevée (loin du micro)' : v <= 0.014 ? 'Moyenne' : 'Faible (proche/bruyant)',
+    voiceListening: 'À l\'écoute…',
+  },
+  de: {
+    continuousMode: 'Fortlaufendes Gespräch',
+    silenceTimeout: 'Stille-Timeout',
+    skipInterruptConfirm: 'Unterbrechungsbestätigung überspringen',
+    silenceSecondsSuffix: (n) => `${n}s`,
+    pauseTolerance: 'Pausen-Toleranz',
+    pauseToleranceMsSuffix: (ms) => `${fmtSeconds(ms)}s`,
+    micSensitivity: 'Mikrofonempfindlichkeit',
+    micSensitivitySuffix: (v) => v <= 0.008 ? 'Hoch (weit vom Mikrofon)' : v <= 0.014 ? 'Mittel' : 'Niedrig (nah/laut)',
+    voiceListening: 'Höre zu…',
+  },
+  es: {
+    continuousMode: 'Conversación continua',
+    silenceTimeout: 'Tiempo de silencio',
+    skipInterruptConfirm: 'Omitir confirmación de interrupción',
+    silenceSecondsSuffix: (n) => `${n}s`,
+    pauseTolerance: 'Tolerancia de pausa',
+    pauseToleranceMsSuffix: (ms) => `${fmtSeconds(ms)}s`,
+    micSensitivity: 'Sensibilidad del micrófono',
+    micSensitivitySuffix: (v) => v <= 0.008 ? 'Alta (lejos del micrófono)' : v <= 0.014 ? 'Media' : 'Baja (cerca/ruidoso)',
+    voiceListening: 'Escuchando…',
+  },
+};
+
+export function convLabels(voice: string): ConversationLabels {
+  return CONVERSATION_LABELS[langFromVoice(voice)] ?? CONVERSATION_LABELS.zh;
+}
+
 // ── Status TTS phrases (spoken; intentionally short and natural) ──
 export const STATUS_PHRASES: Record<LangKey, { thinking: string; querying: (n: string) => string; executing: string; runningCommand: string }> = {
   zh: { thinking: '正在思考',  querying: (n) => `查询 ${n}`,            executing: '正在执行操作',    runningCommand: '运行命令' },

@@ -22,6 +22,28 @@ pub const RECORDING_PATH: &str = "/tmp/pocket-agent-recording.wav";
 /// Frontend polls this via Tauri command every ~200ms. Range: 0-1000 (0.0-1.0 * 1000)
 pub static AUDIO_LEVEL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// True when start_streaming_capture is engaged. Single-shot recording refuses
+/// to start while this is set, and vice versa, to keep the input device sane.
+pub static STREAMING_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Set synchronously by the single-shot entry as soon as it commits, so the
+/// streaming entry can see the reservation even before the daemon thread has
+/// finished raising `start_ack` (~10ms async). Cleared by stop/cancel.
+pub static SINGLE_SHOT_RESERVED: AtomicBool = AtomicBool::new(false);
+
+/// Serializes capture *reservation* across single-shot and streaming entry
+/// points. Held only across the start-time check+set window — never during
+/// actual capture — so contention is negligible. Eliminates the TOCTOU window
+/// where both paths could simultaneously observe each other as inactive.
+pub static CAPTURE_GATE: Mutex<()> = Mutex::new(());
+
+/// Acquire the capture gate, recovering silently from a poisoned mutex.
+/// The gate guards atomic-flag checks, not user data; poison from a panicked
+/// caller doesn't invalidate the underlying state.
+pub fn lock_capture_gate() -> std::sync::MutexGuard<'static, ()> {
+    CAPTURE_GATE.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 // -- Shared state between audio callback and daemon thread --
 
 struct CaptureShared {
@@ -192,6 +214,9 @@ pub fn stop_recording_no_handle() -> Result<String, String> {
 }
 
 fn stop_recording_internal() -> Result<String, String> {
+    // Release the single-shot reservation regardless of whether the daemon
+    // succeeds — once stop is requested, the single-shot slot is no longer ours.
+    SINGLE_SHOT_RESERVED.store(false, Ordering::Release);
     let daemon = DAEMON.get().ok_or_else(|| "audio not initialized".to_string())?;
     daemon.start_ack.store(false, Ordering::Release);
     let (resp_tx, resp_rx) = mpsc::channel();
@@ -344,6 +369,219 @@ fn build_stream(
             stream_error,
             None,
         ),
+        f => return Err(format!("unsupported format: {:?}", f)),
+    }
+    .map_err(|e| format!("build_input_stream: {}", e))
+}
+
+// -- Streaming capture (parallel path for continuous-conversation mode) --
+//
+// Independent of the prewarm daemon: opens its own cpal stream on a dedicated
+// thread, delivers raw i16 PCM + sample rate to a user-supplied callback for
+// each cpal buffer (~20ms at 48kHz). Aggregating into longer VAD windows is the
+// caller's responsibility (see conversation.rs).
+//
+// Mutual exclusion with the single-shot path is enforced via STREAMING_ACTIVE.
+
+pub struct StreamingHandle {
+    stop_tx: Sender<()>,
+    /// Sample rate reported by the input device, in Hz.
+    pub sample_rate: u32,
+    /// Channel count reported by the input device.
+    pub channels: u16,
+}
+
+/// Begin a long-lived capture session. The callback fires on cpal's audio
+/// thread for every input buffer — keep it lightweight (e.g., push to a queue).
+pub fn start_streaming_capture<F>(callback: F) -> Result<StreamingHandle, String>
+where
+    F: FnMut(&[i16], u32) + Send + 'static,
+{
+    // Hold the capture gate across the entire check-and-reserve step so the
+    // single-shot entry can't slip between our two flag reads.
+    let _gate = lock_capture_gate();
+
+    // SINGLE_SHOT_RESERVED is flipped synchronously by the single-shot entry;
+    // start_ack is the daemon's async confirmation. Check both.
+    if SINGLE_SHOT_RESERVED.load(Ordering::Acquire) {
+        return Err("single-shot recording in progress".into());
+    }
+    if let Some(d) = DAEMON.get() {
+        if d.start_ack.load(Ordering::Acquire) {
+            return Err("single-shot recording in progress".into());
+        }
+    }
+
+    if STREAMING_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("streaming capture already active".into());
+    }
+    drop(_gate);
+
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<(u32, u16), String>>();
+
+    let cb = Arc::new(Mutex::new(callback));
+
+    std::thread::Builder::new()
+        .name("audio-streaming".into())
+        .spawn(move || {
+            let host = cpal::default_host();
+            let device = match host.default_input_device() {
+                Some(d) => d,
+                None => {
+                    let _ = ready_tx.send(Err("no input device".into()));
+                    STREAMING_ACTIVE.store(false, Ordering::Release);
+                    return;
+                }
+            };
+            let supported = match device.default_input_config() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(format!("config: {}", e)));
+                    STREAMING_ACTIVE.store(false, Ordering::Release);
+                    return;
+                }
+            };
+
+            let sample_rate = supported.sample_rate().0;
+            let channels = supported.channels();
+            let sample_fmt = supported.sample_format();
+            let stream_cfg: cpal::StreamConfig = supported.into();
+
+            eprintln!(
+                "[record] streaming: device={} rate={} ch={} fmt={:?}",
+                device.name().unwrap_or_default(),
+                sample_rate,
+                channels,
+                sample_fmt
+            );
+
+            let stream = match build_streaming_stream(&device, &stream_cfg, sample_fmt, sample_rate, cb) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e));
+                    STREAMING_ACTIVE.store(false, Ordering::Release);
+                    return;
+                }
+            };
+
+            if let Err(e) = stream.play() {
+                let _ = ready_tx.send(Err(format!("play: {}", e)));
+                STREAMING_ACTIVE.store(false, Ordering::Release);
+                return;
+            }
+
+            let _ = ready_tx.send(Ok((sample_rate, channels)));
+            eprintln!("[record] streaming started @ {}Hz", sample_rate);
+
+            // Block until stop is signaled (or sender dropped — handle leaked).
+            let _ = stop_rx.recv();
+
+            drop(stream);
+            STREAMING_ACTIVE.store(false, Ordering::Release);
+            AUDIO_LEVEL.store(0, Ordering::Relaxed);
+            eprintln!("[record] streaming stopped");
+        })
+        .map_err(|e| {
+            STREAMING_ACTIVE.store(false, Ordering::Release);
+            format!("spawn: {}", e)
+        })?;
+
+    match ready_rx.recv_timeout(std::time::Duration::from_secs(3)) {
+        Ok(Ok((rate, ch))) => Ok(StreamingHandle {
+            stop_tx,
+            sample_rate: rate,
+            channels: ch,
+        }),
+        Ok(Err(e)) => Err(e),
+        Err(_) => {
+            STREAMING_ACTIVE.store(false, Ordering::Release);
+            Err("streaming start timeout".into())
+        }
+    }
+}
+
+/// Stop a streaming session: signals the dedicated thread to drop its stream
+/// and release the device. Idempotent if the thread already exited.
+pub fn stop_streaming_capture(handle: StreamingHandle) {
+    let _ = handle.stop_tx.send(());
+    // handle drops here; the dedicated thread is detached and will release the
+    // device on its own once the stop signal is processed.
+}
+
+fn build_streaming_stream<F>(
+    device: &cpal::Device,
+    cfg: &cpal::StreamConfig,
+    fmt: SampleFormat,
+    sample_rate: u32,
+    cb: Arc<Mutex<F>>,
+) -> Result<cpal::Stream, String>
+where
+    F: FnMut(&[i16], u32) + Send + 'static,
+{
+    fn update_level_f32(data: &[f32]) {
+        if data.is_empty() {
+            return;
+        }
+        let rms = (data.iter().map(|&s| s * s).sum::<f32>() / data.len() as f32).sqrt();
+        let db = if rms > 0.001 { 20.0 * rms.log10() } else { -60.0 };
+        let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+        AUDIO_LEVEL.store((level * 1000.0) as u32, Ordering::Relaxed);
+    }
+    fn update_level_i16(data: &[i16]) {
+        if data.is_empty() {
+            return;
+        }
+        let rms = (data
+            .iter()
+            .map(|&s| {
+                let f = s as f32 / i16::MAX as f32;
+                f * f
+            })
+            .sum::<f32>()
+            / data.len() as f32)
+            .sqrt();
+        let db = if rms > 0.001 { 20.0 * rms.log10() } else { -60.0 };
+        let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+        AUDIO_LEVEL.store((level * 1000.0) as u32, Ordering::Relaxed);
+    }
+
+    match fmt {
+        SampleFormat::F32 => {
+            let cb = cb.clone();
+            device.build_input_stream(
+                cfg,
+                move |d: &[f32], _| {
+                    update_level_f32(d);
+                    let buf: Vec<i16> = d
+                        .iter()
+                        .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+                        .collect();
+                    if let Ok(mut cb) = cb.lock() {
+                        cb(&buf, sample_rate);
+                    }
+                },
+                stream_error,
+                None,
+            )
+        }
+        SampleFormat::I16 => {
+            let cb = cb.clone();
+            device.build_input_stream(
+                cfg,
+                move |d: &[i16], _| {
+                    update_level_i16(d);
+                    if let Ok(mut cb) = cb.lock() {
+                        cb(d, sample_rate);
+                    }
+                },
+                stream_error,
+                None,
+            )
+        }
         f => return Err(format!("unsupported format: {:?}", f)),
     }
     .map_err(|e| format!("build_input_stream: {}", e))

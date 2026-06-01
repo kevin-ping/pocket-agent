@@ -132,6 +132,21 @@ pub struct AppConfig {
     pub hotkey_name: String,
     pub tts_enabled: bool,
     pub double_click_to_record: bool,
+    pub continuous_conversation: bool,
+    pub silence_timeout_secs: u32,
+    #[serde(default = "default_pause_tolerance_ms")]
+    pub pause_tolerance_ms: u32,
+    #[serde(default = "default_speech_rms_threshold")]
+    pub speech_rms_threshold: f32,
+    pub skip_interrupt_confirmation: bool,
+}
+
+fn default_pause_tolerance_ms() -> u32 {
+    1500
+}
+
+fn default_speech_rms_threshold() -> f32 {
+    0.015
 }
 
 impl Default for AppConfig {
@@ -152,6 +167,11 @@ impl Default for AppConfig {
             hotkey_name: "RightShift".to_string(),
             tts_enabled: true,
             double_click_to_record: false,
+            continuous_conversation: false,
+            silence_timeout_secs: 5,
+            pause_tolerance_ms: default_pause_tolerance_ms(),
+            speech_rms_threshold: default_speech_rms_threshold(),
+            skip_interrupt_confirmation: true,
         }
     }
 }
@@ -177,6 +197,11 @@ pub fn load_config(app: &AppHandle) -> AppConfig {
         hotkey_name: store.get("hotkey_name").and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "RightShift".to_string()),
         tts_enabled: store.get("tts_enabled").and_then(|v| v.as_bool()).unwrap_or(true),
         double_click_to_record: store.get("double_click_to_record").and_then(|v| v.as_bool()).unwrap_or(false),
+        continuous_conversation: store.get("continuous_conversation").and_then(|v| v.as_bool()).unwrap_or(default.continuous_conversation),
+        silence_timeout_secs: store.get("silence_timeout_secs").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(default.silence_timeout_secs),
+        pause_tolerance_ms: store.get("pause_tolerance_ms").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(default.pause_tolerance_ms),
+        speech_rms_threshold: store.get("speech_rms_threshold").and_then(|v| v.as_f64()).map(|f| f as f32).unwrap_or(default.speech_rms_threshold),
+        skip_interrupt_confirmation: store.get("skip_interrupt_confirmation").and_then(|v| v.as_bool()).unwrap_or(default.skip_interrupt_confirmation),
     }
 }
 
@@ -208,6 +233,11 @@ pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String
     }
     store.set("tts_enabled", serde_json::json!(config.tts_enabled));
     store.set("double_click_to_record", serde_json::json!(config.double_click_to_record));
+    store.set("continuous_conversation", serde_json::json!(config.continuous_conversation));
+    store.set("silence_timeout_secs", serde_json::json!(config.silence_timeout_secs));
+    store.set("pause_tolerance_ms", serde_json::json!(config.pause_tolerance_ms));
+    store.set("speech_rms_threshold", serde_json::json!(config.speech_rms_threshold));
+    store.set("skip_interrupt_confirmation", serde_json::json!(config.skip_interrupt_confirmation));
     store.save().map_err(|e| e.to_string())?;
     Ok(())
 }

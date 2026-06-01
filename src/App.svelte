@@ -17,7 +17,7 @@
   import { chatStore } from './lib/stores/chat';
   import { settingsStore } from './lib/stores/settings';
   import { layoutStore } from './lib/stores/layout';
-  import { STATUS_PHRASES, langFromVoice, detectLang, type LangKey } from './lib/i18n';
+  import { STATUS_PHRASES, langFromVoice, detectLang, convLabels, type LangKey } from './lib/i18n';
 
   const appWindow = getCurrentWindow();
 
@@ -78,7 +78,14 @@
   let firstStreamDelta = false;
   let lastSpeakingHadAudio = true;
   let bridgeThinkingActive = false;
+
+  // ─── Continuous conversation mode ───
+  let conversationActive = false;
   let bridgeFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function voiceListeningText(): string {
+    return `🎤 ${convLabels(get(settingsStore).tts_primary_voice).voiceListening}`;
+  }
 
   function clearBridgeFallbackTimer() {
     if (bridgeFallbackTimer) {
@@ -213,8 +220,28 @@
 
   function requestNewTurn(action: () => void) {
     if (!isTurnActive()) { action(); return; }
+    const s = get(settingsStore);
+    if (s.continuous_conversation && s.skip_interrupt_confirmation) {
+      // Skip confirm popup; immediately break and run action.
+      confirmBreakSilently(action);
+      return;
+    }
     pendingBreakAction = action;
     showBreakConfirm = true;
+  }
+
+  async function confirmBreakSilently(action: () => void) {
+    cancelPendingStatusSpeech();
+    lastSpokenStatus = null;
+    try { await invoke('discard_pending_turn'); } catch (e) { console.error(e); }
+    chatStore.endStream();
+    chatStore.clearThinkingSteps();
+    bridgeThinkingActive = false;
+    clearBridgeFallbackTimer();
+    islandMode = 'idle';
+    spiritPhase = 0;
+    characterState.toIdle();
+    action();
   }
 
   async function confirmBreak() {
@@ -313,6 +340,9 @@
         if (!e.payload.has_audio && !$layoutStore.expanded) {
           layoutStore.toggle();
         }
+        if (conversationActive && e.payload.has_audio) {
+          invoke('notify_conversation_tts_started').catch(console.error);
+        }
       }),
       listen('chat-audio-playing', () => {
         cancelPendingStatusSpeech();
@@ -348,8 +378,15 @@
       listen('chat-audio-done', () => {
         debugState('chat-audio-done');
         chatStore.endStream();
-        characterState.transition('speaking', 'idle');
-        spiritPhase = 0;
+        if (conversationActive) {
+          // Hand control back to the conversation worker; it drives characterState via
+          // conversation-state events. Skip the toIdle transition here.
+          invoke('notify_conversation_tts_done').catch(console.error);
+          spiritPhase = 0;
+        } else {
+          characterState.transition('speaking', 'idle');
+          spiritPhase = 0;
+        }
         autoCloseBreakConfirm();
       }),
 
@@ -440,6 +477,40 @@
 
       listen('fn-key-down', () => {
         debugState('fn-key-down');
+        const cfg = get(settingsStore);
+        if (cfg.continuous_conversation) {
+          if (conversationActive) {
+            invoke('stop_continuous_conversation').catch(console.error);
+            conversationActive = false;
+            chatStore.setVoiceStatus(null);
+            islandMode = 'idle';
+            spiritPhase = 0;
+            characterState.toIdle();
+            return;
+          }
+          requestNewTurn(() => {
+            conversationActive = true;
+            islandMode = 'recording';
+            spiritPhase = 0;
+            firstStreamDelta = false;
+            chatStore.clear();
+            chatStore.setVoiceStatus(voiceListeningText());
+            characterState.toListening();
+            invoke('start_continuous_conversation', {
+              silenceTimeoutSecs: cfg.silence_timeout_secs,
+              pauseToleranceMs: cfg.pause_tolerance_ms,
+              speechRmsThreshold: cfg.speech_rms_threshold,
+            })
+              .catch((e) => {
+                console.error('[continuous] start failed', e);
+                conversationActive = false;
+                characterState.toIdle();
+                islandMode = 'idle';
+                chatStore.setError(`连续对话启动失败: ${e}`);
+              });
+          });
+          return;
+        }
         requestNewTurn(() => {
           islandMode = 'recording';
           spiritPhase = 0;
@@ -460,6 +531,10 @@
       }),
       listen('fn-key-up', () => {
         debugState('fn-key-up');
+        if (get(settingsStore).continuous_conversation) {
+          // In continuous mode, hotkey is a toggle on key-down; key-up is a no-op.
+          return;
+        }
         islandMode = 'thinking';
         spiritPhase = 1;
         characterState.toThinking();
@@ -485,6 +560,9 @@
         islandMode = 'thinking';
         if (e.payload.text.trim()) {
           handleSendMessage(e.payload.text, e.payload.language);
+        } else if (conversationActive) {
+          // Empty result in continuous mode: worker stays Listening, just ignore.
+          islandMode = 'recording';
         } else {
           spiritPhase = 0;
           characterState.toIdle();
@@ -500,6 +578,46 @@
         chatStore.setError(`语音识别失败: ${e.payload.error}`);
         characterState.toIdle();
         if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
+      }),
+
+      // ─── Continuous conversation events ───
+      listen<string>('conversation-state', (e) => {
+        const s = e.payload as 'listening' | 'transcribing' | 'speaking';
+        debugState('conversation-state', { state: s });
+        if (!conversationActive) return;
+        if (s === 'listening') {
+          chatStore.setVoiceStatus(voiceListeningText());
+          characterState.toListening();
+          islandMode = 'recording';
+          spiritPhase = 0;
+        } else if (s === 'transcribing') {
+          chatStore.setVoiceStatus(null);
+          characterState.toThinking();
+          islandMode = 'thinking';
+          spiritPhase = 1;
+        } else if (s === 'speaking') {
+          // Transition to speaking visuals is driven by chat-audio-playing, not by
+          // backend Speaking state — the backend flips to Speaking right after the STT
+          // result returns (before TTS actually plays), which would otherwise skip the
+          // thinking animation. Only clear the voice-status row here.
+          chatStore.setVoiceStatus(null);
+        }
+      }),
+      listen('conversation-ended', () => {
+        debugState('conversation-ended');
+        conversationActive = false;
+        chatStore.setVoiceStatus(null);
+        islandMode = 'idle';
+        spiritPhase = 0;
+        characterState.toIdle();
+      }),
+      listen('conversation-barge-in', () => {
+        debugState('conversation-barge-in');
+        // TTS was cut; clear in-flight UI so the new utterance can render cleanly.
+        chatStore.endStream();
+        chatStore.clearThinkingSteps();
+        chatStore.setVoiceStatus(voiceListeningText());
+        spiritPhase = 0;
       }),
 
       listen('accessibility-permission-required', () => {
@@ -600,6 +718,9 @@
     unlisten.forEach((fn) => fn());
     if (audioLevelTimer) clearInterval(audioLevelTimer);
     clearBridgeFallbackTimer();
+    if (conversationActive) {
+      invoke('stop_continuous_conversation').catch(() => {});
+    }
   });
 </script>
 

@@ -17,6 +17,11 @@ export interface AppSettings {
   hotkey_name: string;
   tts_enabled: boolean;
   double_click_to_record: boolean;
+  continuous_conversation: boolean;
+  silence_timeout_secs: number;
+  pause_tolerance_ms: number;
+  speech_rms_threshold: number;
+  skip_interrupt_confirmation: boolean;
 }
 
 const defaults: AppSettings = {
@@ -35,6 +40,11 @@ const defaults: AppSettings = {
   hotkey_name: "RightShift",
   tts_enabled: true,
   double_click_to_record: false,
+  continuous_conversation: false,
+  silence_timeout_secs: 5,
+  pause_tolerance_ms: 1500,
+  speech_rms_threshold: 0.015,
+  skip_interrupt_confirmation: true,
 };
 
 function createSettingsStore() {

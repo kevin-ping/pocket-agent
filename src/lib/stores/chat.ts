@@ -13,6 +13,10 @@ interface ChatState {
   error: string | null;
   /** Steps shown during LLM thinking/tool-calling phase (cleared when final text arrives) */
   thinkingSteps: string[];
+  /** Voice-mode status line (e.g. "🎤 听着…"). Lives alongside thinkingSteps in
+   *  the StatusPanel but is orthogonal to LLM streaming — never cleared by
+   *  startStream/finalizeStream, only by setVoiceStatus(null), clear, or setError. */
+  voiceStatus: string | null;
 }
 
 // ── Emotion → ms per char ──
@@ -157,6 +161,7 @@ function createChatStore() {
     isStreaming: false,
     error: null,
     thinkingSteps: [],
+    voiceStatus: null,
   });
 
   storeUpdate = update;
@@ -173,6 +178,7 @@ function createChatStore() {
         isStreaming: false,
         error: null,
         thinkingSteps: [],
+        voiceStatus: s.voiceStatus,
       };
     });
   }
@@ -236,6 +242,10 @@ function createChatStore() {
     /** Clear all thinking steps — called when final text arrives */
     clearThinkingSteps: () =>
       update((s) => ({ ...s, thinkingSteps: [] })),
+
+    /** Set or clear the voice-mode status line (e.g. "🎤 听着…"). Pass null to clear. */
+    setVoiceStatus: (text: string | null) =>
+      update((s) => (s.voiceStatus === text ? s : { ...s, voiceStatus: text })),
 
     startTypewriter: (emotion: string) => {
       if (typewriterTimer) {
@@ -307,7 +317,7 @@ function createChatStore() {
       streamEnding = false;
       trailingNewlines = 0;
       resetCmdState();
-      update((s) => ({ ...s, isStreaming: false, streamingContent: '', error: msg, thinkingSteps: [] }));
+      update((s) => ({ ...s, isStreaming: false, streamingContent: '', error: msg, thinkingSteps: [], voiceStatus: null }));
     },
 
     clear: () => {
@@ -316,7 +326,7 @@ function createChatStore() {
       streamEnding = false;
       trailingNewlines = 0;
       resetCmdState();
-      set({ messages: [], streamingContent: '', isStreaming: false, error: null, thinkingSteps: [] });
+      set({ messages: [], streamingContent: '', isStreaming: false, error: null, thinkingSteps: [], voiceStatus: null });
     },
   };
 }

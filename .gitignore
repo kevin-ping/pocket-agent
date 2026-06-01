@@ -15,6 +15,7 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 src-tauri/api-*
+__pycache__/
 .DS_Store
 *.log
 *.bak
