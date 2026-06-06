@@ -68,7 +68,9 @@ pub fn run() {
                     .name("venv-bootstrap".to_string())
                     .spawn(move || {
                         match voice::venv::ensure_venv(&venv_handle) {
-                            Ok(()) => voice::stt::ensure_stt_server(),
+                            Ok(()) => {
+                                voice::stt::ensure_stt_server(Some(venv_handle.clone()));
+                            }
                             Err(e) => eprintln!("[venv] bootstrap failed: {}", e),
                         }
                     })
@@ -155,6 +157,7 @@ pub fn run() {
             commands::voice::start_wake_word_listening,
             commands::voice::stop_wake_word_listening,
             commands::voice::is_wake_word_active,
+            commands::voice::is_app_ready,
             commands::voice::start_enroll_recording,
             commands::voice::stop_enroll_recording,
             commands::voice::enroll_speaker,

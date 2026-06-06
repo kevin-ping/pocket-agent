@@ -291,7 +291,9 @@ fn voice_lang(voice: &str) -> &str {
     voice.split('-').next().unwrap_or("zh")
 }
 
-fn select_voice(text: &str, primary: &str, aux1: &str, aux2: &str, fixed_lang: &str, user_lang: &str) -> String {
+fn select_voice(text: &str, primary: &str, aux1: &str, aux2: &str, fixed_lang: &str, _user_lang: &str) -> String {
+    // 忽略 user_lang 参数，始终根据回复内容的语言来选择 TTS 语音
+    // 这是为了支持：用户用中文问，但 LLM 返回日语/英语等情况
     if !fixed_lang.is_empty() {
         let forced_voice = match fixed_lang {
             "aux1" if !aux1.is_empty() => aux1,
@@ -310,26 +312,15 @@ fn select_voice(text: &str, primary: &str, aux1: &str, aux2: &str, fixed_lang: &
             // Fall through to auto-detection below
         }
     }
-    // Use user input language (not sentence content) to select voice.
-    // This ensures Chinese input → all Chinese voice, English input → all English voice.
-    // Only fallback to content detection if user_lang doesn't match any configured voice.
-    let lang = if !user_lang.is_empty() { user_lang } else { detect_language(text) };
-    eprintln!("[TTS] user_lang={}, using lang: {}", user_lang, lang);
+    // 根据回复内容检测语言并选择对应的 TTS 语音
+    let lang = detect_language(text);
+    eprintln!("[TTS] response lang detected: {}", lang);
     for v in &[primary, aux1, aux2] {
         if !v.is_empty() && voice_lang(v) == lang {
             return v.to_string();
         }
     }
-    // Fallback: try content-based detection if user_lang didn't match
-    let detected = detect_language(text);
-    if detected != lang {
-        eprintln!("[TTS] user_lang {} has no matching voice, fallback to detected: {}", lang, detected);
-        for v in &[primary, aux1, aux2] {
-            if !v.is_empty() && voice_lang(v) == detected {
-                return v.to_string();
-            }
-        }
-    }
+    // Fallback: try primary voice if no match
     primary.to_string()
 }
 

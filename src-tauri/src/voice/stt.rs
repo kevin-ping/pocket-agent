@@ -2,9 +2,15 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio, Child};
 use std::io::BufRead;
 use std::sync::Mutex;
+use tauri::Emitter;
 
 /// Store the STT server child process so we can kill it when PA exits.
 static STT_CHILD: Mutex<Option<Child>> = Mutex::new(None);
+static APP_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn is_app_ready() -> bool {
+    APP_READY.load(std::sync::atomic::Ordering::Acquire)
+}
 
 const STT_SERVER_URL: &str = "http://127.0.0.1:8651";
 
@@ -175,7 +181,7 @@ pub fn transcribe(wav_path: &str) -> Result<SttResult, String> {
 
 /// Ensure the resident STT server is running; spawn it if not.
 /// Called once at app startup.
-pub fn ensure_stt_server() {
+pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build();
@@ -187,6 +193,10 @@ pub fn ensure_stt_server() {
 
     if running {
         eprintln!("[stt] resident server already running on :8651");
+        APP_READY.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(h) = app_handle.as_ref() {
+            let _ = h.emit("app-ready", ());
+        }
         return;
     }
 
@@ -238,6 +248,7 @@ pub fn ensure_stt_server() {
             // and the exact pip install command — instead of silently slipping
             // into the ~13s subprocess fallback on every utterance.
             let python_for_hint = python.clone();
+            let probe_handle = app_handle.clone();
             std::thread::Builder::new()
                 .name("stt-health-probe".to_string())
                 .spawn(move || {
@@ -258,6 +269,10 @@ pub fn ensure_stt_server() {
                     while std::time::Instant::now() < deadline {
                         if client.get(&url).send().map(|r| r.status().is_success()).unwrap_or(false) {
                             eprintln!("[stt] resident server healthy on :8651");
+            APP_READY.store(true, std::sync::atomic::Ordering::Release);
+                            if let Some(h) = probe_handle.as_ref() {
+                                let _ = h.emit("app-ready", ());
+                            }
                             return;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(500));

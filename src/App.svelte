@@ -79,6 +79,24 @@
   let lastSpeakingHadAudio = true;
   let bridgeThinkingActive = false;
 
+  // ─── Media skins: avatar content per state ───
+  $: mediaSkins = {
+    listening: 'user_input.gif',
+    speaking: $settingsStore.avatar_image ?? '',
+  };
+  let promptAudio: HTMLAudioElement | null = null;
+
+  async function playPromptSound() {
+    try {
+      // 每次创建新的 Audio element，避免 Web Audio API sourceNode 只能用一次的问题
+      promptAudio = new Audio('user_input.mp3');
+      promptAudio.volume = 1;
+      await promptAudio.play();
+      console.log('[prompt] playing');
+    } catch (e) {
+      console.warn('[prompt] error:', e);
+    }
+  }
   // ─── Continuous conversation mode ───
   let conversationActive = false;
   let bridgeFallbackTimer: ReturnType<typeof setTimeout> | null = null;
@@ -559,6 +577,7 @@
             return;
           }
           requestNewTurn(() => {
+            playPromptSound();
             conversationActive = true;
             islandMode = 'recording';
             spiritPhase = 0;
@@ -582,6 +601,7 @@
           return;
         }
         requestNewTurn(() => {
+          playPromptSound();
           islandMode = 'recording';
           spiritPhase = 0;
           firstStreamDelta = false;
@@ -666,11 +686,13 @@
         debugState('conversation-state', { state: s });
         if (!conversationActive) return;
         if (s === 'listening') {
+          playPromptSound();
           chatStore.setVoiceStatus(voiceListeningText());
           characterState.toListening();
           islandMode = 'recording';
           spiritPhase = 0;
         } else if (s === 'transcribing') {
+          playPromptSound();
           chatStore.setVoiceStatus(null);
           characterState.toThinking();
           islandMode = 'thinking';
@@ -830,6 +852,25 @@
   let unsubSettings: (() => void) | null = null;
 
   onMount(async () => {
+    // 启动音效：后端所有服务就绪后播放
+    const playStartSound = async () => {
+      console.log('[app] all services ready, playing start sound');
+      try {
+        const audio = new Audio('app_start.mp3');
+        audio.volume = 0.3;
+        await audio.play();
+      } catch (e) {
+        console.warn('[app] start sound error:', e);
+      }
+    };
+    // 先查状态：如果后端已经 ready，直接播放；否则监听事件
+    const ready = await invoke<boolean>('is_app_ready');
+    if (ready) {
+      playStartSound();
+    } else {
+      listen('app-ready', () => playStartSound()).catch(console.error);
+    }
+    
     await settingsStore.load();
     // Apply double-click mode setting to hotkey listener
     const s = $settingsStore;
@@ -891,6 +932,7 @@
       <AvatarIcon
         avatarImage={$settingsStore.avatar_image ?? null}
         spiritPhase={spiritPhase}
+        mediaSkins={mediaSkins}
         on:expand={() => layoutStore.toggle()}
       />
       <DynamicIsland mode={islandMode} audioLevel={audioLevel} />

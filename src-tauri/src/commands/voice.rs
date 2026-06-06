@@ -449,6 +449,11 @@ pub fn is_wake_word_active() -> bool {
     crate::voice::sherpa_wake::is_wake_active()
 }
 
+#[tauri::command]
+pub fn is_app_ready() -> bool {
+    crate::voice::stt::is_app_ready()
+}
+
 // Speaker-enrollment recording path: same WAV file as the single-shot voice
 // recorder, but the matching stop command returns the path and skips Whisper
 // STT so the chat flow is not contaminated by enrollment audio.

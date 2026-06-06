@@ -22,3 +22,5 @@ __pycache__/
 
 # settings
 .env
+__pycache__/
+*.pyc
