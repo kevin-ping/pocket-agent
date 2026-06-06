@@ -12,6 +12,7 @@ export interface AppSettings {
   window_x: number | null;
   window_y: number | null;
   avatar_image: string | null;
+  avatar_gif: string | null;
   fixed_lang: string;
   hotkey_code: number;
   hotkey_name: string;
@@ -39,6 +40,7 @@ const defaults: AppSettings = {
   window_x: null,
   window_y: null,
   avatar_image: null,
+  avatar_gif: null,
   fixed_lang: "",
   hotkey_code: 60,
   hotkey_name: "RightShift",

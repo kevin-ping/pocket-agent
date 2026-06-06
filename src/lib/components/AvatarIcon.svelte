@@ -60,7 +60,6 @@
     </svg>
   </div>
 
-
   <!--
     avatar-core: 76×76 reference box — ALL rings/arcs are positioned
     relative to THIS box so they share the exact same center as the circle.

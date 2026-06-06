@@ -82,7 +82,8 @@
   // ─── Media skins: avatar content per state ───
   $: mediaSkins = {
     listening: 'user_input.gif',
-    speaking: $settingsStore.avatar_image ?? '',
+    thinking: $settingsStore.avatar_gif ?? $settingsStore.avatar_image ?? '',
+    speaking: $settingsStore.avatar_gif ?? $settingsStore.avatar_image ?? '',
   };
   let promptAudio: HTMLAudioElement | null = null;
 

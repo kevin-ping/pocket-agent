@@ -100,6 +100,27 @@
     if (fileInput) fileInput.value = '';
   }
 
+  let gifFileInput = $state<HTMLInputElement>(undefined!);
+
+  function triggerAvatarGifUpload() {
+    gifFileInput?.click();
+  }
+
+  function handleAvatarGifFile(e: Event) {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      local.avatar_gif = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function removeAvatarGif() {
+    local.avatar_gif = null;
+    if (gifFileInput) gifFileInput.value = '';
+  }
+
   let capturing = $state(false);
   let applying = $state(false);
 
@@ -409,6 +430,26 @@
           style="display:none"
           onchange={handleAvatarFile}
         />
+        <input
+          bind:this={gifFileInput}
+          type="file"
+          accept="image/gif"
+          style="display:none"
+          onchange={handleAvatarGifFile}
+        />
+        {#if local.avatar_image}
+          <div class="avatar-gif-section">
+            <div class="section-label" style="margin-top:4px">动画头像 (thinking/speaking)</div>
+            <div style="display:flex;align-items:center;gap:6px">
+              {#if local.avatar_gif}
+                <img src={local.avatar_gif} alt="GIF" style="width:32px;height:32px;border-radius:50%;object-fit:cover" />
+                <button class="remove-btn" onclick={removeAvatarGif}>✕</button>
+              {:else}
+                <button class="remove-btn" style="opacity:0.7" onclick={triggerAvatarGifUpload}>上传 GIF</button>
+              {/if}
+            </div>
+          </div>
+        {/if}
       </div>
 
 
