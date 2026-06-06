@@ -28,8 +28,28 @@ fn marker_path() -> PathBuf {
     home_dir().join(VENV_MARKER_RELATIVE)
 }
 
+/// Read the bundled requirements-stt.txt. Used both for the marker content and
+/// to drive `pip install -r`. Returning the full text (not a hash) keeps the
+/// marker self-describing — a maintainer can `cat` it to see what was installed.
+fn marker_expected() -> Result<String, String> {
+    let req_path = resource_path("requirements-stt.txt");
+    std::fs::read_to_string(&req_path).map_err(|e| {
+        format!("无法读 requirements ({}): {}", req_path.display(), e)
+    })
+}
+
 pub fn venv_ready() -> bool {
-    venv_python_path().exists() && marker_path().exists()
+    if !venv_python_path().exists() {
+        return false;
+    }
+    let Ok(actual) = std::fs::read_to_string(marker_path()) else {
+        return false;
+    };
+    let Ok(expected) = marker_expected() else {
+        return false;
+    };
+    // Tolerate trailing whitespace differences (e.g. some editors strip the final newline).
+    actual.trim_end() == expected.trim_end()
 }
 
 /// Look up a bundled resource (e.g. `requirements-stt.txt`) using the same
@@ -233,7 +253,14 @@ pub fn ensure_venv(app: &AppHandle) -> Result<(), String> {
         }
     }
 
-    if let Err(e) = std::fs::write(marker_path(), "ok\n") {
+    let marker_data = match marker_expected() {
+        Ok(s) => s,
+        Err(e) => {
+            emit_error(app, "writing-marker", &e);
+            return Err(e);
+        }
+    };
+    if let Err(e) = std::fs::write(marker_path(), &marker_data) {
         let msg = format!("无法写 marker {}: {}", marker_path().display(), e);
         emit_error(app, "writing-marker", &msg);
         return Err(msg);

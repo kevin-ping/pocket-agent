@@ -1,15 +1,29 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import { settingsStore } from '../stores/settings';
+  import { convLabels } from '../i18n';
 
-  export let mode: 'idle' | 'recording' | 'thinking' = 'idle';
+  export let mode: 'idle' | 'recording' | 'thinking' | 'waiting_for_wake' | 'verifying_speaker' = 'idle';
   export let audioLevel: number = 0;
 
   const dispatch = createEventDispatcher<{ click: void }>();
+
+  $: tooltip = mode === 'waiting_for_wake'
+    ? convLabels($settingsStore.tts_primary_voice).waitingForWakeCaption
+    : mode === 'verifying_speaker'
+      ? convLabels($settingsStore.tts_primary_voice).verifyingSpeakerCaption
+      : '';
 </script>
 
 <!-- svelte-ignore a11y-click-events-have-key-events -->
 <!-- svelte-ignore a11y-no-static-element-interactions -->
-<div class="island-wrap" on:click={() => dispatch('click')}>
+<div
+  class="island-wrap"
+  class:waiting-for-wake={mode === 'waiting_for_wake'}
+  class:verifying-speaker={mode === 'verifying_speaker'}
+  title={tooltip}
+  on:click={() => dispatch('click')}
+>
   <!-- Dot 1: collapses to dot, expands to voice wave -->
   <div class="island-bar bar-1" class:expanded={mode === 'recording'}>
     {#if mode === 'recording'}
@@ -140,5 +154,31 @@
   @keyframes ecg-draw {
     0%   { stroke-dashoffset: 120; }
     100% { stroke-dashoffset: 0; }
+  }
+
+  /* ── Wake-listening state: gentle teal pulse on dot 3 ── */
+  .island-wrap.waiting-for-wake .bar-3 {
+    border-color: rgba(100, 220, 200, 0.55);
+    animation: wake-pulse 1.8s ease-in-out infinite;
+  }
+  .island-wrap.waiting-for-wake .bar-3 .dot {
+    background: rgba(100, 220, 200, 0.85);
+  }
+  @keyframes wake-pulse {
+    0%, 100% { opacity: 0.55; }
+    50%      { opacity: 1; }
+  }
+
+  /* ── Verifying-speaker state: amber pulse across all 3 dots ── */
+  .island-wrap.verifying-speaker .island-bar {
+    border-color: rgba(255, 200, 100, 0.55);
+    animation: verify-pulse 0.7s ease-in-out infinite;
+  }
+  .island-wrap.verifying-speaker .island-bar .dot {
+    background: rgba(255, 200, 100, 0.85);
+  }
+  @keyframes verify-pulse {
+    0%, 100% { opacity: 0.6; }
+    50%      { opacity: 1; }
   }
 </style>

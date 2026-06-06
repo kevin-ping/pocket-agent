@@ -139,6 +139,14 @@ pub struct AppConfig {
     #[serde(default = "default_speech_rms_threshold")]
     pub speech_rms_threshold: f32,
     pub skip_interrupt_confirmation: bool,
+    #[serde(default)]
+    pub wake_word_enabled: bool,
+    #[serde(default = "default_wake_word_threshold")]
+    pub wake_word_threshold: f32,
+    #[serde(default)]
+    pub speaker_verification_enabled: bool,
+    #[serde(default)]
+    pub last_enrolled_speaker: String,
 }
 
 fn default_pause_tolerance_ms() -> u32 {
@@ -147,6 +155,10 @@ fn default_pause_tolerance_ms() -> u32 {
 
 fn default_speech_rms_threshold() -> f32 {
     0.015
+}
+
+fn default_wake_word_threshold() -> f32 {
+    0.5
 }
 
 impl Default for AppConfig {
@@ -172,6 +184,10 @@ impl Default for AppConfig {
             pause_tolerance_ms: default_pause_tolerance_ms(),
             speech_rms_threshold: default_speech_rms_threshold(),
             skip_interrupt_confirmation: true,
+            wake_word_enabled: false,
+            wake_word_threshold: default_wake_word_threshold(),
+            speaker_verification_enabled: false,
+            last_enrolled_speaker: String::new(),
         }
     }
 }
@@ -202,6 +218,10 @@ pub fn load_config(app: &AppHandle) -> AppConfig {
         pause_tolerance_ms: store.get("pause_tolerance_ms").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(default.pause_tolerance_ms),
         speech_rms_threshold: store.get("speech_rms_threshold").and_then(|v| v.as_f64()).map(|f| f as f32).unwrap_or(default.speech_rms_threshold),
         skip_interrupt_confirmation: store.get("skip_interrupt_confirmation").and_then(|v| v.as_bool()).unwrap_or(default.skip_interrupt_confirmation),
+        wake_word_enabled: store.get("wake_word_enabled").and_then(|v| v.as_bool()).unwrap_or(default.wake_word_enabled),
+        wake_word_threshold: store.get("wake_word_threshold").and_then(|v| v.as_f64()).map(|f| f as f32).unwrap_or(default.wake_word_threshold),
+        speaker_verification_enabled: store.get("speaker_verification_enabled").and_then(|v| v.as_bool()).unwrap_or(default.speaker_verification_enabled),
+        last_enrolled_speaker: store.get("last_enrolled_speaker").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
     }
 }
 
@@ -238,6 +258,10 @@ pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String
     store.set("pause_tolerance_ms", serde_json::json!(config.pause_tolerance_ms));
     store.set("speech_rms_threshold", serde_json::json!(config.speech_rms_threshold));
     store.set("skip_interrupt_confirmation", serde_json::json!(config.skip_interrupt_confirmation));
+    store.set("wake_word_enabled", serde_json::json!(config.wake_word_enabled));
+    store.set("wake_word_threshold", serde_json::json!(config.wake_word_threshold));
+    store.set("speaker_verification_enabled", serde_json::json!(config.speaker_verification_enabled));
+    store.set("last_enrolled_speaker", serde_json::json!(config.last_enrolled_speaker));
     store.save().map_err(|e| e.to_string())?;
     Ok(())
 }

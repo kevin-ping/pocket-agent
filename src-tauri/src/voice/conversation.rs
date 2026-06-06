@@ -24,7 +24,10 @@ use std::time::{Duration, Instant};
 use hound::{SampleFormat as HoundSampleFormat, WavSpec, WavWriter};
 use tauri::{AppHandle, Emitter};
 
-use crate::voice::record::{start_streaming_capture, stop_streaming_capture, StreamingHandle};
+use crate::voice::record::{
+    current_owner, start_streaming_capture, stop_streaming_capture, StreamingHandle,
+    OWNER_CONVERSATION, OWNER_NONE, OWNER_WAKE,
+};
 use crate::voice::stt::{transcribe, SttResult};
 
 /// Fallback default for the per-utterance silence flush window. The live value
@@ -69,6 +72,12 @@ const BARGE_IN_MIN_SUSTAINED_MS: u64 = 400;
 const BARGE_IN_RMS_THRESHOLD: f32 = 0.04;
 const SPEAKING_SAFETY_TIMEOUT_S: u64 = 30;
 const TICK_MS: u64 = 100;
+/// Max consecutive empty STT results before auto-ending the conversation.
+/// Each empty result means VAD detected sound but Silero/Whisper found no human speech
+/// (birds, clicks, background noise). After this many in a row, end the conversation
+/// and return to wake/Fn-key idle state.
+const MAX_CONSECUTIVE_EMPTY_STT: u32 = 1;
+
 /// "Patient" idle deadline used at conversation start and immediately after
 /// TtsDone — gives the user time to think before the conversation auto-ends.
 /// The shorter `silence_timeout_s` from settings is only used after an empty
@@ -140,10 +149,36 @@ pub fn start_conversation(
         return Err("conversation already active".into());
     }
 
+    // Owner-transition gate (record.rs file-header doc):
+    //   SINGLE_SHOT  → CONVERSATION  ✗ refused (different active flow)
+    //   WAKE         → CONVERSATION  ✓ pre-empt: stop wake, frontend re-arms
+    //   NONE         → CONVERSATION  ✓
+    //   CONVERSATION → CONVERSATION  ✗ already caught by ACTIVE check above
+    match current_owner() {
+        OWNER_WAKE => {
+            crate::voice::sherpa_wake::stop_wake_listener();
+            // stop_wake_listener joins the worker, but the audio-streaming
+            // thread releases the capture device asynchronously via Drop.
+            // Spin briefly until it's done so start_streaming_capture won't
+            // hit "capture busy: wake".
+            for _ in 0..50 {
+                if current_owner() == OWNER_NONE {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        OWNER_NONE | OWNER_CONVERSATION => {}
+        _ => {
+            ACTIVE.store(false, Ordering::Release);
+            return Err("单次录音进行中，无法启动连续对话".into());
+        }
+    }
+
     let (tx, rx) = mpsc::channel::<Msg>();
     let tx_for_cpal = tx.clone();
 
-    let stream_handle = match start_streaming_capture(move |samples, sr| {
+    let stream_handle = match start_streaming_capture(OWNER_CONVERSATION, move |samples, sr| {
         let _ = tx_for_cpal.send(Msg::AudioChunk(samples.to_vec(), sr));
     }) {
         Ok(h) => h,
@@ -234,6 +269,7 @@ fn worker_loop(
     let mut speaking_since: Option<Instant> = None;
     // Rolling EMA of RMS during quiet Listening — adapts threshold to room noise.
     let mut noise_floor: f32 = 0.0;
+    let mut consecutive_empty_stt: u32 = 0;
     // Set when Speaking begins (TtsStarted or non-empty SttResult). Used to
     // suppress VAD during BARGE_IN_WARMUP_MS so the TTS ramp-up doesn't
     // self-trigger.
@@ -434,6 +470,7 @@ fn worker_loop(
                 }
                 if had_text {
                     // Real utterance → expect a TTS response next.
+                    consecutive_empty_stt = 0;
                     mode = Mode::Speaking;
                     speaking_since = Some(Instant::now());
                     tts_started_at = Some(Instant::now());
@@ -441,10 +478,15 @@ fn worker_loop(
                     in_speech_burst = false;
                     emit_state("speaking");
                 } else {
-                    // Empty result (VAD silence false-positive, or STT error): no LLM round-trip
-                    // is starting, so go straight back to Listening and reset the idle counter
-                    // so the silence-timeout still applies. Use the shorter settings deadline
-                    // here — the user already had a chance to speak and produced nothing.
+                    // Empty result (VAD false-positive from birds/noise).
+                    consecutive_empty_stt += 1;
+                    eprintln!("[conv] empty STT result ({}/{})", consecutive_empty_stt, MAX_CONSECUTIVE_EMPTY_STT);
+                    if consecutive_empty_stt >= MAX_CONSECUTIVE_EMPTY_STT {
+                        eprintln!("[conv] {} consecutive empty results, ending conversation", consecutive_empty_stt);
+                        let _ = app.emit("conversation-ended", ());
+                        break;
+                    }
+                    // Go back to Listening with shorter idle deadline.
                     mode = Mode::Listening;
                     listening_idle_ms = 0;
                     current_idle_target_ms = silence_timeout_s * 1000;

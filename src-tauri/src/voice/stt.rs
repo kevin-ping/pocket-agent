@@ -144,7 +144,7 @@ fn transcribe_subprocess(wav_path: &str) -> Result<SttResult, String> {
     }
 }
 
-/// Main entry: try HTTP first, fallback to subprocess
+/// Main entry: try HTTP first, retry once on transient failure, then fallback to subprocess
 pub fn transcribe(wav_path: &str) -> Result<SttResult, String> {
     // Step 1: Try resident HTTP server (fast, model already loaded)
     match transcribe_http(wav_path) {
@@ -153,11 +153,23 @@ pub fn transcribe(wav_path: &str) -> Result<SttResult, String> {
             return Ok(result);
         }
         Err(e) => {
-            eprintln!("[stt] HTTP failed ({}), falling back to subprocess...", e);
+            eprintln!("[stt] HTTP failed ({}), retrying in 1s...", e);
         }
     }
 
-    // Step 2: Fallback to subprocess (cold start)
+    // Step 2: Retry once after short delay (server might be temporarily busy)
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    match transcribe_http(wav_path) {
+        Ok(result) => {
+            eprintln!("[stt] HTTP transcription succeeded (retry)");
+            return Ok(result);
+        }
+        Err(e) => {
+            eprintln!("[stt] HTTP retry also failed ({}), falling back to subprocess...", e);
+        }
+    }
+
+    // Step 3: Fallback to subprocess (cold start, no VAD — may hallucinate)
     transcribe_subprocess(wav_path)
 }
 

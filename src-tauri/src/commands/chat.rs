@@ -184,6 +184,20 @@ pub fn stop_audio_queue() {
         sink.stop();
     }
     let _ = audio_sender().lock().unwrap().send(AudioCmd::Stop);
+    schedule_wake_resume_after_grace();
+}
+
+/// FEAT-B4: schedule wake-listener resume after a short grace so the TTS tail
+/// fading through speakers→mic doesn't immediately re-trigger detection. If a
+/// new TTS chunk reserves a slot during the grace window, the resume is a
+/// no-op (queue depth > 0 short-circuits).
+fn schedule_wake_resume_after_grace() {
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        if AUDIO_QUEUE_DEPTH.load(Ordering::SeqCst) == 0 {
+            crate::voice::sherpa_wake::resume_wake();
+        }
+    });
 }
 
 /// Check if queue is full (read-only, for API layer).
@@ -197,6 +211,11 @@ fn audio_queue_reserve() -> bool {
         let current = AUDIO_QUEUE_DEPTH.load(Ordering::SeqCst);
         if current >= MAX_AUDIO_QUEUE { return false; }
         if AUDIO_QUEUE_DEPTH.compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            // FEAT-B4: first TTS chunk → suppress wake-word detection so the
+            // assistant's own audio fed through speakers→mic can't self-trigger.
+            if current == 0 {
+                crate::voice::sherpa_wake::pause_wake();
+            }
             return true;
         }
     }
@@ -216,6 +235,11 @@ fn audio_queue_release(generation: u64) {
             .compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
+            // FEAT-B4: last TTS chunk just finished → schedule wake resume
+            // after a 300 ms grace window so the speaker tail doesn't retrigger.
+            if current == 1 {
+                schedule_wake_resume_after_grace();
+            }
             return;
         }
     }

@@ -254,6 +254,22 @@ export interface ConversationLabels {
   voiceSetupNotReady: string;
   /** Setup failed message prefix */
   voiceSetupError: string;
+  // ── Phase B + C: wake word + wake-word sample verification (ENH-C5) ──
+  wakeWordLabel: string;
+  wakeWordHint: string;
+  wakeWordThreshold: string;
+  wakeWordModel: string;
+  speakerVerificationLabel: string;
+  speakerVerificationHint: string;
+  enrollSpeakerButton: string;
+  enrollRecordingCountdown: (secondsLeft: number) => string;
+  enrollPhraseHint: string;
+  enrollRenameAction: (name: string) => string;
+  enrollSuccess: (confidence: number) => string;
+  enrollFailedTooQuiet: (rmsDbfs?: number) => string;
+  speakerRejectedToast: string;
+  waitingForWakeCaption: string;
+  verifyingSpeakerCaption: string;
 }
 
 function fmtSeconds(ms: number): string {
@@ -275,6 +291,23 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     voiceSetupPhase: (p) => p === 'creating-venv' ? '创建虚拟环境' : p === 'upgrading-pip' ? '升级 pip' : p === 'installing-deps' ? '下载安装依赖' : p,
     voiceSetupNotReady: '语音环境准备中，请稍候…',
     voiceSetupError: '⚠ 语音环境安装失败',
+    wakeWordLabel: '唤醒词激活',
+    wakeWordHint: '说 "hey jarvis" 开启对话',
+    wakeWordThreshold: '唤醒灵敏度',
+    wakeWordModel: '唤醒模型',
+    speakerVerificationLabel: '唤醒词录制',
+    speakerVerificationHint: '录制唤醒词样本，仅匹配样本的声音才能唤醒',
+    enrollSpeakerButton: '录制唤醒词',
+    enrollRecordingCountdown: (s) => `请说话…（剩余 ${s}s）`,
+    enrollPhraseHint: '说你的唤醒词即可，例如："Hey Jarvis"',
+    enrollRenameAction: (n) => `当前样本：${n} · 改名`,
+    enrollSuccess: (c) => `唤醒词样本保存成功，相似度 ${(c * 100).toFixed(0)}%`,
+    enrollFailedTooQuiet: (d) => d !== undefined
+      ? `声音太轻（${d.toFixed(1)} dBFS，需 ≥ -45）— 请靠近麦克风或提高系统输入电平`
+      : '声音太轻，请靠近麦克风再试',
+    speakerRejectedToast: '唤醒词不匹配',
+    waitingForWakeCaption: '等待唤醒词…',
+    verifyingSpeakerCaption: '验证唤醒词中…',
   },
   en: {
     continuousMode: 'Continuous Conversation',
@@ -290,6 +323,23 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     voiceSetupPhase: (p) => p === 'creating-venv' ? 'creating virtualenv' : p === 'upgrading-pip' ? 'upgrading pip' : p === 'installing-deps' ? 'downloading dependencies' : p,
     voiceSetupNotReady: 'Voice setup in progress, please wait…',
     voiceSetupError: '⚠ Voice environment setup failed',
+    wakeWordLabel: 'Wake Word',
+    wakeWordHint: 'Say "hey jarvis" to start a conversation',
+    wakeWordThreshold: 'Wake Sensitivity',
+    wakeWordModel: 'Wake Model',
+    speakerVerificationLabel: 'Wake Word Sample',
+    speakerVerificationHint: 'Record a sample — only matching voice can trigger wake',
+    enrollSpeakerButton: 'Record Wake Word',
+    enrollRecordingCountdown: (s) => `Speak now… (${s}s left)`,
+    enrollPhraseHint: 'Say your wake word — e.g. "Hey Jarvis"',
+    enrollRenameAction: (n) => `Sample: ${n} · rename`,
+    enrollSuccess: (c) => `Sample saved — similarity ${(c * 100).toFixed(0)}%`,
+    enrollFailedTooQuiet: (d) => d !== undefined
+      ? `Too quiet (${d.toFixed(1)} dBFS, need ≥ -45) — move closer or raise system input level`
+      : 'Too quiet — move closer to the microphone and try again',
+    speakerRejectedToast: 'Wake word not matched',
+    waitingForWakeCaption: 'Waiting for wake word…',
+    verifyingSpeakerCaption: 'Verifying wake word…',
   },
   ja: {
     continuousMode: '連続会話モード',
@@ -305,6 +355,23 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     voiceSetupPhase: (p) => p === 'creating-venv' ? '仮想環境を作成中' : p === 'upgrading-pip' ? 'pip をアップグレード中' : p === 'installing-deps' ? '依存関係をダウンロード中' : p,
     voiceSetupNotReady: '音声環境を準備中です。お待ちください…',
     voiceSetupError: '⚠ 音声環境のセットアップに失敗',
+    wakeWordLabel: 'ウェイクワード',
+    wakeWordHint: '「ヘイ ジャービス」と話すと会話開始',
+    wakeWordThreshold: 'ウェイク感度',
+    wakeWordModel: 'ウェイクモデル',
+    speakerVerificationLabel: 'ウェイクワード録音',
+    speakerVerificationHint: 'サンプルを録音 — 一致する声のみウェイク可',
+    enrollSpeakerButton: 'ウェイクワードを録音',
+    enrollRecordingCountdown: (s) => `話してください…（残り ${s}s）`,
+    enrollPhraseHint: 'ウェイクワードを言ってください。例：「Hey Jarvis」',
+    enrollRenameAction: (n) => `サンプル：${n} · 名前変更`,
+    enrollSuccess: (c) => `サンプル保存完了 — 類似度 ${(c * 100).toFixed(0)}%`,
+    enrollFailedTooQuiet: (d) => d !== undefined
+      ? `音量が小さすぎます（${d.toFixed(1)} dBFS、≥ -45 が必要）— マイクに近づくか入力レベルを上げてください`
+      : '音量が小さすぎます。マイクに近づけて再試行してください',
+    speakerRejectedToast: 'ウェイクワード不一致',
+    waitingForWakeCaption: 'ウェイクワード待機中…',
+    verifyingSpeakerCaption: 'ウェイクワード照合中…',
   },
   ko: {
     continuousMode: '연속 대화 모드',
@@ -320,6 +387,23 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     voiceSetupPhase: (p) => p === 'creating-venv' ? '가상 환경 생성 중' : p === 'upgrading-pip' ? 'pip 업그레이드 중' : p === 'installing-deps' ? '의존성 다운로드 중' : p,
     voiceSetupNotReady: '음성 환경을 준비 중입니다. 잠시 기다려주세요…',
     voiceSetupError: '⚠ 음성 환경 설치 실패',
+    wakeWordLabel: '웨이크 워드',
+    wakeWordHint: '"헤이 자비스"라고 말해서 대화를 시작하세요',
+    wakeWordThreshold: '웨이크 감도',
+    wakeWordModel: '웨이크 모델',
+    speakerVerificationLabel: '화자 인증',
+    speakerVerificationHint: '등록된 음성만 웨이크할 수 있음',
+    enrollSpeakerButton: '음성 등록',
+    enrollRecordingCountdown: (s) => `말씀해 주세요…（남은 시간 ${s}s）`,
+    enrollPhraseHint: '한 문장만 말해 주세요. 예: "안녕하세요, 오늘 날씨가 좋네요"',
+    enrollRenameAction: (n) => `현재: ${n} · 이름 변경`,
+    enrollSuccess: (c) => `등록 완료 — 신뢰도 ${(c * 100).toFixed(0)}%`,
+    enrollFailedTooQuiet: (d) => d !== undefined
+      ? `소리가 너무 작습니다 (${d.toFixed(1)} dBFS, ≥ -45 필요) — 마이크에 가까이 가거나 입력 레벨을 높이세요`
+      : '소리가 너무 작습니다. 마이크에 더 가까이서 다시 시도하세요',
+    speakerRejectedToast: '인식되지 않은 화자',
+    waitingForWakeCaption: '웨이크 워드 대기 중…',
+    verifyingSpeakerCaption: '화자 인증 중…',
   },
   fr: {
     continuousMode: 'Conversation continue',
@@ -335,6 +419,23 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     voiceSetupPhase: (p) => p === 'creating-venv' ? 'création de l\'environnement virtuel' : p === 'upgrading-pip' ? 'mise à jour de pip' : p === 'installing-deps' ? 'téléchargement des dépendances' : p,
     voiceSetupNotReady: 'Préparation en cours, veuillez patienter…',
     voiceSetupError: '⚠ Échec de l\'installation de l\'environnement vocal',
+    wakeWordLabel: 'Mot de réveil',
+    wakeWordHint: 'Dites "hey jarvis" pour démarrer une conversation',
+    wakeWordThreshold: 'Sensibilité du réveil',
+    wakeWordModel: 'Modèle de réveil',
+    speakerVerificationLabel: 'Vérification du locuteur',
+    speakerVerificationHint: 'Seules les voix enregistrées peuvent réveiller',
+    enrollSpeakerButton: 'Enregistrer la voix',
+    enrollRecordingCountdown: (s) => `Parlez maintenant… (${s}s restantes)`,
+    enrollPhraseHint: 'Dites une phrase, par exemple : « Bonjour, il fait beau aujourd\u2019hui »',
+    enrollRenameAction: (n) => `Actuel : ${n} · renommer`,
+    enrollSuccess: (c) => `Enregistré — confiance ${(c * 100).toFixed(0)}%`,
+    enrollFailedTooQuiet: (d) => d !== undefined
+      ? `Trop faible (${d.toFixed(1)} dBFS, ≥ -45 requis) — rapprochez-vous du micro ou augmentez le niveau d\u2019entrée`
+      : 'Trop faible — rapprochez-vous du micro et réessayez',
+    speakerRejectedToast: 'Locuteur non reconnu',
+    waitingForWakeCaption: 'En attente du mot de réveil…',
+    verifyingSpeakerCaption: 'Vérification du locuteur…',
   },
   de: {
     continuousMode: 'Fortlaufendes Gespräch',
@@ -350,6 +451,23 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     voiceSetupPhase: (p) => p === 'creating-venv' ? 'erstelle virtuelle Umgebung' : p === 'upgrading-pip' ? 'aktualisiere pip' : p === 'installing-deps' ? 'lade Abhängigkeiten' : p,
     voiceSetupNotReady: 'Sprachumgebung wird vorbereitet, bitte warten…',
     voiceSetupError: '⚠ Einrichtung der Sprachumgebung fehlgeschlagen',
+    wakeWordLabel: 'Aktivierungswort',
+    wakeWordHint: 'Sage "hey jarvis", um ein Gespräch zu beginnen',
+    wakeWordThreshold: 'Aktivierungsempfindlichkeit',
+    wakeWordModel: 'Aktivierungsmodell',
+    speakerVerificationLabel: 'Sprecherverifizierung',
+    speakerVerificationHint: 'Nur registrierte Stimmen können aktivieren',
+    enrollSpeakerButton: 'Stimme registrieren',
+    enrollRecordingCountdown: (s) => `Sprich jetzt… (noch ${s}s)`,
+    enrollPhraseHint: 'Sag einen Satz, z. B.: „Hallo, das Wetter ist schön heute"',
+    enrollRenameAction: (n) => `Aktuell: ${n} · umbenennen`,
+    enrollSuccess: (c) => `Registriert — Konfidenz ${(c * 100).toFixed(0)}%`,
+    enrollFailedTooQuiet: (d) => d !== undefined
+      ? `Zu leise (${d.toFixed(1)} dBFS, ≥ -45 nötig) — näher ans Mikrofon oder Eingangspegel erhöhen`
+      : 'Zu leise — näher an das Mikrofon und erneut versuchen',
+    speakerRejectedToast: 'Sprecher nicht erkannt',
+    waitingForWakeCaption: 'Warte auf Aktivierungswort…',
+    verifyingSpeakerCaption: 'Verifiziere Sprecher…',
   },
   es: {
     continuousMode: 'Conversación continua',
@@ -365,6 +483,23 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     voiceSetupPhase: (p) => p === 'creating-venv' ? 'creando entorno virtual' : p === 'upgrading-pip' ? 'actualizando pip' : p === 'installing-deps' ? 'descargando dependencias' : p,
     voiceSetupNotReady: 'Entorno de voz en preparación, por favor espera…',
     voiceSetupError: '⚠ Error al configurar el entorno de voz',
+    wakeWordLabel: 'Palabra de activación',
+    wakeWordHint: 'Di "hey jarvis" para iniciar una conversación',
+    wakeWordThreshold: 'Sensibilidad de activación',
+    wakeWordModel: 'Modelo de activación',
+    speakerVerificationLabel: 'Verificación de hablante',
+    speakerVerificationHint: 'Solo voces registradas pueden activar',
+    enrollSpeakerButton: 'Registrar voz',
+    enrollRecordingCountdown: (s) => `Habla ahora… (${s}s restantes)`,
+    enrollPhraseHint: 'Di una frase, por ejemplo: «Hola, hoy hace buen tiempo»',
+    enrollRenameAction: (n) => `Actual: ${n} · renombrar`,
+    enrollSuccess: (c) => `Registrado — confianza ${(c * 100).toFixed(0)}%`,
+    enrollFailedTooQuiet: (d) => d !== undefined
+      ? `Demasiado bajo (${d.toFixed(1)} dBFS, se requiere ≥ -45) — acércate o sube el nivel de entrada`
+      : 'Demasiado bajo — acércate al micrófono y reintenta',
+    speakerRejectedToast: 'Hablante no reconocido',
+    waitingForWakeCaption: 'Esperando palabra de activación…',
+    verifyingSpeakerCaption: 'Verificando hablante…',
   },
 };
 

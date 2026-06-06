@@ -71,7 +71,7 @@
 
   // ─── Context menu ───
   let muted = false;
-  let islandMode: "idle" | "recording" | "thinking" = "idle";
+  let islandMode: "idle" | "recording" | "thinking" | "waiting_for_wake" | "verifying_speaker" = "idle";
   let spiritPhase = 0;
   let audioLevel = 0;
   let audioLevelTimer: ReturnType<typeof setInterval> | null = null;
@@ -208,6 +208,69 @@
   function cancelPendingStatusSpeech() {
     if (pendingStatusSpeech) { clearTimeout(pendingStatusSpeech); pendingStatusSpeech = null; }
   }
+
+  // ─── Wake-word state (FEAT-C4) ───
+  let wakeArmInFlight = false;
+
+  // stt-server starts on a background thread and is not ready at app mount
+  // (Whisper model load + token file write take ~1-3 s). The wake listener's
+  // first connect attempt loses this race and fails with either
+  // "ws auth token: ... No such file" or "ws connect: Connection refused".
+  // Retry on those transient errors so wake comes up automatically once the
+  // server is healthy, without forcing the user to toggle the switch.
+  async function armWakeListenerIfEnabled() {
+    const s = get(settingsStore);
+    if (!s.wake_word_enabled) return;
+    if (wakeArmInFlight) return;
+    wakeArmInFlight = true;
+    try {
+      const MAX_ATTEMPTS = 20;
+      for (let i = 0; i < MAX_ATTEMPTS; i++) {
+        try {
+          await invoke('start_wake_word_listening', { threshold: s.wake_word_threshold });
+          if (!conversationActive && islandMode === 'idle') {
+            islandMode = 'waiting_for_wake';
+          }
+          return;
+        } catch (e) {
+          const msg = String(e ?? '');
+          // Idempotent ignore: "already active" races on conversation-ended.
+          if (msg.includes('already active')) return;
+          // Transient: stt-server not ready yet, or capture still held by
+          // previous owner (async release). Backoff 500 ms and retry.
+          if (
+            msg.includes('ws connect') ||
+            msg.includes('ws auth token') ||
+            msg.includes('read server token failed') ||
+            msg.includes('capture busy') ||
+            msg.includes('mic capture:')
+          ) {
+            if (i === MAX_ATTEMPTS - 1) {
+              console.warn('[wake] arm gave up after retries:', msg);
+              return;
+            }
+            await new Promise((r) => setTimeout(r, 500));
+            continue;
+          }
+          // Non-transient failure: surface once and stop.
+          console.warn('[wake] arm failed', e);
+          return;
+        }
+      }
+    } finally {
+      wakeArmInFlight = false;
+    }
+  }
+
+  async function disarmWakeListener() {
+    try {
+      await invoke('stop_wake_word_listening');
+    } catch (e) {
+      console.warn('[wake] disarm failed', e);
+    }
+    if (islandMode === 'waiting_for_wake') islandMode = 'idle';
+  }
+
 
   // ─── Break / interrupt current turn ───
   let showBreakConfirm = false;
@@ -544,7 +607,12 @@
         spiritPhase = 1;
         characterState.toThinking();
         if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
-        invoke('stop_voice_recording').catch((e) => {
+        invoke('stop_voice_recording').then(() => {
+          // Re-arm wake listener after single-shot recording stops.
+          // The capture device is now free, and the rest (STT→LLM→TTS)
+          // doesn't use the mic.
+          armWakeListenerIfEnabled();
+        }).catch((e) => {
           console.warn('[stop_voice_recording]', e);
           islandMode = 'idle';
           spiritPhase = 0;
@@ -615,6 +683,18 @@
         islandMode = 'idle';
         spiritPhase = 0;
         characterState.toIdle();
+        armWakeListenerIfEnabled();
+      }),
+
+      // ─── Wake-word linkage (FEAT-C4) ───
+      // Rust emits fn-key-down directly on wake match, so all hotkey logic
+      // (single-shot / continuous / owner transitions) is reused automatically.
+      // This listener is kept for debug logging only.
+      listen<{ score: number }>('wake-word-detected', (e) => {
+        debugState('wake-word-detected', { score: e.payload.score });
+      }),
+      listen<{ error: string }>('wake-listener-error', (e) => {
+        console.warn('[wake] listener error:', e.payload.error);
       }),
       listen('conversation-barge-in', () => {
         debugState('conversation-barge-in');
@@ -732,6 +812,11 @@
     }
   }
 
+  // Track wake_word_enabled across settings changes so toggling the switch in
+  // SettingsPanel arms / disarms immediately, without requiring a PA restart.
+  let prevWakeEnabled = false;
+  let unsubSettings: (() => void) | null = null;
+
   onMount(async () => {
     await settingsStore.load();
     // Apply double-click mode setting to hotkey listener
@@ -742,12 +827,24 @@
     await restoreWindowPosition();
     await setupListeners();
     await setupWindowPositionSave();
+    prevWakeEnabled = s.wake_word_enabled;
+    unsubSettings = settingsStore.subscribe((cur) => {
+      if (cur.wake_word_enabled === prevWakeEnabled) return;
+      prevWakeEnabled = cur.wake_word_enabled;
+      if (cur.wake_word_enabled) {
+        armWakeListenerIfEnabled();
+      } else {
+        disarmWakeListener();
+      }
+    });
+    await armWakeListenerIfEnabled();
   });
 
   onDestroy(() => {
     unlisten.forEach((fn) => fn());
     if (audioLevelTimer) clearInterval(audioLevelTimer);
     clearBridgeFallbackTimer();
+    if (unsubSettings) unsubSettings();
     if (conversationActive) {
       invoke('stop_continuous_conversation').catch(() => {});
     }

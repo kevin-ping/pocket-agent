@@ -70,6 +70,7 @@
     if (visible && !panelWasVisible) {
       // Panel just opened: load from store
       local = { ...$settingsStore };
+      void refreshVariantCount();
       panelWasVisible = true;
     } else if (!visible && panelWasVisible) {
       // Panel just closed: reset flag
@@ -104,6 +105,181 @@
 
   let captureTimeout: ReturnType<typeof setTimeout> | null = null;
   let capturePollTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Speaker-print enrollment state
+  const ENROLL_DURATION_S = 3;
+  let enrolling = $state(false);
+  let enrollCountdown = $state(0);
+  let enrollMessage = $state<string | null>(null);
+  let enrollNameDialog = $state(false);
+  let enrollNameInput = $state('');
+  let enrollTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Training mode: repeated enroll rounds to collect whisper variants
+    let trainRound = $state(0);
+  let trainVariantCount = $state(0);
+
+  async function refreshVariantCount() {
+    const name = $settingsStore.last_enrolled_speaker;
+    if (!name) { trainVariantCount = 0; return; }
+    try {
+      trainVariantCount = await invoke<number>('get_wake_variant_count', { name });
+    } catch {
+      trainVariantCount = 0;
+    }
+  }
+
+  // Click handler for the main "录制唤醒词" button. If a previous speaker name
+  // has been saved, reuse it silently (single-user workflow — no dialog).
+  // Otherwise prompt for a name.
+  function onEnrollClick() {
+    enrollMessage = null;
+    const saved = $settingsStore.last_enrolled_speaker;
+    if (saved && /^[A-Za-z0-9_-]{1,32}$/.test(saved)) {
+      void runEnrollFlow(saved);
+    } else {
+      enrollNameInput = 'Me';
+      enrollNameDialog = true;
+    }
+  }
+
+  // Explicit rename entry — always shows the dialog, pre-filled with the
+  // current saved name so the user can edit it.
+  function openRenameDialog() {
+    enrollMessage = null;
+    enrollNameInput = $settingsStore.last_enrolled_speaker ?? '';
+    enrollNameDialog = true;
+  }
+
+  function cancelEnrollDialog() {
+    enrollNameDialog = false;
+  }
+
+  async function confirmEnrollName() {
+    const name = enrollNameInput.trim();
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) {
+      enrollMessage = '名字仅允许 字母/数字/_/-（1-32 位）';
+      return;
+    }
+    enrollNameDialog = false;
+    await runEnrollFlow(name);
+  }
+
+  async function runEnrollFlow(name: string) {
+    enrolling = true;
+    enrollMessage = null;
+    enrollCountdown = ENROLL_DURATION_S;
+    try {
+      await invoke('start_enroll_recording');
+    } catch (e) {
+      enrolling = false;
+      enrollMessage = `启动录音失败: ${String(e)}`;
+      return;
+    }
+    enrollTimer = setInterval(() => {
+      enrollCountdown -= 1;
+      if (enrollCountdown <= 0) {
+        if (enrollTimer) { clearInterval(enrollTimer); enrollTimer = null; }
+        void finishEnroll(name);
+      }
+    }, 1000);
+  }
+
+  async function finishEnroll(name: string) {
+    try {
+      const wavPath = await invoke<string>('stop_enroll_recording');
+      const result = await invoke<{ ok: boolean; speaker_id: string; embedding_dim: number; snr_db: number }>(
+        'enroll_speaker',
+        { name, audioPath: wavPath }
+      );
+      if (result.ok) {
+        await refreshVariantCount();
+        enrollMessage = convLabels($settingsStore.tts_primary_voice).enrollSuccess(trainVariantCount);
+        // Persist the speaker name so the next enrollment skips the name dialog.
+        if ($settingsStore.last_enrolled_speaker !== name) {
+          void settingsStore.save({ last_enrolled_speaker: name });
+        }
+        // Re-arm wake listener after enrollment (it was stopped for recording).
+        setTimeout(() => {
+          if ($settingsStore.wake_word_enabled) {
+            invoke('start_wake_word_listening', { threshold: $settingsStore.wake_word_threshold }).catch(() => {});
+          }
+        }, 1000);
+      } else {
+        enrollMessage = '注册失败';
+      }
+    } catch (e) {
+      const msg = String(e ?? '');
+      if (msg.includes('too_quiet')) {
+        const m = msg.match(/"rms_dbfs"\s*:\s*(-?\d+(?:\.\d+)?)/);
+        const dbfs = m ? parseFloat(m[1]) : undefined;
+        enrollMessage = convLabels($settingsStore.tts_primary_voice).enrollFailedTooQuiet(dbfs);
+      } else if (msg.includes('录音时间太短')) {
+        enrollMessage = '录音时间太短，请重试';
+      } else {
+        enrollMessage = `注册失败: ${msg}`;
+      }
+    } finally {
+      enrolling = false;
+    }
+  }
+
+  async function startTraining() {
+    const saved = $settingsStore.last_enrolled_speaker;
+    if (!saved || !/^[A-Za-z0-9_-]{1,32}$/.test(saved)) {
+      enrollMessage = '请先录制一次唤醒词';
+      return;
+    }
+    // Stop wake listener to free capture device
+    try { await invoke('stop_wake_word_listening'); } catch {}
+    trainRound++;
+    enrolling = true;
+    enrollMessage = null;
+    enrollCountdown = ENROLL_DURATION_S;
+    try {
+      await invoke('start_enroll_recording');
+    } catch (e) {
+      enrolling = false;
+      enrollMessage = `录音失败: ${String(e)}`;
+      return;
+    }
+    enrollTimer = setInterval(() => {
+      enrollCountdown -= 1;
+      if (enrollCountdown <= 0) {
+        if (enrollTimer) { clearInterval(enrollTimer); enrollTimer = null; }
+        void finishTrainRound(saved);
+      }
+    }, 1000);
+  }
+
+  async function finishTrainRound(name: string) {
+    try {
+      const wavPath = await invoke<string>('stop_enroll_recording');
+      const result = await invoke<{ ok: boolean; speaker_id: string }>(
+        'train_speaker',
+        { name, audioPath: wavPath }
+      );
+      if (result.ok) {
+        await refreshVariantCount();
+        enrollMessage = `训练完成！共 ${trainVariantCount} 个变体`;
+        if ($settingsStore.last_enrolled_speaker !== name) {
+          void settingsStore.save({ last_enrolled_speaker: name });
+        }
+      } else {
+        enrollMessage = `训练失败`;
+      }
+    } catch (e) {
+      enrollMessage = `训练出错: ${String(e)}`;
+    } finally {
+      enrolling = false;
+      // Re-arm wake listener
+      setTimeout(() => {
+        if ($settingsStore.wake_word_enabled) {
+          invoke('start_wake_word_listening', { threshold: $settingsStore.wake_word_threshold }).catch(() => {});
+        }
+      }, 1000);
+    }
+  }
 
   function cleanupCapture() {
     if (capturePollTimer) { clearInterval(capturePollTimer); capturePollTimer = null; }
@@ -269,6 +445,80 @@
           </label>
         </div>
       </div>
+
+      <!-- ── Wake word + wake-word sample verification ── -->
+      <div class="field-row">
+        <span class="field-label">{convLabels($settingsStore.tts_primary_voice).wakeWordLabel}</span>
+        <div class="toggle-wrap">
+          <input type="checkbox" id="wake-word-enabled" class="toggle-input" bind:checked={local.wake_word_enabled} />
+          <label for="wake-word-enabled" class="toggle-track">
+            <span class="toggle-thumb"></span>
+          </label>
+        </div>
+      </div>
+
+      {#if local.wake_word_enabled}
+        <div class="field-row">
+          <span class="field-label">
+            {convLabels($settingsStore.tts_primary_voice).wakeWordThreshold}
+            <span class="volume-pct">{local.wake_word_threshold.toFixed(2)}</span>
+          </span>
+          <input
+            class="field-slider"
+            type="range"
+            min="0.30"
+            max="0.90"
+            step="0.05"
+            bind:value={local.wake_word_threshold}
+            aria-label={convLabels($settingsStore.tts_primary_voice).wakeWordThreshold}
+          />
+        </div>
+
+        <div class="field-row">
+          <span class="field-label">{convLabels($settingsStore.tts_primary_voice).speakerVerificationLabel}</span>
+          <div class="toggle-wrap">
+            <input type="checkbox" id="speaker-verification-enabled" class="toggle-input" bind:checked={local.speaker_verification_enabled} />
+            <label for="speaker-verification-enabled" class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </label>
+          </div>
+        </div>
+
+        {#if local.speaker_verification_enabled}
+          <div class="field-row enroll-row">
+            <span class="field-label" style="min-width: 0; flex: 1;">
+              <span style="font-size: 11px; color: rgba(232, 232, 240, 0.45);">
+                {#if enrollMessage}
+                  {enrollMessage}
+                {:else if enrolling}
+                  {convLabels($settingsStore.tts_primary_voice).enrollPhraseHint}
+                {:else}
+                  {convLabels($settingsStore.tts_primary_voice).speakerVerificationHint}
+                {/if}
+              </span>
+              {#if !enrolling && $settingsStore.last_enrolled_speaker}
+                <button type="button" class="enroll-rename-link" onclick={openRenameDialog}>
+                  {convLabels($settingsStore.tts_primary_voice).enrollRenameAction($settingsStore.last_enrolled_speaker)}
+                </button>
+              {/if}
+            </span>
+            {#if enrolling}
+              <button class="capture-btn active" disabled>
+                {convLabels($settingsStore.tts_primary_voice).enrollRecordingCountdown(enrollCountdown)}
+              </button>
+            {:else}
+              <button class="capture-btn" onclick={onEnrollClick}>
+                {convLabels($settingsStore.tts_primary_voice).enrollSpeakerButton}
+              </button>
+              {#if $settingsStore.last_enrolled_speaker}
+                <button class="capture-btn" style="margin-left: 4px; background: rgba(52, 152, 219, 0.7);" onclick={startTraining}>
+                  训练 ({trainVariantCount})
+                </button>
+              {/if}
+            {/if}
+          </div>
+        {/if}
+      {/if}
 
       <div class="field-row">
         <span class="field-label">{convLabels($settingsStore.tts_primary_voice).continuousMode}</span>
@@ -443,6 +693,34 @@
       <button class="btn" onclick={cancel}>{t($settingsStore.tts_primary_voice).cancel}</button>
       <button class="btn primary" onclick={save}>{t($settingsStore.tts_primary_voice).save}</button>
     </div>
+
+    {#if enrollNameDialog}
+      <div class="enroll-modal-backdrop" role="dialog" aria-modal="true">
+        <div class="enroll-modal">
+          <p class="enroll-modal-title">请输入说话人名字</p>
+          <!-- svelte-ignore a11y_autofocus -->
+          <input
+            class="enroll-modal-input"
+            type="text"
+            bind:value={enrollNameInput}
+            placeholder="alice"
+            maxlength="32"
+            autofocus
+            onkeydown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); confirmEnrollName(); }
+              else if (e.key === 'Escape') { e.preventDefault(); cancelEnrollDialog(); }
+            }}
+          />
+          {#if enrollMessage}
+            <p class="enroll-modal-error">{enrollMessage}</p>
+          {/if}
+          <div class="enroll-modal-actions">
+            <button class="btn" onclick={cancelEnrollDialog}>取消</button>
+            <button class="btn primary" onclick={confirmEnrollName}>开始录制</button>
+          </div>
+        </div>
+      </div>
+    {/if}
   </div>
 {/if}
 <style>
@@ -850,5 +1128,66 @@
     flex: 1;
     text-align: left;
     padding-left: 4px;
+  }
+
+  /* ─── Speaker-enrollment name dialog ─── */
+  .enroll-modal-backdrop {
+    position: absolute; inset: 0; z-index: 110;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex; align-items: center; justify-content: center;
+    -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+  }
+  .enroll-modal {
+    min-width: 260px; max-width: 340px;
+    background: rgba(14, 14, 26, 0.98);
+    border: 1px solid rgba(160, 168, 255, 0.28);
+    border-radius: 12px;
+    padding: 14px 16px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
+  }
+  .enroll-rename-link {
+    display: inline-block;
+    margin-top: 2px;
+    padding: 0;
+    background: none;
+    border: none;
+    font-size: 10.5px;
+    color: rgba(160, 168, 255, 0.7);
+    cursor: pointer;
+    text-align: left;
+  }
+  .enroll-rename-link:hover {
+    color: rgba(180, 188, 255, 0.95);
+    text-decoration: underline;
+  }
+  .enroll-modal-title {
+    margin: 0 0 10px 0;
+    font-size: 12.5px;
+    color: rgba(232, 234, 255, 0.92);
+  }
+  .enroll-modal-input {
+    width: 100%;
+    padding: 7px 10px;
+    font-size: 13px;
+    border-radius: 6px;
+    border: 1px solid rgba(160, 168, 255, 0.32);
+    background: rgba(255, 255, 255, 0.06);
+    color: rgba(232, 234, 255, 0.95);
+    outline: none;
+    box-sizing: border-box;
+  }
+  .enroll-modal-input:focus {
+    border-color: rgba(160, 168, 255, 0.6);
+  }
+  .enroll-modal-error {
+    margin: 8px 0 0;
+    font-size: 11px;
+    color: rgba(255, 130, 130, 0.9);
+  }
+  .enroll-modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 12px;
   }
 </style>

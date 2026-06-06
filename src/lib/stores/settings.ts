@@ -22,6 +22,10 @@ export interface AppSettings {
   pause_tolerance_ms: number;
   speech_rms_threshold: number;
   skip_interrupt_confirmation: boolean;
+  wake_word_enabled: boolean;
+  wake_word_threshold: number;
+  speaker_verification_enabled: boolean;
+  last_enrolled_speaker: string;
 }
 
 const defaults: AppSettings = {
@@ -45,6 +49,10 @@ const defaults: AppSettings = {
   pause_tolerance_ms: 1500,
   speech_rms_threshold: 0.015,
   skip_interrupt_confirmation: true,
+  wake_word_enabled: false,
+  wake_word_threshold: 0.5,
+  speaker_verification_enabled: false,
+  last_enrolled_speaker: '',
 };
 
 function createSettingsStore() {

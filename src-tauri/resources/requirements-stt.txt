@@ -8,3 +8,16 @@ faster-whisper>=1.0.0
 silero-vad>=5.1
 onnxruntime>=1.17
 edge-tts>=6.1
+
+# HTTP server framework (Phase B+C rewrite of stt-server.py).
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+
+
+# Used in stt-server.py for 16 kHz resampling; declared explicitly so we don't
+# rely on silero-vad's transitive deps.
+scipy>=1.10
+
+# Chinese pinyin conversion for wake keyword matching.
+pypinyin>=0.51
