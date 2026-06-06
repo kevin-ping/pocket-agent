@@ -127,6 +127,7 @@ pub struct AppConfig {
     pub window_x: Option<f64>,
     pub window_y: Option<f64>,
     pub avatar_image: Option<String>,
+    pub avatar_gif: Option<String>,
     pub fixed_lang: String,
     pub hotkey_code: i64,
     pub hotkey_name: String,
@@ -174,6 +175,7 @@ impl Default for AppConfig {
             window_x: None,
             window_y: None,
             avatar_image: None,
+            avatar_gif: None,
             fixed_lang: String::new(),
             hotkey_code: 60,
             hotkey_name: "RightShift".to_string(),
@@ -208,6 +210,7 @@ pub fn load_config(app: &AppHandle) -> AppConfig {
         window_x: store.get("window_x").and_then(|v| v.as_f64()),
         window_y: store.get("window_y").and_then(|v| v.as_f64()),
         avatar_image: store.get("avatar_image").and_then(|v| v.as_str().map(String::from)),
+        avatar_gif: store.get("avatar_gif").and_then(|v| v.as_str().map(String::from)),
         fixed_lang: store.get("fixed_lang").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
         hotkey_code: store.get("hotkey_code").and_then(|v| v.as_i64()).unwrap_or(60),
         hotkey_name: store.get("hotkey_name").and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "RightShift".to_string()),
@@ -244,6 +247,8 @@ pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String
     if let Some(y) = config.window_y { store.set("window_y", serde_json::json!(y)); }
     if let Some(img) = &config.avatar_image { store.set("avatar_image", serde_json::json!(img)); }
     else { store.set("avatar_image", serde_json::json!(null)); }
+    if let Some(gif) = &config.avatar_gif { store.set("avatar_gif", serde_json::json!(gif)); }
+    else { store.set("avatar_gif", serde_json::json!(null)); }
     store.set("fixed_lang", serde_json::json!(config.fixed_lang));
     store.set("hotkey_code", serde_json::json!(config.hotkey_code));
     store.set("hotkey_name", serde_json::json!(config.hotkey_name));

@@ -97,7 +97,9 @@
 
   function removeAvatar() {
     local.avatar_image = null;
+    local.avatar_gif = null;
     if (fileInput) fileInput.value = '';
+    if (gifFileInput) gifFileInput.value = '';
   }
 
   let gifFileInput = $state<HTMLInputElement>(undefined!);
@@ -112,6 +114,9 @@
     const reader = new FileReader();
     reader.onload = () => {
       local.avatar_gif = reader.result as string;
+    };
+    reader.onerror = () => {
+      console.error('[avatar] GIF read failed');
     };
     reader.readAsDataURL(file);
   }
@@ -437,7 +442,7 @@
           style="display:none"
           onchange={handleAvatarGifFile}
         />
-        {#if local.avatar_image}
+        {#if local.avatar_image || local.avatar_gif}
           <div class="avatar-gif-section">
             <div class="section-label" style="margin-top:4px">动画头像 (thinking/speaking)</div>
             <div style="display:flex;align-items:center;gap:6px">
