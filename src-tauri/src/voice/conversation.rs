@@ -296,7 +296,10 @@ fn worker_loop(
 
     loop {
         match rx.recv_timeout(Duration::from_millis(TICK_MS)) {
-            Ok(Msg::Stop) => break,
+            Ok(Msg::Stop) => {
+                let _ = app.emit("conversation-ended", ());
+                break;
+            },
 
             Ok(Msg::AudioChunk(samples, sr)) => {
                 if samples.is_empty() {
@@ -478,6 +481,7 @@ fn worker_loop(
                         // Single-shot mode: emit result and exit immediately.
                         // Frontend handles STT → LLM pipeline.
                         eprintln!("[conv] single-shot: stt done, exiting");
+                        let _ = app.emit("conversation-ended", ());
                         break;
                     }
                     mode = Mode::Speaking;

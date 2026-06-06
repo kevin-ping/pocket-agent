@@ -449,6 +449,8 @@
         } else {
           characterState.transition('speaking', 'idle');
           spiritPhase = 0;
+          islandMode = 'idle';
+          armWakeListenerIfEnabled();
         }
         autoCloseBreakConfirm();
       }),
@@ -606,14 +608,16 @@
           // In continuous mode, hotkey is a toggle on key-down; key-up is a no-op.
           return;
         }
+        // Single-shot mode: stop conversation worker and reset state immediately.
+        // The conv worker may have already exited (single_shot break), but
+        // conversationActive must be cleared here so chat-audio-done won't
+        // call notify_conversation_tts_done on a dead worker.
+        conversationActive = false;
         islandMode = 'thinking';
         spiritPhase = 1;
         characterState.toThinking();
         if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
-        invoke('stop_voice_recording').then(() => {
-          // Re-arm wake listener after single-shot recording stops.
-          // The capture device is now free, and the rest (STT→LLM→TTS)
-          // doesn't use the mic.
+        invoke('stop_continuous_conversation').then(() => {
           armWakeListenerIfEnabled();
         }).catch((e) => {
           console.warn('[stop_voice_recording]', e);
@@ -683,6 +687,11 @@
         debugState('conversation-ended');
         conversationActive = false;
         chatStore.setVoiceStatus(null);
+        // In single-shot mode, the LLM pipeline is still running (thinking → TTS).
+        // Don't clobber islandMode — chat-audio-done will clean up and re-arm wake.
+        if (!get(settingsStore).continuous_conversation && islandMode === 'thinking') {
+          return;
+        }
         islandMode = 'idle';
         spiritPhase = 0;
         characterState.toIdle();

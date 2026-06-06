@@ -399,13 +399,14 @@ pub fn start_continuous_conversation(
     silence_timeout_secs: Option<u64>,
     pause_tolerance_ms: Option<u64>,
     speech_rms_threshold: Option<f32>,
+    single_shot: Option<bool>,
 ) -> Result<(), String> {
     crate::voice::conversation::start_conversation(
         app,
         silence_timeout_secs,
         pause_tolerance_ms,
         speech_rms_threshold,
-        Some(false),
+        single_shot,
     )
 }
 
