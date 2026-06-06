@@ -585,16 +585,19 @@
           firstStreamDelta = false;
           characterState.toListening();
           chatStore.clear();
-          invoke('start_voice_recording').catch(console.error);
-          // Start polling audio level for visual feedback
-          audioLevel = 0;
-          if (audioLevelTimer) clearInterval(audioLevelTimer);
-          audioLevelTimer = setInterval(async () => {
-            try {
-              const level = await invoke<number>('get_audio_level');
-              audioLevel = level;
-            } catch {}
-          }, 150);
+          conversationActive = true;
+          invoke('start_continuous_conversation', {
+            silenceTimeoutSecs: cfg.silence_timeout_secs,
+            pauseToleranceMs: cfg.pause_tolerance_ms,
+            speechRmsThreshold: cfg.speech_rms_threshold,
+            singleShot: true,
+          }).catch((e) => {
+            console.error('[single-shot] start failed', e);
+            conversationActive = false;
+            characterState.toIdle();
+            islandMode = 'idle';
+            chatStore.setError(`录音启动失败: ${e}`);
+          });
         });
       }),
       listen('fn-key-up', () => {

@@ -405,6 +405,7 @@ pub fn start_continuous_conversation(
         silence_timeout_secs,
         pause_tolerance_ms,
         speech_rms_threshold,
+        Some(false),
     )
 }
 

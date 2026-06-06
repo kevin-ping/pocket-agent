@@ -141,6 +141,7 @@ pub fn start_conversation(
     silence_timeout_s: Option<u64>,
     pause_tolerance_ms: Option<u64>,
     speech_rms_threshold: Option<f32>,
+    single_shot: Option<bool>,
 ) -> Result<(), String> {
     if ACTIVE
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -217,6 +218,7 @@ pub fn start_conversation(
                 timeout,
                 pause_tolerance,
                 speech_threshold,
+                single_shot.unwrap_or(false),
             );
             // Only clear shared state if our generation still owns the slot.
             // Otherwise, a newer start_conversation has already taken over.
@@ -254,6 +256,7 @@ fn worker_loop(
     silence_timeout_s: u64,
     pause_tolerance_ms: u64,
     speech_rms_threshold: f32,
+    single_shot: bool,
 ) {
     let device_channels = stream_handle.channels.max(1);
     let mut mode = Mode::Listening;
@@ -471,6 +474,12 @@ fn worker_loop(
                 if had_text {
                     // Real utterance → expect a TTS response next.
                     consecutive_empty_stt = 0;
+                    if single_shot {
+                        // Single-shot mode: emit result and exit immediately.
+                        // Frontend handles STT → LLM pipeline.
+                        eprintln!("[conv] single-shot: stt done, exiting");
+                        break;
+                    }
                     mode = Mode::Speaking;
                     speaking_since = Some(Instant::now());
                     tts_started_at = Some(Instant::now());
