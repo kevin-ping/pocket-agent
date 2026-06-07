@@ -1,8 +1,13 @@
-// sherpa_wake.rs — Native wake-word detection via VAD + speaker embedding
+// sherpa_wake.rs — Native wake-word detection via energy-VAD + speaker embedding
 //
 // Architecture:
-//   mic capture → buffer 1.5s → HTTP to Python STT server for VAD + speaker embedding
-//   → match → emit "wake-word-detected" with pre_verified=true (≡ pressing fn key)
+//   mic capture → energy-threshold VAD (Rust, no model needed)
+//   → speech detected → buffer up to 3s of audio
+//   → HTTP to Python STT server for speaker embedding + keyword matching
+//   → match → emit "fn-key-down" (≡ pressing fn key)
+//
+// The energy-VAD gate means silent periods produce zero HTTP requests,
+// unlike the old blind-buffer approach that sent every ~2s regardless.
 //
 // Public API:
 //   start_wake_listener(app, threshold)
@@ -35,6 +40,32 @@ const READ_TIMEOUT_MS: u64 = 50;
 
 // Cooldown after a detection (avoid re-trigger on same utterance)
 const DETECTION_COOLDOWN_MS: u64 = 1500;
+
+// ── Energy-VAD constants (mirrors conversation.rs) ─────────────────────────────────────
+
+/// RMS threshold for speech detection. ~ -36 dBFS, tuned for laptop built-in mic.
+const SPEECH_RMS_THRESHOLD: f32 = 0.015;
+/// Noise-floor multiplier for adaptive threshold.
+const NOISE_FLOOR_MARGIN: f32 = 1.6;
+/// Hard cap on effective threshold so noisy rooms don't deafen the mic.
+const EFFECTIVE_THRESHOLD_CAP: f32 = 0.03;
+/// Hysteresis release: once in a speech burst, RMS must drop below this to exit.
+const SPEECH_RELEASE_RMS_THRESHOLD: f32 = 0.003;
+/// Release-threshold noise-floor companion.
+const RELEASE_NOISE_FLOOR_MARGIN: f32 = 1.2;
+/// Minimum continuous speech before we start buffering (filters clicks/coughs).
+const MIN_SPEECH_BEFORE_BUFFER_MS: u64 = 200;
+/// Pre-buffer lookback: keeps recent audio so the start of speech is not lost.
+const LOOKBACK_MS: u64 = 500;
+
+/// How long to buffer after speech starts (max capture window).
+const MAX_BUFFER_S: f32 = 3.0;
+
+/// Minimum audio duration to send for wake check (too short = Whisper returns garbage).
+const MIN_SEND_S: f32 = 0.8;
+
+/// If speech stops, wait this long before sending what we have.
+const SPEECH_END_SILENCE_MS: u64 = 1500;
 
 // ── Paths ────────────────────────────────────────────────────────────────────
 
@@ -88,6 +119,59 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     } else {
         0.0
     }
+}
+
+// ── RMS helper (mirrors conversation.rs) ──────────────────────────────────────────────
+
+fn rms_i16(samples: &[i16]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f64 = samples
+        .iter()
+        .map(|&s| {
+            let f = s as f64 / i16::MAX as f64;
+            f * f
+        })
+        .sum();
+    (sum_sq / samples.len() as f64).sqrt() as f32
+}
+
+/// Downmix multi-channel samples to mono.
+fn downmix_to_mono(samples: &[i16], channels: u16) -> Vec<i16> {
+    if channels <= 1 {
+        return samples.to_vec();
+    }
+    let ch = channels as usize;
+    samples
+        .chunks_exact(ch)
+        .map(|c| {
+            let sum: i32 = c.iter().map(|&s| s as i32).sum();
+            (sum / ch as i32) as i16
+        })
+        .collect()
+}
+
+/// Resample mono samples to 16kHz via linear interpolation.
+fn resample_to_16k(mono: &[i16], source_sr: u32) -> Vec<i16> {
+    if source_sr == TARGET_SR || mono.is_empty() {
+        return mono.to_vec();
+    }
+    let ratio = source_sr as f64 / TARGET_SR as f64;
+    let out_len = ((mono.len() as f64) / ratio).floor() as usize;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let pos = (i as f64) * ratio;
+        let idx = pos.floor() as usize;
+        let frac = (pos - pos.floor()) as f32;
+        let v = if idx + 1 >= mono.len() {
+            mono[mono.len() - 1] as f32
+        } else {
+            mono[idx] as f32 * (1.0 - frac) + mono[idx + 1] as f32 * frac
+        };
+        out.push(v.round().clamp(-32768.0, 32767.0) as i16);
+    }
+    out
 }
 
 /// Load enrolled embedding from disk. Returns None if not found.
@@ -180,7 +264,7 @@ pub fn start_wake_listener(app: AppHandle, threshold: f32) -> Result<(), String>
     }
 
     let _ = app.emit("wake-listener-started", ());
-    eprintln!("[wake] VAD+embedding listener started");
+    eprintln!("[wake] energy-VAD + embedding listener started");
     Ok(())
 }
 
@@ -210,13 +294,13 @@ pub fn stop_wake_listener() {
 
 // ── Worker loop ──────────────────────────────────────────────────────────────
 //
-// Flow:
-//   mic → resample 16kHz f32 → feed VAD chunk-by-chunk
-//   VAD detects speech segment → buffer speech samples
-//   On speech-end (VAD goes silent) → extract embedding → cosine sim → trigger?
+// Flow (event-driven, mirrors conversation.rs):
+//   mic → downmix mono → compute RMS
+//   → speech detected? start buffering
+//   → buffer reaches 3s OR speech ends (silence after speech) → send HTTP
+//   → Python does speaker embedding + keyword matching → trigger?
 //
-/// HTTP-based wake worker: buffers ~1.5s of mic audio, sends to Python
-/// server for VAD + speaker matching. Avoids native sherpa-onnx C API entirely.
+/// HTTP-based wake worker: energy-VAD gate, only sends HTTP when speech is present.
 fn wake_http_worker_loop(
     app: &AppHandle,
     rx: &mpsc::Receiver<Vec<i16>>,
@@ -244,66 +328,175 @@ fn wake_http_worker_loop(
         }
     }
 
-    // Buffer ~3s of 16kHz mono audio for each HTTP check (must match enrollment duration)
-    let buf_target_samples: usize = (TARGET_SR as usize) * 3; // 48000 samples = 3s
-    let mut audio_buf: Vec<i16> = Vec::with_capacity(buf_target_samples * 2);
+    // Buffer state
+    let max_buffer_samples: usize = (TARGET_SR as usize) * (MAX_BUFFER_S as usize);
+    let mut audio_buf: Vec<i16> = Vec::with_capacity(max_buffer_samples * 2);
     let mut last_detection_time: std::time::Instant = std::time::Instant::now()
         .checked_sub(Duration::from_millis(DETECTION_COOLDOWN_MS))
         .unwrap_or(std::time::Instant::now());
+
+    // Energy-VAD state (mirrors conversation.rs)
+    let mut noise_floor: f32 = 0.0;
+    let mut in_speech_burst: bool = false;
+    let mut is_buffering: bool = false;
+    let mut speech_run_ms: u64 = 0;
+    let mut silence_run_ms: u64 = 0;
+
+    // Pre-buffer (ring): always stores the last ~500ms of resampled 16kHz audio.
+    // When speech is confirmed, its contents are prepended to audio_buf
+    // so the start of the utterance ("一" in "一二三四") is not lost.
+    let lookback_samples = (TARGET_SR as usize * LOOKBACK_MS as usize) / 1000;
+    let mut pre_buf: std::collections::VecDeque<i16> = std::collections::VecDeque::with_capacity(lookback_samples);
 
     while !stop_flag.load(Ordering::Acquire) {
         if WAKE_PAUSED.load(Ordering::Acquire) {
             let _ = rx.recv_timeout(Duration::from_millis(READ_TIMEOUT_MS));
             audio_buf.clear();
+                    pre_buf.clear();
+            is_buffering = false;
+            in_speech_burst = false;
+            speech_run_ms = 0;
+            silence_run_ms = 0;
             continue;
         }
 
         match rx.recv_timeout(Duration::from_millis(READ_TIMEOUT_MS)) {
             Ok(raw_samples) => {
-                audio_buf.extend_from_slice(&raw_samples);
+                let mono = downmix_to_mono(&raw_samples, device_ch);
+                let chunk_ms = (mono.len() as u64 * 1000) / device_sr.max(1) as u64;
+                let rms = rms_i16(&mono);
 
-                if audio_buf.len() >= buf_target_samples * (device_ch.max(1) as usize) {
-                    // Sliding window: send last 3s, keep 1s overlap for next check
-                    let keep_samples = (TARGET_SR as usize) * 1 * (device_ch.max(1) as usize);
-                    let drain_end = audio_buf.len().saturating_sub(keep_samples);
-                    let samples_to_send: Vec<i16> = audio_buf.drain(..drain_end).collect();
-                    match wake_http_check(&samples_to_send, device_sr, device_ch, threshold) {
-                        Ok(result) => {
-                            if result.score > 0.0 { eprintln!("[wake] check: match={} score={:.3}", result.speaker_match, result.score); }
-                            if result.speaker_match && result.keyword_match {
-                                let now = std::time::Instant::now();
-                                if now.duration_since(last_detection_time)
-                                    >= Duration::from_millis(DETECTION_COOLDOWN_MS)
-                                {
-                                    last_detection_time = now;
-                                    eprintln!("[wake] HTTP MATCH! score={:.3} keyword={}", result.score, result.keyword_match);
-                                    // Wake = fn-key-down: reuse all hotkey logic
-                                    let _ = app.emit("fn-key-down", ());
-                                    eprintln!("[wake] emitted fn-key-down, worker will continue until stop_wake_listener is called");
-                                }
-                            }
+                // Adaptive threshold (mirrors conversation.rs)
+                let effective_threshold = SPEECH_RMS_THRESHOLD
+                    .max(noise_floor * NOISE_FLOOR_MARGIN)
+                    .min(EFFECTIVE_THRESHOLD_CAP);
+                let effective_release = SPEECH_RELEASE_RMS_THRESHOLD
+                    .max(noise_floor * RELEASE_NOISE_FLOOR_MARGIN);
+
+                // Hysteresis
+                if rms > effective_threshold {
+                    in_speech_burst = true;
+                } else if rms < effective_release {
+                    in_speech_burst = false;
+                }
+
+                if in_speech_burst {
+                    speech_run_ms = speech_run_ms.saturating_add(chunk_ms);
+                    silence_run_ms = 0;
+
+                    // Only start buffering after MIN_SPEECH_BEFORE_BUFFER_MS
+                    if speech_run_ms >= MIN_SPEECH_BEFORE_BUFFER_MS && !is_buffering {
+                        is_buffering = true;
+                        // Flush lookback buffer: prepend recent audio so speech onset is captured.
+                        if !pre_buf.is_empty() {
+                            audio_buf.extend(pre_buf.iter().copied());
                         }
-                        Err(e) => {
-                            eprintln!("[wake] HTTP check failed: {}", e);
+                        eprintln!(
+                            "[wake] speech detected: rms={:.4} thresh={:.4} floor={:.4}",
+                            rms, effective_threshold, noise_floor
+                        );
+                    }
+
+                } else {
+                    if is_buffering {
+                        silence_run_ms = silence_run_ms.saturating_add(chunk_ms);
+                    } else {
+                        // Update noise floor from quiet chunks
+                        if rms < SPEECH_RMS_THRESHOLD * 0.4 {
+                            noise_floor = 0.95 * noise_floor + 0.05 * rms;
                         }
                     }
+                    speech_run_ms = 0;
+                }
+
+                // Always feed pre_buf (ring buffer) so we have lookback audio.
+                {
+                    let resampled = resample_to_16k(&mono, device_sr);
+                    for &s in &resampled {
+                        if pre_buf.len() >= lookback_samples {
+                            pre_buf.pop_front();
+                        }
+                        pre_buf.push_back(s);
+                    }
+                    // Once buffering is active, also append to audio_buf.
+                    if is_buffering {
+                        audio_buf.extend_from_slice(&resampled);
+                    }
+                }
+                // Send if buffer full (3s) OR speech ended (silence after buffering)
+                let buffer_full = audio_buf.len() >= max_buffer_samples;
+                let speech_ended = is_buffering
+                    && !in_speech_burst
+                    && silence_run_ms >= SPEECH_END_SILENCE_MS;
+
+                let min_send_samples = (TARGET_SR as f32 * MIN_SEND_S) as usize;
+                let enough_audio = audio_buf.len() >= min_send_samples;
+                if (buffer_full || speech_ended) && enough_audio {
+                    if !audio_buf.is_empty() {
+                        let samples_to_send: Vec<i16> = audio_buf.drain(..).collect();
+                        eprintln!(
+                            "[wake] sending {} samples ({:.1}s) buffer_full={} speech_ended={}",
+                            samples_to_send.len(),
+                            samples_to_send.len() as f32 / TARGET_SR as f32,
+                            buffer_full,
+                            speech_ended,
+                        );
+                        match wake_http_check(&samples_to_send, TARGET_SR, 1, threshold) {
+                            Ok(result) => {
+                                if true {
+                                    eprintln!("[wake] check: speaker={} keyword={} score={:.3} text=\"{}\"", result.speaker_match, result.keyword_match, result.score, result.keyword_text);
+                                }
+                                if result.speaker_match && result.keyword_match {
+                                    let now = std::time::Instant::now();
+                                    if now.duration_since(last_detection_time)
+                                        >= Duration::from_millis(DETECTION_COOLDOWN_MS)
+                                    {
+                                        last_detection_time = now;
+                                        eprintln!("[wake] MATCH! score={:.3} keyword={}", result.score, result.keyword_match);
+                                        let _ = app.emit("fn-key-down", ());
+                                        eprintln!("[wake] emitted fn-key-down");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[wake] HTTP check failed: {}", e);
+                            }
+                        }
+                    }
+                    is_buffering = false;
+                    silence_run_ms = 0;
+                    audio_buf.clear();
+                    pre_buf.clear();
+                } else if speech_ended {
+                    eprintln!("[wake] discarding short buffer: {} samples ({:.1}s) < {:.1}s min",
+                        audio_buf.len(), audio_buf.len() as f32 / TARGET_SR as f32, MIN_SEND_S);
+                    is_buffering = false;
+                    silence_run_ms = 0;
+                    audio_buf.clear();
+                    pre_buf.clear();
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                // On timeout, if we have significant buffered audio, flush it
-                if !audio_buf.is_empty() {
+                // If buffering and mic goes silent, flush what we have
+                if is_buffering && !audio_buf.is_empty() {
                     let samples_to_send: Vec<i16> = audio_buf.drain(..).collect();
-                    match wake_http_check(&samples_to_send, device_sr, device_ch, threshold) {
+                    eprintln!(
+                        "[wake] timeout flush: {} samples ({:.1}s)",
+                        samples_to_send.len(),
+                        samples_to_send.len() as f32 / TARGET_SR as f32,
+                    );
+                    match wake_http_check(&samples_to_send, TARGET_SR, 1, threshold) {
                         Ok(result) => {
-                            if result.score > 0.0 { eprintln!("[wake] flush check: speaker={} keyword={} score={:.3}", result.speaker_match, result.keyword_match, result.score); }
+                            if true {
+                                eprintln!("[wake] flush: speaker={} keyword={} score={:.3} text=\"{}\"", result.speaker_match, result.keyword_match, result.score, result.keyword_text);
+                            }
                             if result.speaker_match && result.keyword_match {
                                 let now = std::time::Instant::now();
                                 if now.duration_since(last_detection_time)
                                     >= Duration::from_millis(DETECTION_COOLDOWN_MS)
                                 {
                                     last_detection_time = now;
-                                    eprintln!("[wake] HTTP MATCH (flush)! score={:.3}", result.score);
-                                    // Wake = fn-key-down: reuse all hotkey logic
+                                    eprintln!("[wake] MATCH (flush)! score={:.3}", result.score);
                                     let _ = app.emit("fn-key-down", ());
                                 }
                             }
@@ -313,6 +506,9 @@ fn wake_http_worker_loop(
                         }
                     }
                 }
+                is_buffering = false;
+                silence_run_ms = 0;
+                speech_run_ms = 0;
             }
             Err(RecvTimeoutError::Disconnected) => {
                 return Err("mic channel disconnected".into());
@@ -327,6 +523,7 @@ struct WakeCheckResult {
     speaker_match: bool,
     keyword_match: bool,
     score: f32,
+    keyword_text: String,
 }
 
 /// Send audio buffer to Python /wake/check endpoint.
@@ -402,6 +599,7 @@ fn wake_http_check(
         speaker_match: v["speaker_match"].as_bool().unwrap_or(false),
         keyword_match: v["keyword_match"].as_bool().unwrap_or(false),
         score: v["score"].as_f64().unwrap_or(0.0) as f32,
+        keyword_text: v["keyword_text"].as_str().unwrap_or("").to_string(),
     })
 }
 

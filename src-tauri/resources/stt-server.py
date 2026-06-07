@@ -69,6 +69,10 @@ except ImportError:
 # --- Constants ----------------------------------------------------------------
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # SEC-003
+
+# Fixed-path temp file for high-frequency wake/check endpoint.
+# Safe because wake/check is serial (~2s interval), no concurrent callers.
+WAKE_CHECK_TMP = os.path.join(tempfile.gettempdir(), "pocket-agent-wake-check.wav")
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")  # SEC-001
 
 POCKET_AGENT_HOME = Path.home() / ".pocket-agent"
@@ -754,13 +758,12 @@ async def wake_check(request: Request, file: UploadFile = File(...)):
     Output: {"speech_detected": bool, "speaker_match": bool, "score": float, "speaker": str|null}
     """
     blob = await file.read()
-    _wav_magic_or_415(blob)
 
-    tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        # Fixed-path overwrite: serial endpoint, no concurrent risk.
+        with open(WAKE_CHECK_TMP, "wb") as f:
             f.write(blob)
-            tmp_path = f.name
+        tmp_path = WAKE_CHECK_TMP
 
         # VAD check — use stricter threshold (0.7) for wake to reject birds/noise.
         # Regular /vad endpoint keeps default (0.5) for transcription accuracy.
@@ -779,7 +782,8 @@ async def wake_check(request: Request, file: UploadFile = File(...)):
 
         # Compute total speech duration
         total_speech = sum(s["end"] - s["start"] for s in segments)
-        if total_speech < 0.3:
+        print(f"[stt-server] wake/check: speech={total_speech:.1f}s segments={len(segments)}", file=sys.stderr, flush=True)
+        if total_speech < 0.2:
             return {"speech_detected": True, "speaker_match": False, "score": 0.0, "speaker": None}
 
         # Load voiceprints
@@ -817,17 +821,23 @@ async def wake_check(request: Request, file: UploadFile = File(...)):
         threshold = float(request.query_params.get("threshold", "0.65"))
         matched = best_score >= threshold and best_name is not None
 
-        # Wake-phrase keyword matching via Whisper transcription (only when speaker matches).
-        # Transcribe the probe audio and compare against enrolled wake keyword text.
+        # Always transcribe for debugging (shows what was heard regardless of speaker match).
         keyword_match = False
         wake_text_matched = ""
+        probe_text = ""
+        try:
+            probe_text = _transcribe_for_wake(tmp_path)
+            print("[stt-server] wake/check transcription:", repr(probe_text), f"speaker_score={best_score:.3f} matched={matched}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[stt-server] wake transcription error: {e}", file=sys.stderr, flush=True)
+
+        # Wake-phrase keyword matching (only when speaker matches).
         if matched and best_name:
             wake_txt_path = _wake_text_path(best_name)
             if wake_txt_path.exists():
                 try:
                     variants = _load_wake_variants(best_name)
                     if variants:
-                        probe_text = _transcribe_for_wake(tmp_path)
                         keyword_match = _keyword_match(probe_text, variants)
                         wake_text_matched = probe_text
                         print(f"[stt-server] wake keyword: variants={len(variants)} probe=\"{probe_text}\" match={keyword_match}",
@@ -854,11 +864,7 @@ async def wake_check(request: Request, file: UploadFile = File(...)):
         print(f"[stt-server] wake check error: {e}", file=sys.stderr, flush=True)
         return {"speech_detected": False, "speaker_match": False, "score": 0.0, "speaker": None}
     finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+        pass  # Fixed-path file reused on next call — no cleanup needed.
 
 
 # --- Entrypoint ---------------------------------------------------------------
