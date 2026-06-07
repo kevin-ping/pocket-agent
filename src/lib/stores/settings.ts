@@ -14,6 +14,7 @@ export interface AppSettings {
   avatar_image: string | null;
   avatar_gif: string | null;
   fixed_lang: string;
+  ui_lang: string;
   hotkey_code: number;
   hotkey_name: string;
   tts_enabled: boolean;
@@ -42,6 +43,7 @@ const defaults: AppSettings = {
   avatar_image: null,
   avatar_gif: null,
   fixed_lang: "",
+  ui_lang: "en",
   hotkey_code: 60,
   hotkey_name: "RightShift",
   tts_enabled: true,

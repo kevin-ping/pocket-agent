@@ -2,9 +2,9 @@
   import { chatStore } from '../stores/chat';
   import { characterState } from '../stores/character';
   import { settingsStore } from '../stores/settings';
-  import { convLabels } from '../i18n';
+  import { convLabelsLang } from '../i18n';
 
-  let labels = $derived(convLabels($settingsStore.tts_primary_voice));
+  let labels = $derived(convLabelsLang($settingsStore.ui_lang));
 
   let showSetup = $derived(
     $chatStore.voiceSetupState === 'installing' ||

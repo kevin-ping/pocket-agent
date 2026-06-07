@@ -44,6 +44,16 @@ interface Strings {
   breakConfirmTitle: string;
   breakConfirmBreak: string;
   breakConfirmContinue: string;
+  language: string;
+  uiLang: string;
+  uiLangAuto: string;
+  hotkey: string;
+  recordKey: string;
+  capturingKey: string;
+  applyingKey: string;
+  doubleClickRecord: string;
+  voiceOutput: string;
+  animAvatar: string;
 }
 
 const translations: Record<string, Strings> = {
@@ -89,6 +99,16 @@ const translations: Record<string, Strings> = {
     breakConfirmTitle: '当前对话还在进行中，是否打断？',
     breakConfirmBreak: '打断',
     breakConfirmContinue: '继续等待',
+    language: '语言',
+    uiLang: '界面语言',
+    uiLangAuto: '自动（跟随语音）',
+    hotkey: '快捷键',
+    recordKey: '录音键',
+    capturingKey: '按下快捷键…',
+    applyingKey: '按键更换中…',
+    doubleClickRecord: '双击录音',
+    voiceOutput: '语音输出',
+    animAvatar: '动画头像（思考/说话）',
   },
   en: {
     hint: 'Press {key} to talk, press again to stop, or type below',
@@ -132,6 +152,16 @@ const translations: Record<string, Strings> = {
     breakConfirmTitle: 'A conversation is still in progress. Interrupt it?',
     breakConfirmBreak: 'Interrupt',
     breakConfirmContinue: 'Keep waiting',
+    language: 'Language',
+    uiLang: 'UI Language',
+    uiLangAuto: 'Auto (from voice)',
+    hotkey: 'Hotkey',
+    recordKey: 'Record Key',
+    capturingKey: 'Press a key…',
+    applyingKey: 'Applying…',
+    doubleClickRecord: 'Double-Click Record',
+    voiceOutput: 'Voice Output',
+    animAvatar: 'Animated Avatar (thinking/speaking)',
   },
   ja: {
     hint: '{key}キーで話す、もう一度で終了、または下に入力',
@@ -175,6 +205,16 @@ const translations: Record<string, Strings> = {
     breakConfirmTitle: '会話がまだ進行中です。中断しますか？',
     breakConfirmBreak: '中断',
     breakConfirmContinue: '待つ',
+    language: '言語',
+    uiLang: 'UI言語',
+    uiLangAuto: '自動（音声から）',
+    hotkey: 'ホットキー',
+    recordKey: '録音キー',
+    capturingKey: 'キーを押して…',
+    applyingKey: '適用中…',
+    doubleClickRecord: 'ダブルクリック録音',
+    voiceOutput: '音声出力',
+    animAvatar: 'アニメーションアバター（思考/発話）',
   },
   ko: {
     hint: '{key} 키를 눌러 말하기, 다시 눌러 끝내기, 또는 아래에 입력',
@@ -218,6 +258,16 @@ const translations: Record<string, Strings> = {
     breakConfirmTitle: '대화가 아직 진행 중입니다. 중단하시겠습니까?',
     breakConfirmBreak: '중단',
     breakConfirmContinue: '계속 기다리기',
+    language: '언어',
+    uiLang: 'UI 언어',
+    uiLangAuto: '자동 (음성에서)',
+    hotkey: '단축키',
+    recordKey: '녹음 키',
+    capturingKey: '키를 누르세요…',
+    applyingKey: '적용 중…',
+    doubleClickRecord: '더블클릭 녹음',
+    voiceOutput: '음성 출력',
+    animAvatar: '애니메이션 아바타 (생각/말하기)',
   },
 };
 
@@ -233,6 +283,24 @@ export function langFromVoice(voice: string): LangKey {
 export function t(voice: string): Strings {
   const lang = langFromVoice(voice);
   return TRANSLATIONS[lang] ?? TRANSLATIONS.zh;
+}
+
+/** Resolve effective UI lang: explicit ui_lang overrides voice-derived lang. */
+export function resolveLang(uiLang: string, voice: string): LangKey {
+  if (uiLang && uiLang in TRANSLATIONS) return uiLang as LangKey;
+  return langFromVoice(voice);
+}
+
+/** Translate by explicit lang key (used with settings.ui_lang). */
+export function tLang(lang: string): Strings {
+  const lk = (lang && lang in TRANSLATIONS) ? lang as LangKey : 'en';
+  return TRANSLATIONS[lk] ?? TRANSLATIONS.zh;
+}
+
+/** Conversation labels by explicit lang key. */
+export function convLabelsLang(lang: string): ConversationLabels {
+  const lk = (lang && lang in CONVERSATION_LABELS) ? lang as LangKey : 'zh';
+  return CONVERSATION_LABELS[lk] ?? CONVERSATION_LABELS.zh;
 }
 
 // ── Continuous-conversation UI labels (per LangKey; covers all 7 supported) ──

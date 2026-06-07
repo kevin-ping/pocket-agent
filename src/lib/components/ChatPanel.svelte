@@ -2,7 +2,7 @@
   import { fly } from 'svelte/transition';
   import { chatStore } from '../stores/chat';
   import { settingsStore } from '../stores/settings';
-  import { t } from '../i18n';
+  import { tLang } from '../i18n';
   import { characterState } from '../stores/character';
 
   let { side = 'right', onSend, onCollapse }: { side?: 'left' | 'right'; onSend: (text: string) => void; onCollapse: () => void } = $props();
@@ -59,7 +59,7 @@
   // During thinking/tool phase, show intermediate steps instead of empty box
   let displayContent = $derived($chatStore.isStreaming && !$chatStore.streamingContent
     ? ''
-    : ($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? t($settingsStore.tts_primary_voice).hint.replace("{key}", $settingsStore.hotkey_name)));
+    : ($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? tLang($settingsStore.ui_lang).hint.replace("{key}", $settingsStore.hotkey_name)));
 
   // Auto-scroll to bottom when streaming
   $effect(() => {
@@ -128,7 +128,7 @@
         </p>
       {:else}
         <p class="message-text" class:error-text={isError}>
-          {@html sanitizeHtml($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? t($settingsStore.tts_primary_voice).hint.replace("{key}", $settingsStore.hotkey_name))}
+          {@html sanitizeHtml($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? tLang($settingsStore.ui_lang).hint.replace("{key}", $settingsStore.hotkey_name))}
         </p>
       {/if}
     </div>
@@ -138,7 +138,7 @@
   <div class="input-area">
     <input
       type="text"
-      placeholder={isBusy ? t($settingsStore.tts_primary_voice).inputBusy : t($settingsStore.tts_primary_voice).inputPlaceholder}
+      placeholder={isBusy ? tLang($settingsStore.ui_lang).inputBusy : tLang($settingsStore.ui_lang).inputPlaceholder}
       bind:value={inputText}
       onkeydown={handleKeydown}
       maxlength={500}

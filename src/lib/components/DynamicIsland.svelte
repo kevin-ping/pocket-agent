@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { settingsStore } from '../stores/settings';
-  import { convLabels } from '../i18n';
+  import { convLabelsLang } from '../i18n';
 
   export let mode: 'idle' | 'recording' | 'thinking' | 'waiting_for_wake' | 'verifying_speaker' = 'idle';
   export let audioLevel: number = 0;
@@ -9,9 +9,9 @@
   const dispatch = createEventDispatcher<{ click: void }>();
 
   $: tooltip = mode === 'waiting_for_wake'
-    ? convLabels($settingsStore.tts_primary_voice).waitingForWakeCaption
+    ? convLabelsLang($settingsStore.ui_lang).waitingForWakeCaption
     : mode === 'verifying_speaker'
-      ? convLabels($settingsStore.tts_primary_voice).verifyingSpeakerCaption
+      ? convLabelsLang($settingsStore.ui_lang).verifyingSpeakerCaption
       : '';
 </script>
 

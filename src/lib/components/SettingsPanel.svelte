@@ -2,7 +2,7 @@
   import { fly } from 'svelte/transition';
   import { tick } from 'svelte';
   import { settingsStore, type AppSettings } from '../stores/settings';
-  import { t, convLabels } from '../i18n';
+  import { tLang, convLabelsLang } from '../i18n';
   import { invoke } from '@tauri-apps/api/core';
 
   const VOICE_OPTIONS = [
@@ -52,6 +52,15 @@
       { id: 'es-ES-AlvaroNeural', label: 'Alvaro（男）' },
     ]},
   ];
+
+
+  const LANGUAGE_IDS = ['en', 'zh', 'ja', 'ko', 'fr', 'de', 'es'];
+  const LANGUAGE_FLAGS: Record<string, string> = {
+    zh: '🇨🇳', en: '🇺🇸', ja: '🇯🇵', ko: '🇰🇷', fr: '🇫🇷', de: '🇩🇪', es: '🇪🇸',
+  };
+  const LANGUAGE_NATIVE: Record<string, string> = {
+    zh: '中文', en: 'English', ja: '日本語', ko: '한국어', fr: 'Français', de: 'Deutsch', es: 'Español',
+  };
 
   // Runes mode props
   let { visible = $bindable(false), onclose }: {
@@ -220,7 +229,7 @@
       );
       if (result.ok) {
         await refreshVariantCount();
-        enrollMessage = convLabels($settingsStore.tts_primary_voice).enrollSuccess(trainVariantCount);
+        enrollMessage = convLabelsLang($settingsStore.ui_lang).enrollSuccess(trainVariantCount);
         // Persist the speaker name so the next enrollment skips the name dialog.
         if ($settingsStore.last_enrolled_speaker !== name) {
           void settingsStore.save({ last_enrolled_speaker: name });
@@ -239,7 +248,7 @@
       if (msg.includes('too_quiet')) {
         const m = msg.match(/"rms_dbfs"\s*:\s*(-?\d+(?:\.\d+)?)/);
         const dbfs = m ? parseFloat(m[1]) : undefined;
-        enrollMessage = convLabels($settingsStore.tts_primary_voice).enrollFailedTooQuiet(dbfs);
+        enrollMessage = convLabelsLang($settingsStore.ui_lang).enrollFailedTooQuiet(dbfs);
       } else if (msg.includes('录音时间太短')) {
         enrollMessage = '录音时间太短，请重试';
       } else {
@@ -391,24 +400,24 @@
     in:fly={{ y: 18, duration: 200, opacity: 0 }}
     out:fly={{ y: 12, duration: 140, opacity: 0 }}
     role="dialog"
-    aria-label={t($settingsStore.tts_primary_voice).ariaSettings}
+    aria-label={tLang($settingsStore.ui_lang).ariaSettings}
   >
     <!-- Header -->
     <div class="header">
-      <button class="close-btn" onclick={cancel} aria-label={t($settingsStore.tts_primary_voice).ariaCloseSettings}></button>
-      <span class="header-title">{t($settingsStore.tts_primary_voice).settings}</span>
+      <button class="close-btn" onclick={cancel} aria-label={tLang($settingsStore.ui_lang).ariaCloseSettings}></button>
+      <span class="header-title">{tLang($settingsStore.ui_lang).settings}</span>
     </div>
 
     <!-- Scrollable body -->
     <div class="body">
 
       <!-- ── Avatar section ── -->
-      <div class="section-label">{t($settingsStore.tts_primary_voice).avatar}</div>
+      <div class="section-label">{tLang($settingsStore.ui_lang).avatar}</div>
       <div class="avatar-section">
         <!-- Avatar preview / upload trigger -->
-        <button class="avatar-preview" onclick={triggerAvatarUpload} title={t($settingsStore.tts_primary_voice).clickToUpload}>
+        <button class="avatar-preview" onclick={triggerAvatarUpload} title={tLang($settingsStore.ui_lang).clickToUpload}>
           {#if local.avatar_image}
-            <img src={local.avatar_image} alt={t($settingsStore.tts_primary_voice).ariaAvatar} class="avatar-img" />
+            <img src={local.avatar_image} alt={tLang($settingsStore.ui_lang).ariaAvatar} class="avatar-img" />
           {:else}
             <div class="avatar-placeholder">
               <div class="placeholder-face">
@@ -418,14 +427,14 @@
               </div>
             </div>
           {/if}
-          <div class="avatar-overlay">{t($settingsStore.tts_primary_voice).upload}</div>
+          <div class="avatar-overlay">{tLang($settingsStore.ui_lang).upload}</div>
         </button>
         <div class="avatar-info">
-          <p class="avatar-hint">{t($settingsStore.tts_primary_voice).supportedFormats}</p>
+          <p class="avatar-hint">{tLang($settingsStore.ui_lang).supportedFormats}</p>
           {#if local.avatar_image}
-            <button class="remove-btn" onclick={removeAvatar}>{t($settingsStore.tts_primary_voice).removeAvatar}</button>
+            <button class="remove-btn" onclick={removeAvatar}>{tLang($settingsStore.ui_lang).removeAvatar}</button>
           {:else}
-            <p class="avatar-hint muted">{t($settingsStore.tts_primary_voice).defaultAvatarHint}</p>
+            <p class="avatar-hint muted">{tLang($settingsStore.ui_lang).defaultAvatarHint}</p>
           {/if}
         </div>
         <input
@@ -444,7 +453,7 @@
         />
         {#if local.avatar_image || local.avatar_gif}
           <div class="avatar-gif-section">
-            <div class="section-label" style="margin-top:4px">动画头像 (thinking/speaking)</div>
+            <div class="section-label" style="margin-top:4px">{tLang($settingsStore.ui_lang).animAvatar}</div>
             <div style="display:flex;align-items:center;gap:6px">
               {#if local.avatar_gif}
                 <img src={local.avatar_gif} alt="GIF" style="width:32px;height:32px;border-radius:50%;object-fit:cover" />
@@ -459,21 +468,32 @@
 
 
 
-      <!-- ── Hotkey section ── -->
-      <div class="section-label">Hotkey</div>
+      <!-- ── Language section ── -->
+      <div class="section-label">{tLang($settingsStore.ui_lang).language}</div>
       <div class="field-row">
-        <span class="field-label">Record Key</span>
+        <span class="field-label">{tLang($settingsStore.ui_lang).uiLang}</span>
+        <select id="ui-lang" class="field-input" bind:value={local.ui_lang}>
+          {#each LANGUAGE_IDS as id}
+            <option value={id}>{LANGUAGE_FLAGS[id] + ' ' + LANGUAGE_NATIVE[id]}</option>
+          {/each}
+        </select>
+      </div>
+
+      <!-- ── Hotkey section ── -->
+      <div class="section-label">{tLang($settingsStore.ui_lang).hotkey}</div>
+      <div class="field-row">
+        <span class="field-label">{tLang($settingsStore.ui_lang).recordKey}</span>
         {#if capturing}
-          <button class="capture-btn active" disabled>按下快捷键...</button>
+          <button class="capture-btn active" disabled>{tLang($settingsStore.ui_lang).capturingKey}</button>
         {:else if applying}
-          <button class="capture-btn applying" disabled>按键更换中...</button>
+          <button class="capture-btn applying" disabled>{tLang($settingsStore.ui_lang).applyingKey}</button>
         {:else}
           <button class="capture-btn" onclick={startCapture}>{local.hotkey_name || $settingsStore.hotkey_name || 'RightShift'}</button>
         {/if}
       </div>
 
       <div class="field-row">
-        <span class="field-label">Double-Click Record</span>
+        <span class="field-label">{tLang($settingsStore.ui_lang).doubleClickRecord}</span>
         <div class="toggle-wrap">
           <input type="checkbox" id="double-click-record" class="toggle-input" bind:checked={local.double_click_to_record} />
           <label for="double-click-record" class="toggle-track">
@@ -483,7 +503,7 @@
       </div>
 
       <div class="field-row">
-        <span class="field-label">Voice Output</span>
+        <span class="field-label">{tLang($settingsStore.ui_lang).voiceOutput}</span>
         <div class="toggle-wrap">
           <input type="checkbox" id="tts-enabled" class="toggle-input" bind:checked={local.tts_enabled} />
           <label for="tts-enabled" class="toggle-track">
@@ -494,7 +514,7 @@
 
       <!-- ── Wake word + wake-word sample verification ── -->
       <div class="field-row">
-        <span class="field-label">{convLabels($settingsStore.tts_primary_voice).wakeWordLabel}</span>
+        <span class="field-label">{convLabelsLang($settingsStore.ui_lang).wakeWordLabel}</span>
         <div class="toggle-wrap">
           <input type="checkbox" id="wake-word-enabled" class="toggle-input" bind:checked={local.wake_word_enabled} />
           <label for="wake-word-enabled" class="toggle-track">
@@ -506,7 +526,7 @@
       {#if local.wake_word_enabled}
         <div class="field-row">
           <span class="field-label">
-            {convLabels($settingsStore.tts_primary_voice).wakeWordThreshold}
+            {convLabelsLang($settingsStore.ui_lang).wakeWordThreshold}
             <span class="volume-pct">{local.wake_word_threshold.toFixed(2)}</span>
           </span>
           <input
@@ -516,12 +536,12 @@
             max="0.90"
             step="0.05"
             bind:value={local.wake_word_threshold}
-            aria-label={convLabels($settingsStore.tts_primary_voice).wakeWordThreshold}
+            aria-label={convLabelsLang($settingsStore.ui_lang).wakeWordThreshold}
           />
         </div>
 
         <div class="field-row">
-          <span class="field-label">{convLabels($settingsStore.tts_primary_voice).speakerVerificationLabel}</span>
+          <span class="field-label">{convLabelsLang($settingsStore.ui_lang).speakerVerificationLabel}</span>
           <div class="toggle-wrap">
             <input type="checkbox" id="speaker-verification-enabled" class="toggle-input" bind:checked={local.speaker_verification_enabled} />
             <label for="speaker-verification-enabled" class="toggle-track">
@@ -537,24 +557,24 @@
                 {#if enrollMessage}
                   {enrollMessage}
                 {:else if enrolling}
-                  {convLabels($settingsStore.tts_primary_voice).enrollPhraseHint}
+                  {convLabelsLang($settingsStore.ui_lang).enrollPhraseHint}
                 {:else}
-                  {convLabels($settingsStore.tts_primary_voice).speakerVerificationHint}
+                  {convLabelsLang($settingsStore.ui_lang).speakerVerificationHint}
                 {/if}
               </span>
               {#if !enrolling && $settingsStore.last_enrolled_speaker}
                 <button type="button" class="enroll-rename-link" onclick={openRenameDialog}>
-                  {convLabels($settingsStore.tts_primary_voice).enrollRenameAction($settingsStore.last_enrolled_speaker)}
+                  {convLabelsLang($settingsStore.ui_lang).enrollRenameAction($settingsStore.last_enrolled_speaker)}
                 </button>
               {/if}
             </span>
             {#if enrolling}
               <button class="capture-btn active" disabled>
-                {convLabels($settingsStore.tts_primary_voice).enrollRecordingCountdown(enrollCountdown)}
+                {convLabelsLang($settingsStore.ui_lang).enrollRecordingCountdown(enrollCountdown)}
               </button>
             {:else}
               <button class="capture-btn" onclick={onEnrollClick}>
-                {convLabels($settingsStore.tts_primary_voice).enrollSpeakerButton}
+                {convLabelsLang($settingsStore.ui_lang).enrollSpeakerButton}
               </button>
               {#if $settingsStore.last_enrolled_speaker}
                 <button class="capture-btn" style="margin-left: 4px; background: rgba(52, 152, 219, 0.7);" onclick={startTraining}>
@@ -567,7 +587,7 @@
       {/if}
 
       <div class="field-row">
-        <span class="field-label">{convLabels($settingsStore.tts_primary_voice).continuousMode}</span>
+        <span class="field-label">{convLabelsLang($settingsStore.ui_lang).continuousMode}</span>
         <div class="toggle-wrap">
           <input type="checkbox" id="continuous-conversation" class="toggle-input" bind:checked={local.continuous_conversation} />
           <label for="continuous-conversation" class="toggle-track">
@@ -579,8 +599,8 @@
       {#if local.continuous_conversation}
         <div class="field-row">
           <span class="field-label">
-            {convLabels($settingsStore.tts_primary_voice).silenceTimeout}
-            <span class="volume-pct">{convLabels($settingsStore.tts_primary_voice).silenceSecondsSuffix(local.silence_timeout_secs)}</span>
+            {convLabelsLang($settingsStore.ui_lang).silenceTimeout}
+            <span class="volume-pct">{convLabelsLang($settingsStore.ui_lang).silenceSecondsSuffix(local.silence_timeout_secs)}</span>
           </span>
           <input
             class="field-slider"
@@ -589,14 +609,14 @@
             max="10"
             step="1"
             bind:value={local.silence_timeout_secs}
-            aria-label={convLabels($settingsStore.tts_primary_voice).silenceTimeout}
+            aria-label={convLabelsLang($settingsStore.ui_lang).silenceTimeout}
           />
         </div>
 
         <div class="field-row">
           <span class="field-label">
-            {convLabels($settingsStore.tts_primary_voice).pauseTolerance}
-            <span class="volume-pct">{convLabels($settingsStore.tts_primary_voice).pauseToleranceMsSuffix(local.pause_tolerance_ms)}</span>
+            {convLabelsLang($settingsStore.ui_lang).pauseTolerance}
+            <span class="volume-pct">{convLabelsLang($settingsStore.ui_lang).pauseToleranceMsSuffix(local.pause_tolerance_ms)}</span>
           </span>
           <input
             class="field-slider"
@@ -605,14 +625,14 @@
             max="5000"
             step="100"
             bind:value={local.pause_tolerance_ms}
-            aria-label={convLabels($settingsStore.tts_primary_voice).pauseTolerance}
+            aria-label={convLabelsLang($settingsStore.ui_lang).pauseTolerance}
           />
         </div>
 
         <div class="field-row">
           <span class="field-label">
-            {convLabels($settingsStore.tts_primary_voice).micSensitivity}
-            <span class="volume-pct">{convLabels($settingsStore.tts_primary_voice).micSensitivitySuffix(local.speech_rms_threshold)}</span>
+            {convLabelsLang($settingsStore.ui_lang).micSensitivity}
+            <span class="volume-pct">{convLabelsLang($settingsStore.ui_lang).micSensitivitySuffix(local.speech_rms_threshold)}</span>
           </span>
           <input
             class="field-slider"
@@ -621,12 +641,12 @@
             max="0.020"
             step="0.001"
             bind:value={local.speech_rms_threshold}
-            aria-label={convLabels($settingsStore.tts_primary_voice).micSensitivity}
+            aria-label={convLabelsLang($settingsStore.ui_lang).micSensitivity}
           />
         </div>
 
         <div class="field-row">
-          <span class="field-label">{convLabels($settingsStore.tts_primary_voice).skipInterruptConfirm}</span>
+          <span class="field-label">{convLabelsLang($settingsStore.ui_lang).skipInterruptConfirm}</span>
           <div class="toggle-wrap">
             <input type="checkbox" id="skip-interrupt-confirm" class="toggle-input" bind:checked={local.skip_interrupt_confirmation} />
             <label for="skip-interrupt-confirm" class="toggle-track">
@@ -637,17 +657,17 @@
       {/if}
 
       <!-- ── Appearance section ── -->
-      <div class="section-label">{t($settingsStore.tts_primary_voice).appearance}</div>
+      <div class="section-label">{tLang($settingsStore.ui_lang).appearance}</div>
 
       <div class="field-row">
-        <label class="field-label" for="dialog-style">{t($settingsStore.tts_primary_voice).skin}</label>
+        <label class="field-label" for="dialog-style">{tLang($settingsStore.ui_lang).skin}</label>
         <select id="dialog-style" class="field-input" bind:value={local.dialog_style}>
-          <option value="default">{t($settingsStore.tts_primary_voice).defaultOption}</option>
+          <option value="default">{tLang($settingsStore.ui_lang).defaultOption}</option>
         </select>
       </div>
 
       <div class="field-row">
-        <span class="field-label">{t($settingsStore.tts_primary_voice).volume} <span class="volume-pct">{volumePct}%</span></span>
+        <span class="field-label">{tLang($settingsStore.ui_lang).volume} <span class="volume-pct">{volumePct}%</span></span>
         <input
           class="field-slider"
           type="range"
@@ -655,15 +675,15 @@
           max="1"
           step="0.05"
           bind:value={local.volume}
-          aria-label={t($settingsStore.tts_primary_voice).ariaVolume}
+          aria-label={tLang($settingsStore.ui_lang).ariaVolume}
         />
       </div>
 
       <!-- ── Voice section ── -->
-      <div class="section-label">{t($settingsStore.tts_primary_voice).voice}</div>
+      <div class="section-label">{tLang($settingsStore.ui_lang).voice}</div>
 
       <div class="field-row">
-        <label class="field-label" for="voice-primary">{t($settingsStore.tts_primary_voice).primaryLang}</label>
+        <label class="field-label" for="voice-primary">{tLang($settingsStore.ui_lang).primaryLang}</label>
         <select id="voice-primary" class="field-input" bind:value={local.tts_primary_voice}>
           {#each VOICE_OPTIONS as group}
             <optgroup label={group.group}>
@@ -675,14 +695,14 @@
         </select>
         <label class="fixed-lang-check">
           <input type="checkbox" checked={local.fixed_lang === 'primary'} onchange={() => { local.fixed_lang = local.fixed_lang === 'primary' ? '' : 'primary'; }} />
-          {t($settingsStore.tts_primary_voice).fixedLang}
+          {tLang($settingsStore.ui_lang).fixedLang}
         </label>
       </div>
 
       <div class="field-row">
-        <label class="field-label" for="voice-aux1">{t($settingsStore.tts_primary_voice).aux1Lang}</label>
+        <label class="field-label" for="voice-aux1">{tLang($settingsStore.ui_lang).aux1Lang}</label>
         <select id="voice-aux1" class="field-input" bind:value={local.tts_aux1_voice}>
-          <option value="">{t($settingsStore.tts_primary_voice).none}</option>
+          <option value="">{tLang($settingsStore.ui_lang).none}</option>
           {#each VOICE_OPTIONS as group}
             <optgroup label={group.group}>
               {#each group.voices as v}
@@ -694,15 +714,15 @@
         {#if local.tts_aux1_voice}
           <label class="fixed-lang-check">
             <input type="checkbox" checked={local.fixed_lang === 'aux1'} onchange={() => { local.fixed_lang = local.fixed_lang === 'aux1' ? '' : 'aux1'; }} />
-            {t($settingsStore.tts_primary_voice).fixedLang}
+            {tLang($settingsStore.ui_lang).fixedLang}
           </label>
         {/if}
       </div>
 
       <div class="field-row">
-        <label class="field-label" for="voice-aux2">{t($settingsStore.tts_primary_voice).aux2Lang}</label>
+        <label class="field-label" for="voice-aux2">{tLang($settingsStore.ui_lang).aux2Lang}</label>
         <select id="voice-aux2" class="field-input" bind:value={local.tts_aux2_voice}>
-          <option value="">{t($settingsStore.tts_primary_voice).none}</option>
+          <option value="">{tLang($settingsStore.ui_lang).none}</option>
           {#each VOICE_OPTIONS as group}
             <optgroup label={group.group}>
               {#each group.voices as v}
@@ -714,20 +734,20 @@
         {#if local.tts_aux2_voice}
           <label class="fixed-lang-check">
             <input type="checkbox" checked={local.fixed_lang === 'aux2'} onchange={() => { local.fixed_lang = local.fixed_lang === 'aux2' ? '' : 'aux2'; }} />
-            {t($settingsStore.tts_primary_voice).fixedLang}
+            {tLang($settingsStore.ui_lang).fixedLang}
           </label>
         {/if}
       </div>
 
       <div class="field-row">
-        <label class="field-label" for="tts-format">{t($settingsStore.tts_primary_voice).audioFormat}</label>
+        <label class="field-label" for="tts-format">{tLang($settingsStore.ui_lang).audioFormat}</label>
         <select id="tts-format" class="field-input" bind:value={local.tts_format}>
-          <option value="wav">{t($settingsStore.tts_primary_voice).wavLossless}</option>
-          <option value="mp3">{t($settingsStore.tts_primary_voice).mp3Compact}</option>
+          <option value="wav">{tLang($settingsStore.ui_lang).wavLossless}</option>
+          <option value="mp3">{tLang($settingsStore.ui_lang).mp3Compact}</option>
         </select>
       </div>
 
-      <p class="hint">{t($settingsStore.tts_primary_voice).autoDetectHint}</p>
+      <p class="hint">{tLang($settingsStore.ui_lang).autoDetectHint}</p>
 
     </div>
 
@@ -736,8 +756,8 @@
       {#if saveError}
         <span class="save-error">{saveError}</span>
       {/if}
-      <button class="btn" onclick={cancel}>{t($settingsStore.tts_primary_voice).cancel}</button>
-      <button class="btn primary" onclick={save}>{t($settingsStore.tts_primary_voice).save}</button>
+      <button class="btn" onclick={cancel}>{tLang($settingsStore.ui_lang).cancel}</button>
+      <button class="btn primary" onclick={save}>{tLang($settingsStore.ui_lang).save}</button>
     </div>
 
     {#if enrollNameDialog}
