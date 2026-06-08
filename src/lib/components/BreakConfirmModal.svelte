@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
   import { settingsStore } from '../stores/settings';
-  import { t } from '../i18n';
+  import { tLang } from '../i18n';
 
   let { visible = false, onbreak, oncancel }: {
     visible?: boolean;
@@ -10,7 +10,7 @@
     oncancel: () => void;
   } = $props();
 
-  const strings = $derived(t(get(settingsStore).tts_primary_voice ?? ''));
+  const strings = $derived(tLang(get(settingsStore).ui_lang ?? ''));
 
   function handleKey(e: KeyboardEvent) {
     if (!visible) return;

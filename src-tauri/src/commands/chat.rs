@@ -184,6 +184,20 @@ pub fn stop_audio_queue() {
         sink.stop();
     }
     let _ = audio_sender().lock().unwrap().send(AudioCmd::Stop);
+    schedule_wake_resume_after_grace();
+}
+
+/// FEAT-B4: schedule wake-listener resume after a short grace so the TTS tail
+/// fading through speakers→mic doesn't immediately re-trigger detection. If a
+/// new TTS chunk reserves a slot during the grace window, the resume is a
+/// no-op (queue depth > 0 short-circuits).
+fn schedule_wake_resume_after_grace() {
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        if AUDIO_QUEUE_DEPTH.load(Ordering::SeqCst) == 0 {
+            crate::voice::sherpa_wake::resume_wake();
+        }
+    });
 }
 
 /// Check if queue is full (read-only, for API layer).
@@ -197,6 +211,11 @@ fn audio_queue_reserve() -> bool {
         let current = AUDIO_QUEUE_DEPTH.load(Ordering::SeqCst);
         if current >= MAX_AUDIO_QUEUE { return false; }
         if AUDIO_QUEUE_DEPTH.compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            // FEAT-B4: first TTS chunk → suppress wake-word detection so the
+            // assistant's own audio fed through speakers→mic can't self-trigger.
+            if current == 0 {
+                crate::voice::sherpa_wake::pause_wake();
+            }
             return true;
         }
     }
@@ -216,6 +235,11 @@ fn audio_queue_release(generation: u64) {
             .compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
+            // FEAT-B4: last TTS chunk just finished → schedule wake resume
+            // after a 300 ms grace window so the speaker tail doesn't retrigger.
+            if current == 1 {
+                schedule_wake_resume_after_grace();
+            }
             return;
         }
     }
@@ -267,7 +291,9 @@ fn voice_lang(voice: &str) -> &str {
     voice.split('-').next().unwrap_or("zh")
 }
 
-fn select_voice(text: &str, primary: &str, aux1: &str, aux2: &str, fixed_lang: &str, user_lang: &str) -> String {
+fn select_voice(text: &str, primary: &str, aux1: &str, aux2: &str, fixed_lang: &str, _user_lang: &str) -> String {
+    // 忽略 user_lang 参数，始终根据回复内容的语言来选择 TTS 语音
+    // 这是为了支持：用户用中文问，但 LLM 返回日语/英语等情况
     if !fixed_lang.is_empty() {
         let forced_voice = match fixed_lang {
             "aux1" if !aux1.is_empty() => aux1,
@@ -286,26 +312,15 @@ fn select_voice(text: &str, primary: &str, aux1: &str, aux2: &str, fixed_lang: &
             // Fall through to auto-detection below
         }
     }
-    // Use user input language (not sentence content) to select voice.
-    // This ensures Chinese input → all Chinese voice, English input → all English voice.
-    // Only fallback to content detection if user_lang doesn't match any configured voice.
-    let lang = if !user_lang.is_empty() { user_lang } else { detect_language(text) };
-    eprintln!("[TTS] user_lang={}, using lang: {}", user_lang, lang);
+    // 根据回复内容检测语言并选择对应的 TTS 语音
+    let lang = detect_language(text);
+    eprintln!("[TTS] response lang detected: {}", lang);
     for v in &[primary, aux1, aux2] {
         if !v.is_empty() && voice_lang(v) == lang {
             return v.to_string();
         }
     }
-    // Fallback: try content-based detection if user_lang didn't match
-    let detected = detect_language(text);
-    if detected != lang {
-        eprintln!("[TTS] user_lang {} has no matching voice, fallback to detected: {}", lang, detected);
-        for v in &[primary, aux1, aux2] {
-            if !v.is_empty() && voice_lang(v) == detected {
-                return v.to_string();
-            }
-        }
-    }
+    // Fallback: try primary voice if no match
     primary.to_string()
 }
 

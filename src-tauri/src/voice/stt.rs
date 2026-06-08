@@ -2,57 +2,38 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio, Child};
 use std::io::BufRead;
 use std::sync::Mutex;
+use tauri::Emitter;
 
 /// Store the STT server child process so we can kill it when PA exits.
 static STT_CHILD: Mutex<Option<Child>> = Mutex::new(None);
+static APP_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn is_app_ready() -> bool {
+    APP_READY.load(std::sync::atomic::Ordering::Acquire)
+}
 
 const STT_SERVER_URL: &str = "http://127.0.0.1:8651";
 
 fn helper_path() -> PathBuf {
-    // app bundle: .app/Contents/MacOS/pocket-agent → .app/Contents/Resources/stt-helper
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(macos_dir) = exe.parent() {
-            if let Some(contents_dir) = macos_dir.parent() {
-                let bundled = contents_dir.join("Resources").join("stt-helper");
-                if bundled.exists() {
-                    return bundled;
-                }
-            }
-        }
-    }
-
-    // dev fallback
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let dev_path = PathBuf::from(manifest_dir).join("resources").join("stt-helper");
-        if dev_path.exists() {
-            return dev_path;
-        }
-    }
-
-    PathBuf::from("src-tauri/resources/stt-helper")
+    crate::voice::venv::resource_path("stt-helper")
 }
 
 fn server_path() -> PathBuf {
-    // Same lookup as helper_path, but for stt-server.py
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(macos_dir) = exe.parent() {
-            if let Some(contents_dir) = macos_dir.parent() {
-                let bundled = contents_dir.join("Resources").join("stt-server.py");
-                if bundled.exists() {
-                    return bundled;
-                }
-            }
-        }
-    }
+    crate::voice::venv::resource_path("stt-server.py")
+}
 
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let dev_path = PathBuf::from(manifest_dir).join("resources").join("stt-server.py");
-        if dev_path.exists() {
-            return dev_path;
-        }
+/// STT_PYTHON env (dev override) > PA's own venv at ~/.pocket-agent/venv/.
+/// Returns None when neither is available — caller decides whether to skip or
+/// fall back to spawning stt-helper directly.
+fn resolve_python() -> Option<String> {
+    if let Ok(p) = std::env::var("STT_PYTHON") {
+        return Some(p);
     }
-
-    PathBuf::from("src-tauri/resources/stt-server.py")
+    let venv_python = crate::voice::venv::venv_python_path();
+    if venv_python.exists() {
+        return Some(venv_python.to_string_lossy().to_string());
+    }
+    None
 }
 
 pub struct SttResult {
@@ -101,10 +82,9 @@ fn transcribe_http(wav_path: &str) -> Result<SttResult, String> {
     let text = v["text"].as_str().unwrap_or("").to_string();
     let language = v["language"].as_str().unwrap_or("zh").to_string();
 
-    if text.is_empty() {
-        return Err("识别结果为空".to_string());
-    }
-
+    // Empty text is a legitimate outcome (VAD short-circuit on silent audio).
+    // Return Ok with empty text — callers decide policy (single-shot shows a toast,
+    // continuous mode stays in Listening).
     Ok(SttResult { text, language })
 }
 
@@ -116,7 +96,7 @@ fn transcribe_subprocess(wav_path: &str) -> Result<SttResult, String> {
         return Err(format!("stt-helper 未找到: {}", helper.display()));
     }
 
-    let mut child = if let Ok(python) = std::env::var("STT_PYTHON") {
+    let mut child = if let Some(python) = resolve_python() {
         Command::new(python)
             .arg(&helper)
             .arg(wav_path)
@@ -150,15 +130,13 @@ fn transcribe_subprocess(wav_path: &str) -> Result<SttResult, String> {
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if stdout.is_empty() {
-            return Err("识别结果为空".to_string());
+            // Empty subprocess output — treat as empty result (consistent with HTTP path).
+            return Ok(SttResult { text: String::new(), language: String::new() });
         }
 
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&stdout) {
             let text = v["text"].as_str().unwrap_or("").to_string();
             let language = v["language"].as_str().unwrap_or("zh").to_string();
-            if text.is_empty() {
-                return Err("识别结果为空".to_string());
-            }
             Ok(SttResult { text, language })
         } else {
             Ok(SttResult {
@@ -172,7 +150,7 @@ fn transcribe_subprocess(wav_path: &str) -> Result<SttResult, String> {
     }
 }
 
-/// Main entry: try HTTP first, fallback to subprocess
+/// Main entry: try HTTP first, retry once on transient failure, then fallback to subprocess
 pub fn transcribe(wav_path: &str) -> Result<SttResult, String> {
     // Step 1: Try resident HTTP server (fast, model already loaded)
     match transcribe_http(wav_path) {
@@ -181,17 +159,29 @@ pub fn transcribe(wav_path: &str) -> Result<SttResult, String> {
             return Ok(result);
         }
         Err(e) => {
-            eprintln!("[stt] HTTP failed ({}), falling back to subprocess...", e);
+            eprintln!("[stt] HTTP failed ({}), retrying in 1s...", e);
         }
     }
 
-    // Step 2: Fallback to subprocess (cold start)
+    // Step 2: Retry once after short delay (server might be temporarily busy)
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    match transcribe_http(wav_path) {
+        Ok(result) => {
+            eprintln!("[stt] HTTP transcription succeeded (retry)");
+            return Ok(result);
+        }
+        Err(e) => {
+            eprintln!("[stt] HTTP retry also failed ({}), falling back to subprocess...", e);
+        }
+    }
+
+    // Step 3: Fallback to subprocess (cold start, no VAD — may hallucinate)
     transcribe_subprocess(wav_path)
 }
 
 /// Ensure the resident STT server is running; spawn it if not.
 /// Called once at app startup.
-pub fn ensure_stt_server() {
+pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build();
@@ -203,6 +193,10 @@ pub fn ensure_stt_server() {
 
     if running {
         eprintln!("[stt] resident server already running on :8651");
+        APP_READY.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(h) = app_handle.as_ref() {
+            let _ = h.emit("app-ready", ());
+        }
         return;
     }
 
@@ -212,22 +206,21 @@ pub fn ensure_stt_server() {
         return;
     }
 
-    eprintln!("[stt] starting resident STT server...");
-
-    // Resolve python: STT_PYTHON env > venv python > system python3
-    let python = if let Ok(p) = std::env::var("STT_PYTHON") {
-        p
-    } else if let Ok(home) = std::env::var("HOME") {
-        let venv_python = std::path::Path::new(&home)
-            .join(".hermes/hermes-agent/venv/bin/python3");
-        if venv_python.exists() {
-            venv_python.to_string_lossy().to_string()
-        } else {
-            "python3".to_string()
+    // PA-owned venv is the only supported runtime. If it's not ready yet, bail
+    // out — the venv bootstrap thread in lib.rs will retry ensure_stt_server()
+    // after the install finishes.
+    let python = match resolve_python() {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "[stt] PA venv not ready at {}; STT server will start after venv setup completes",
+                crate::voice::venv::venv_python_path().display()
+            );
+            return;
         }
-    } else {
-        "python3".to_string()
     };
+
+    eprintln!("[stt] starting resident STT server...");
 
     // Read STT_MODEL from env (default: base). Lets users switch between tiny/base/small.
     let stt_model = std::env::var("STT_MODEL").unwrap_or_else(|_| "base".to_string());
@@ -249,6 +242,51 @@ pub fn ensure_stt_server() {
                 *guard = Some(child);
             }
             eprintln!("[stt] STT server spawned (pid={}, python={})", pid, python);
+
+            // Poll /health for up to 6s in a background thread. If the server
+            // never comes up, print one high-visibility hint with the venv path
+            // and the exact pip install command — instead of silently slipping
+            // into the ~13s subprocess fallback on every utterance.
+            let python_for_hint = python.clone();
+            let probe_handle = app_handle.clone();
+            std::thread::Builder::new()
+                .name("stt-health-probe".to_string())
+                .spawn(move || {
+                    let client = match reqwest::blocking::Client::builder()
+                        .timeout(std::time::Duration::from_millis(500))
+                        .build()
+                    {
+                        Ok(c) => c,
+                        Err(_) => return,
+                    };
+                    let url = format!("{}/health", STT_SERVER_URL);
+                    // 30 s covers cold-boot of faster_whisper + Whisper "base"
+                    // model load on a typical laptop. Tune up only if the user
+                    // is on a much slower disk / first-ever model download.
+                    let probe_deadline_s: u64 = 30;
+                    let deadline = std::time::Instant::now()
+                        + std::time::Duration::from_secs(probe_deadline_s);
+                    while std::time::Instant::now() < deadline {
+                        if client.get(&url).send().map(|r| r.status().is_success()).unwrap_or(false) {
+                            eprintln!("[stt] resident server healthy on :8651");
+            APP_READY.store(true, std::sync::atomic::Ordering::Release);
+                            if let Some(h) = probe_handle.as_ref() {
+                                let _ = h.emit("app-ready", ());
+                            }
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                    eprintln!(
+                        "[stt] WARNING: resident server did not respond on :8651 within {}s.\n\
+                         [stt]   STT will fall back to slow per-utterance subprocess.\n\
+                         [stt]   venv python: {}\n\
+                         [stt]   If this persists, delete ~/.pocket-agent/.venv-ready and restart PA\n\
+                         [stt]   to trigger a fresh venv bootstrap.",
+                        probe_deadline_s, python_for_hint,
+                    );
+                })
+                .ok();
         }
         Err(e) => eprintln!("[stt] failed to spawn STT server: {}", e),
     }

@@ -1,25 +1,52 @@
 <script lang="ts">
   import { chatStore } from '../stores/chat';
   import { characterState } from '../stores/character';
+  import { settingsStore } from '../stores/settings';
+  import { convLabelsLang } from '../i18n';
+
+  let labels = $derived(convLabelsLang($settingsStore.ui_lang));
+
+  let showSetup = $derived(
+    $chatStore.voiceSetupState === 'installing' ||
+    $chatStore.voiceSetupState === 'error'
+  );
 
   let hasContent = $derived(
+    showSetup ||
     $chatStore.thinkingSteps.length > 0 ||
     $chatStore.isStreaming ||
-    $characterState === 'thinking'
+    $characterState === 'thinking' ||
+    $chatStore.voiceStatus !== null
   );
 </script>
 
   <div class="status-panel" class:visible={hasContent}>
     <div class="status-content">
-      {#if $chatStore.thinkingSteps.length > 0}
-        <div class="steps">
+      <div class="steps">
+        {#if showSetup}
+          {#if $chatStore.voiceSetupState === 'error'}
+            <span class="step error">{labels.voiceSetupError}</span>
+            {#if $chatStore.voiceSetupDetail}
+              <span class="step error-detail">{$chatStore.voiceSetupDetail}</span>
+            {/if}
+          {:else}
+            <span class="step">{labels.voiceSetupInstalling}</span>
+            {#if $chatStore.voiceSetupPhase}
+              <span class="step placeholder">↳ {labels.voiceSetupPhase($chatStore.voiceSetupPhase)}</span>
+            {/if}
+          {/if}
+        {/if}
+        {#if $chatStore.voiceStatus !== null}
+          <span class="step">{$chatStore.voiceStatus}</span>
+        {/if}
+        {#if $chatStore.thinkingSteps.length > 0}
           {#each $chatStore.thinkingSteps as step}
             <span class="step">{step}</span>
           {/each}
-        </div>
-      {:else if $chatStore.isStreaming || $characterState === 'thinking'}
-        <span class="step placeholder">🤔 正在思考...</span>
-      {/if}
+        {:else if $chatStore.isStreaming || $characterState === 'thinking'}
+          <span class="step placeholder">🤔 正在思考...</span>
+        {/if}
+      </div>
     </div>
   </div>
 
@@ -68,6 +95,15 @@
 
   .step.placeholder {
     color: rgba(160, 168, 255, 0.45);
+  }
+
+  .step.error {
+    color: rgba(255, 140, 140, 0.85);
+  }
+
+  .step.error-detail {
+    color: rgba(255, 140, 140, 0.55);
+    font-size: 9.5px;
   }
 
   @keyframes fade-in {

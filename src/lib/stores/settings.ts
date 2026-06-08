@@ -12,11 +12,22 @@ export interface AppSettings {
   window_x: number | null;
   window_y: number | null;
   avatar_image: string | null;
+  avatar_gif: string | null;
   fixed_lang: string;
+  ui_lang: string;
   hotkey_code: number;
   hotkey_name: string;
   tts_enabled: boolean;
   double_click_to_record: boolean;
+  continuous_conversation: boolean;
+  silence_timeout_secs: number;
+  pause_tolerance_ms: number;
+  speech_rms_threshold: number;
+  skip_interrupt_confirmation: boolean;
+  wake_word_enabled: boolean;
+  wake_word_threshold: number;
+  speaker_verification_enabled: boolean;
+  last_enrolled_speaker: string;
 }
 
 const defaults: AppSettings = {
@@ -30,11 +41,22 @@ const defaults: AppSettings = {
   window_x: null,
   window_y: null,
   avatar_image: null,
+  avatar_gif: null,
   fixed_lang: "",
+  ui_lang: "en",
   hotkey_code: 60,
   hotkey_name: "RightShift",
   tts_enabled: true,
   double_click_to_record: false,
+  continuous_conversation: false,
+  silence_timeout_secs: 5,
+  pause_tolerance_ms: 1500,
+  speech_rms_threshold: 0.015,
+  skip_interrupt_confirmation: true,
+  wake_word_enabled: false,
+  wake_word_threshold: 0.5,
+  speaker_verification_enabled: false,
+  last_enrolled_speaker: '',
 };
 
 function createSettingsStore() {

@@ -2,7 +2,7 @@
   import { chatStore } from '../stores/chat';
   import { characterState } from '../stores/character';
   import { settingsStore } from '../stores/settings';
-  import { t } from '../i18n';
+  import { tLang } from '../i18n';
 
   export let dialogStyle: 'bubble' | 'tv' | 'terminal' = 'bubble';
   export let onSend: (text: string) => void;
@@ -13,7 +13,7 @@
   // 流式时显示累积内容，结束后显示最新一条消息，无消息时显示欢迎语
   $: displayContent = $chatStore.isStreaming
     ? $chatStore.streamingContent
-    : ($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? t($settingsStore.tts_primary_voice).hint.replace("{key}", $settingsStore.hotkey_name));
+    : ($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? tLang($settingsStore.ui_lang).hint.replace("{key}", $settingsStore.hotkey_name));
 
   $: isError = !$chatStore.isStreaming && !!$chatStore.error;
   $: isStreaming = $chatStore.isStreaming;
@@ -49,7 +49,7 @@
     <input
       bind:this={inputEl}
       type="text"
-      placeholder={isBusy ? t($settingsStore.tts_primary_voice).inputBusy : t($settingsStore.tts_primary_voice).inputPlaceholder}
+      placeholder={isBusy ? tLang($settingsStore.ui_lang).inputBusy : tLang($settingsStore.ui_lang).inputPlaceholder}
       bind:value={inputText}
       on:keydown={handleKeydown}
       disabled={isBusy}

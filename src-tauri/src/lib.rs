@@ -56,7 +56,26 @@ pub fn run() {
             voice::hotkey::check_accessibility(handle);
             voice::hotkey::spawn_hotkey_listener(handle.clone(), config.hotkey_code);
             voice::record::prewarm();
-            voice::stt::ensure_stt_server();
+
+            // Bootstrap PA-owned venv at ~/.pocket-agent/venv (independent from
+            // hermes-agent). Runs on a dedicated thread so the UI thread is not
+            // blocked during the 3-10 minute first-launch pip install. Emits
+            // venv-setup-* events to the frontend for progress display. Only
+            // start the STT server once the venv is ready.
+            {
+                let venv_handle = handle.clone();
+                std::thread::Builder::new()
+                    .name("venv-bootstrap".to_string())
+                    .spawn(move || {
+                        match voice::venv::ensure_venv(&venv_handle) {
+                            Ok(()) => {
+                                voice::stt::ensure_stt_server(Some(venv_handle.clone()));
+                            }
+                            Err(e) => eprintln!("[venv] bootstrap failed: {}", e),
+                        }
+                    })
+                    .ok();
+            }
 
             // Start local API server for push notifications (port 8650)
             {
@@ -130,6 +149,24 @@ pub fn run() {
             commands::voice::stop_voice_recording,
             commands::voice::cancel_voice_recording,
             commands::voice::get_audio_level,
+            commands::voice::start_continuous_conversation,
+            commands::voice::stop_continuous_conversation,
+            commands::voice::notify_conversation_tts_started,
+            commands::voice::notify_conversation_tts_done,
+            commands::voice::is_continuous_conversation_active,
+            commands::voice::start_wake_word_listening,
+            commands::voice::stop_wake_word_listening,
+            commands::voice::is_wake_word_active,
+            commands::voice::is_app_ready,
+            commands::voice::start_enroll_recording,
+            commands::voice::stop_enroll_recording,
+            commands::voice::enroll_speaker,
+            commands::voice::train_speaker,
+            commands::voice::get_wake_variant_count,
+            commands::voice::verify_speaker,
+            commands::voice::list_speakers,
+            commands::voice::remove_speaker,
+            commands::voice::consume_wake_probe,
             voice::hotkey::start_capture,
             voice::hotkey::poll_capture,
             voice::hotkey::update_hotkey,

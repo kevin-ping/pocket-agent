@@ -17,7 +17,7 @@
   import { chatStore } from './lib/stores/chat';
   import { settingsStore } from './lib/stores/settings';
   import { layoutStore } from './lib/stores/layout';
-  import { STATUS_PHRASES, langFromVoice, detectLang, type LangKey } from './lib/i18n';
+  import { STATUS_PHRASES, langFromVoice, detectLang, convLabels, type LangKey } from './lib/i18n';
 
   const appWindow = getCurrentWindow();
 
@@ -71,14 +71,40 @@
 
   // ─── Context menu ───
   let muted = false;
-  let islandMode: "idle" | "recording" | "thinking" = "idle";
+  let islandMode: "idle" | "recording" | "thinking" | "waiting_for_wake" | "verifying_speaker" = "idle";
   let spiritPhase = 0;
   let audioLevel = 0;
   let audioLevelTimer: ReturnType<typeof setInterval> | null = null;
   let firstStreamDelta = false;
   let lastSpeakingHadAudio = true;
   let bridgeThinkingActive = false;
+
+  // ─── Media skins: avatar content per state ───
+  $: mediaSkins = {
+    listening: 'user_input.gif',
+    thinking: $settingsStore.avatar_gif ?? $settingsStore.avatar_image ?? '',
+    speaking: $settingsStore.avatar_gif ?? $settingsStore.avatar_image ?? '',
+  };
+  let promptAudio: HTMLAudioElement | null = null;
+
+  async function playPromptSound() {
+    try {
+      // 每次创建新的 Audio element，避免 Web Audio API sourceNode 只能用一次的问题
+      promptAudio = new Audio('user_input.mp3');
+      promptAudio.volume = 1;
+      await promptAudio.play();
+      console.log('[prompt] playing');
+    } catch (e) {
+      console.warn('[prompt] error:', e);
+    }
+  }
+  // ─── Continuous conversation mode ───
+  let conversationActive = false;
   let bridgeFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function voiceListeningText(): string {
+    return `🎤 ${convLabels(get(settingsStore).tts_primary_voice).voiceListening}`;
+  }
 
   function clearBridgeFallbackTimer() {
     if (bridgeFallbackTimer) {
@@ -202,6 +228,69 @@
     if (pendingStatusSpeech) { clearTimeout(pendingStatusSpeech); pendingStatusSpeech = null; }
   }
 
+  // ─── Wake-word state (FEAT-C4) ───
+  let wakeArmInFlight = false;
+
+  // stt-server starts on a background thread and is not ready at app mount
+  // (Whisper model load + token file write take ~1-3 s). The wake listener's
+  // first connect attempt loses this race and fails with either
+  // "ws auth token: ... No such file" or "ws connect: Connection refused".
+  // Retry on those transient errors so wake comes up automatically once the
+  // server is healthy, without forcing the user to toggle the switch.
+  async function armWakeListenerIfEnabled() {
+    const s = get(settingsStore);
+    if (!s.wake_word_enabled) return;
+    if (wakeArmInFlight) return;
+    wakeArmInFlight = true;
+    try {
+      const MAX_ATTEMPTS = 20;
+      for (let i = 0; i < MAX_ATTEMPTS; i++) {
+        try {
+          await invoke('start_wake_word_listening', { threshold: s.wake_word_threshold, speakerName: s.last_enrolled_speaker || 'Me' });
+          if (!conversationActive && islandMode === 'idle') {
+            islandMode = 'waiting_for_wake';
+          }
+          return;
+        } catch (e) {
+          const msg = String(e ?? '');
+          // Idempotent ignore: "already active" races on conversation-ended.
+          if (msg.includes('already active')) return;
+          // Transient: stt-server not ready yet, or capture still held by
+          // previous owner (async release). Backoff 500 ms and retry.
+          if (
+            msg.includes('ws connect') ||
+            msg.includes('ws auth token') ||
+            msg.includes('read server token failed') ||
+            msg.includes('capture busy') ||
+            msg.includes('mic capture:')
+          ) {
+            if (i === MAX_ATTEMPTS - 1) {
+              console.warn('[wake] arm gave up after retries:', msg);
+              return;
+            }
+            await new Promise((r) => setTimeout(r, 500));
+            continue;
+          }
+          // Non-transient failure: surface once and stop.
+          console.warn('[wake] arm failed', e);
+          return;
+        }
+      }
+    } finally {
+      wakeArmInFlight = false;
+    }
+  }
+
+  async function disarmWakeListener() {
+    try {
+      await invoke('stop_wake_word_listening');
+    } catch (e) {
+      console.warn('[wake] disarm failed', e);
+    }
+    if (islandMode === 'waiting_for_wake') islandMode = 'idle';
+  }
+
+
   // ─── Break / interrupt current turn ───
   let showBreakConfirm = false;
   let pendingBreakAction: (() => void) | null = null;
@@ -213,8 +302,28 @@
 
   function requestNewTurn(action: () => void) {
     if (!isTurnActive()) { action(); return; }
+    const s = get(settingsStore);
+    if (s.continuous_conversation && s.skip_interrupt_confirmation) {
+      // Skip confirm popup; immediately break and run action.
+      confirmBreakSilently(action);
+      return;
+    }
     pendingBreakAction = action;
     showBreakConfirm = true;
+  }
+
+  async function confirmBreakSilently(action: () => void) {
+    cancelPendingStatusSpeech();
+    lastSpokenStatus = null;
+    try { await invoke('discard_pending_turn'); } catch (e) { console.error(e); }
+    chatStore.endStream();
+    chatStore.clearThinkingSteps();
+    bridgeThinkingActive = false;
+    clearBridgeFallbackTimer();
+    islandMode = 'idle';
+    spiritPhase = 0;
+    characterState.toIdle();
+    action();
   }
 
   async function confirmBreak() {
@@ -265,7 +374,7 @@
     return undefined;
   }
 
-  type StatusKind = { kind: 'thinking' } | { kind: 'querying'; name: string } | { kind: 'executing' };
+  type StatusKind = { kind: 'thinking' } | { kind: 'querying'; name: string } | { kind: 'executing' } | { kind: 'running-command' };
   function speakStatus(kind: StatusKind) {
     cancelPendingStatusSpeech();
     const s = get(settingsStore);
@@ -274,6 +383,7 @@
     const p = STATUS_PHRASES[lang] ?? STATUS_PHRASES.zh;
     const text = kind.kind === 'thinking' ? p.thinking
                : kind.kind === 'executing' ? p.executing
+               : kind.kind === 'running-command' ? p.runningCommand
                : p.querying(kind.name);
     if (!text || text === lastSpokenStatus) return;
     lastSpokenStatus = text;
@@ -289,6 +399,10 @@
   }
 
   async function setupListeners() {
+    chatStore.setOnCmdDetected(() => {
+      chatStore.addThinkingStep('🔧 运行命令');
+      speakStatus({ kind: 'running-command' });
+    });
     unlisten = await Promise.all([
       listen('chat-thinking-start', () => {
         characterState.toThinking();
@@ -307,6 +421,9 @@
         chatStore.startTypewriter(e.payload.emotion);
         if (!e.payload.has_audio && !$layoutStore.expanded) {
           layoutStore.toggle();
+        }
+        if (conversationActive && e.payload.has_audio) {
+          invoke('notify_conversation_tts_started').catch(console.error);
         }
       }),
       listen('chat-audio-playing', () => {
@@ -343,8 +460,17 @@
       listen('chat-audio-done', () => {
         debugState('chat-audio-done');
         chatStore.endStream();
-        characterState.transition('speaking', 'idle');
-        spiritPhase = 0;
+        if (conversationActive) {
+          // Hand control back to the conversation worker; it drives characterState via
+          // conversation-state events. Skip the toIdle transition here.
+          invoke('notify_conversation_tts_done').catch(console.error);
+          spiritPhase = 0;
+        } else {
+          characterState.transition('speaking', 'idle');
+          spiritPhase = 0;
+          islandMode = 'idle';
+          armWakeListenerIfEnabled();
+        }
         autoCloseBreakConfirm();
       }),
 
@@ -435,31 +561,86 @@
 
       listen('fn-key-down', () => {
         debugState('fn-key-down');
+        const cfg = get(settingsStore);
+        const setupState = get(chatStore).voiceSetupState;
+        if (setupState === 'installing' || setupState === 'error') {
+          chatStore.setError(convLabels(cfg.tts_primary_voice).voiceSetupNotReady);
+          return;
+        }
+        if (cfg.continuous_conversation) {
+          if (conversationActive) {
+            invoke('stop_continuous_conversation').catch(console.error);
+            conversationActive = false;
+            chatStore.setVoiceStatus(null);
+            islandMode = 'idle';
+            spiritPhase = 0;
+            characterState.toIdle();
+            return;
+          }
+          requestNewTurn(() => {
+            playPromptSound();
+            conversationActive = true;
+            islandMode = 'recording';
+            spiritPhase = 0;
+            firstStreamDelta = false;
+            chatStore.clear();
+            chatStore.setVoiceStatus(voiceListeningText());
+            characterState.toListening();
+            invoke('start_continuous_conversation', {
+              silenceTimeoutSecs: cfg.silence_timeout_secs,
+              pauseToleranceMs: cfg.pause_tolerance_ms,
+              speechRmsThreshold: cfg.speech_rms_threshold,
+            })
+              .catch((e) => {
+                console.error('[continuous] start failed', e);
+                conversationActive = false;
+                characterState.toIdle();
+                islandMode = 'idle';
+                chatStore.setError(`连续对话启动失败: ${e}`);
+              });
+          });
+          return;
+        }
         requestNewTurn(() => {
+          playPromptSound();
           islandMode = 'recording';
           spiritPhase = 0;
           firstStreamDelta = false;
           characterState.toListening();
           chatStore.clear();
-          invoke('start_voice_recording').catch(console.error);
-          // Start polling audio level for visual feedback
-          audioLevel = 0;
-          if (audioLevelTimer) clearInterval(audioLevelTimer);
-          audioLevelTimer = setInterval(async () => {
-            try {
-              const level = await invoke<number>('get_audio_level');
-              audioLevel = level;
-            } catch {}
-          }, 150);
+          conversationActive = true;
+          invoke('start_continuous_conversation', {
+            silenceTimeoutSecs: cfg.silence_timeout_secs,
+            pauseToleranceMs: cfg.pause_tolerance_ms,
+            speechRmsThreshold: cfg.speech_rms_threshold,
+            singleShot: true,
+          }).catch((e) => {
+            console.error('[single-shot] start failed', e);
+            conversationActive = false;
+            characterState.toIdle();
+            islandMode = 'idle';
+            chatStore.setError(`录音启动失败: ${e}`);
+          });
         });
       }),
       listen('fn-key-up', () => {
         debugState('fn-key-up');
+        if (get(settingsStore).continuous_conversation) {
+          // In continuous mode, hotkey is a toggle on key-down; key-up is a no-op.
+          return;
+        }
+        // Single-shot mode: stop conversation worker and reset state immediately.
+        // The conv worker may have already exited (single_shot break), but
+        // conversationActive must be cleared here so chat-audio-done won't
+        // call notify_conversation_tts_done on a dead worker.
+        conversationActive = false;
         islandMode = 'thinking';
         spiritPhase = 1;
         characterState.toThinking();
         if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
-        invoke('stop_voice_recording').catch((e) => {
+        invoke('stop_continuous_conversation').then(() => {
+          armWakeListenerIfEnabled();
+        }).catch((e) => {
           console.warn('[stop_voice_recording]', e);
           islandMode = 'idle';
           spiritPhase = 0;
@@ -480,6 +661,9 @@
         islandMode = 'thinking';
         if (e.payload.text.trim()) {
           handleSendMessage(e.payload.text, e.payload.language);
+        } else if (conversationActive) {
+          // Empty result in continuous mode: worker stays Listening, just ignore.
+          islandMode = 'recording';
         } else {
           spiritPhase = 0;
           characterState.toIdle();
@@ -495,6 +679,90 @@
         chatStore.setError(`语音识别失败: ${e.payload.error}`);
         characterState.toIdle();
         if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
+      }),
+
+      // ─── Continuous conversation events ───
+      listen<string>('conversation-state', (e) => {
+        const s = e.payload as 'listening' | 'transcribing' | 'speaking';
+        debugState('conversation-state', { state: s });
+        if (!conversationActive) return;
+        if (s === 'listening') {
+          playPromptSound();
+          chatStore.setVoiceStatus(voiceListeningText());
+          characterState.toListening();
+          islandMode = 'recording';
+          spiritPhase = 0;
+        } else if (s === 'transcribing') {
+          playPromptSound();
+          chatStore.setVoiceStatus(null);
+          characterState.toThinking();
+          islandMode = 'thinking';
+          spiritPhase = 1;
+        } else if (s === 'speaking') {
+          // Transition to speaking visuals is driven by chat-audio-playing, not by
+          // backend Speaking state — the backend flips to Speaking right after the STT
+          // result returns (before TTS actually plays), which would otherwise skip the
+          // thinking animation. Only clear the voice-status row here.
+          chatStore.setVoiceStatus(null);
+        }
+      }),
+      listen('conversation-ended', () => {
+        debugState('conversation-ended');
+        conversationActive = false;
+        chatStore.setVoiceStatus(null);
+        // In single-shot mode, the LLM pipeline is still running (thinking → TTS).
+        // Don't clobber islandMode — chat-audio-done will clean up and re-arm wake.
+        if (!get(settingsStore).continuous_conversation && islandMode === 'thinking') {
+          return;
+        }
+        islandMode = 'idle';
+        spiritPhase = 0;
+        characterState.toIdle();
+        armWakeListenerIfEnabled();
+      }),
+
+      // ─── Wake-word linkage (FEAT-C4) ───
+      // Rust emits fn-key-down directly on wake match, so all hotkey logic
+      // (single-shot / continuous / owner transitions) is reused automatically.
+      // This listener is kept for debug logging only.
+      listen<{ score: number }>('wake-word-detected', (e) => {
+        debugState('wake-word-detected', { score: e.payload.score });
+      }),
+      listen<{ error: string }>('wake-listener-error', (e) => {
+        console.warn('[wake] listener error:', e.payload.error);
+      }),
+      listen('conversation-barge-in', () => {
+        debugState('conversation-barge-in');
+        // TTS was cut; clear in-flight UI so the new utterance can render cleanly.
+        chatStore.endStream();
+        chatStore.clearThinkingSteps();
+        chatStore.setVoiceStatus(voiceListeningText());
+        spiritPhase = 0;
+      }),
+
+      // ─── First-launch PA venv bootstrap (~/.pocket-agent/venv) ───
+      listen('venv-setup-ready', () => {
+        chatStore.setVoiceSetup({ voiceSetupState: 'ready', voiceSetupPhase: '', voiceSetupDetail: '' });
+      }),
+      listen('venv-setup-started', () => {
+        chatStore.setVoiceSetup({ voiceSetupState: 'installing', voiceSetupPhase: '', voiceSetupDetail: '' });
+      }),
+      listen<{ phase: string; detail: string }>('venv-setup-progress', (e) => {
+        chatStore.setVoiceSetup({
+          voiceSetupState: 'installing',
+          voiceSetupPhase: e.payload.phase,
+          voiceSetupDetail: e.payload.detail ?? '',
+        });
+      }),
+      listen('venv-setup-done', () => {
+        chatStore.setVoiceSetup({ voiceSetupState: 'ready', voiceSetupPhase: '', voiceSetupDetail: '' });
+      }),
+      listen<{ phase: string; message: string }>('venv-setup-error', (e) => {
+        chatStore.setVoiceSetup({
+          voiceSetupState: 'error',
+          voiceSetupPhase: e.payload.phase,
+          voiceSetupDetail: e.payload.message ?? '',
+        });
       }),
 
       listen('accessibility-permission-required', () => {
@@ -579,7 +847,31 @@
     }
   }
 
+  // Track wake_word_enabled across settings changes so toggling the switch in
+  // SettingsPanel arms / disarms immediately, without requiring a PA restart.
+  let prevWakeEnabled = false;
+  let unsubSettings: (() => void) | null = null;
+
   onMount(async () => {
+    // 启动音效：后端所有服务就绪后播放
+    const playStartSound = async () => {
+      console.log('[app] all services ready, playing start sound');
+      try {
+        const audio = new Audio('app_start.mp3');
+        audio.volume = 0.3;
+        await audio.play();
+      } catch (e) {
+        console.warn('[app] start sound error:', e);
+      }
+    };
+    // 先查状态：如果后端已经 ready，直接播放；否则监听事件
+    const ready = await invoke<boolean>('is_app_ready');
+    if (ready) {
+      playStartSound();
+    } else {
+      listen('app-ready', () => playStartSound()).catch(console.error);
+    }
+    
     await settingsStore.load();
     // Apply double-click mode setting to hotkey listener
     const s = $settingsStore;
@@ -589,12 +881,27 @@
     await restoreWindowPosition();
     await setupListeners();
     await setupWindowPositionSave();
+    prevWakeEnabled = s.wake_word_enabled;
+    unsubSettings = settingsStore.subscribe((cur) => {
+      if (cur.wake_word_enabled === prevWakeEnabled) return;
+      prevWakeEnabled = cur.wake_word_enabled;
+      if (cur.wake_word_enabled) {
+        armWakeListenerIfEnabled();
+      } else {
+        disarmWakeListener();
+      }
+    });
+    await armWakeListenerIfEnabled();
   });
 
   onDestroy(() => {
     unlisten.forEach((fn) => fn());
     if (audioLevelTimer) clearInterval(audioLevelTimer);
     clearBridgeFallbackTimer();
+    if (unsubSettings) unsubSettings();
+    if (conversationActive) {
+      invoke('stop_continuous_conversation').catch(() => {});
+    }
   });
 </script>
 
@@ -626,6 +933,7 @@
       <AvatarIcon
         avatarImage={$settingsStore.avatar_image ?? null}
         spiritPhase={spiritPhase}
+        mediaSkins={mediaSkins}
         on:expand={() => layoutStore.toggle()}
       />
       <DynamicIsland mode={islandMode} audioLevel={audioLevel} />

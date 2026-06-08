@@ -127,11 +127,39 @@ pub struct AppConfig {
     pub window_x: Option<f64>,
     pub window_y: Option<f64>,
     pub avatar_image: Option<String>,
+    pub avatar_gif: Option<String>,
     pub fixed_lang: String,
     pub hotkey_code: i64,
     pub hotkey_name: String,
     pub tts_enabled: bool,
     pub double_click_to_record: bool,
+    pub continuous_conversation: bool,
+    pub silence_timeout_secs: u32,
+    #[serde(default = "default_pause_tolerance_ms")]
+    pub pause_tolerance_ms: u32,
+    #[serde(default = "default_speech_rms_threshold")]
+    pub speech_rms_threshold: f32,
+    pub skip_interrupt_confirmation: bool,
+    #[serde(default)]
+    pub wake_word_enabled: bool,
+    #[serde(default = "default_wake_word_threshold")]
+    pub wake_word_threshold: f32,
+    #[serde(default)]
+    pub speaker_verification_enabled: bool,
+    #[serde(default)]
+    pub last_enrolled_speaker: String,
+}
+
+fn default_pause_tolerance_ms() -> u32 {
+    1500
+}
+
+fn default_speech_rms_threshold() -> f32 {
+    0.015
+}
+
+fn default_wake_word_threshold() -> f32 {
+    0.5
 }
 
 impl Default for AppConfig {
@@ -147,11 +175,21 @@ impl Default for AppConfig {
             window_x: None,
             window_y: None,
             avatar_image: None,
+            avatar_gif: None,
             fixed_lang: String::new(),
             hotkey_code: 60,
             hotkey_name: "RightShift".to_string(),
             tts_enabled: true,
             double_click_to_record: false,
+            continuous_conversation: false,
+            silence_timeout_secs: 5,
+            pause_tolerance_ms: default_pause_tolerance_ms(),
+            speech_rms_threshold: default_speech_rms_threshold(),
+            skip_interrupt_confirmation: true,
+            wake_word_enabled: false,
+            wake_word_threshold: default_wake_word_threshold(),
+            speaker_verification_enabled: false,
+            last_enrolled_speaker: String::new(),
         }
     }
 }
@@ -172,11 +210,21 @@ pub fn load_config(app: &AppHandle) -> AppConfig {
         window_x: store.get("window_x").and_then(|v| v.as_f64()),
         window_y: store.get("window_y").and_then(|v| v.as_f64()),
         avatar_image: store.get("avatar_image").and_then(|v| v.as_str().map(String::from)),
+        avatar_gif: store.get("avatar_gif").and_then(|v| v.as_str().map(String::from)),
         fixed_lang: store.get("fixed_lang").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
         hotkey_code: store.get("hotkey_code").and_then(|v| v.as_i64()).unwrap_or(60),
         hotkey_name: store.get("hotkey_name").and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "RightShift".to_string()),
         tts_enabled: store.get("tts_enabled").and_then(|v| v.as_bool()).unwrap_or(true),
         double_click_to_record: store.get("double_click_to_record").and_then(|v| v.as_bool()).unwrap_or(false),
+        continuous_conversation: store.get("continuous_conversation").and_then(|v| v.as_bool()).unwrap_or(default.continuous_conversation),
+        silence_timeout_secs: store.get("silence_timeout_secs").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(default.silence_timeout_secs),
+        pause_tolerance_ms: store.get("pause_tolerance_ms").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(default.pause_tolerance_ms),
+        speech_rms_threshold: store.get("speech_rms_threshold").and_then(|v| v.as_f64()).map(|f| f as f32).unwrap_or(default.speech_rms_threshold),
+        skip_interrupt_confirmation: store.get("skip_interrupt_confirmation").and_then(|v| v.as_bool()).unwrap_or(default.skip_interrupt_confirmation),
+        wake_word_enabled: store.get("wake_word_enabled").and_then(|v| v.as_bool()).unwrap_or(default.wake_word_enabled),
+        wake_word_threshold: store.get("wake_word_threshold").and_then(|v| v.as_f64()).map(|f| f as f32).unwrap_or(default.wake_word_threshold),
+        speaker_verification_enabled: store.get("speaker_verification_enabled").and_then(|v| v.as_bool()).unwrap_or(default.speaker_verification_enabled),
+        last_enrolled_speaker: store.get("last_enrolled_speaker").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
     }
 }
 
@@ -199,6 +247,8 @@ pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String
     if let Some(y) = config.window_y { store.set("window_y", serde_json::json!(y)); }
     if let Some(img) = &config.avatar_image { store.set("avatar_image", serde_json::json!(img)); }
     else { store.set("avatar_image", serde_json::json!(null)); }
+    if let Some(gif) = &config.avatar_gif { store.set("avatar_gif", serde_json::json!(gif)); }
+    else { store.set("avatar_gif", serde_json::json!(null)); }
     store.set("fixed_lang", serde_json::json!(config.fixed_lang));
     store.set("hotkey_code", serde_json::json!(config.hotkey_code));
     store.set("hotkey_name", serde_json::json!(config.hotkey_name));
@@ -208,6 +258,15 @@ pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String
     }
     store.set("tts_enabled", serde_json::json!(config.tts_enabled));
     store.set("double_click_to_record", serde_json::json!(config.double_click_to_record));
+    store.set("continuous_conversation", serde_json::json!(config.continuous_conversation));
+    store.set("silence_timeout_secs", serde_json::json!(config.silence_timeout_secs));
+    store.set("pause_tolerance_ms", serde_json::json!(config.pause_tolerance_ms));
+    store.set("speech_rms_threshold", serde_json::json!(config.speech_rms_threshold));
+    store.set("skip_interrupt_confirmation", serde_json::json!(config.skip_interrupt_confirmation));
+    store.set("wake_word_enabled", serde_json::json!(config.wake_word_enabled));
+    store.set("wake_word_threshold", serde_json::json!(config.wake_word_threshold));
+    store.set("speaker_verification_enabled", serde_json::json!(config.speaker_verification_enabled));
+    store.set("last_enrolled_speaker", serde_json::json!(config.last_enrolled_speaker));
     store.save().map_err(|e| e.to_string())?;
     Ok(())
 }

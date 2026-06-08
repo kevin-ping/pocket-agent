@@ -2,7 +2,7 @@
 
 > A minimal desktop AI voice companion that lives on your screen — press a key, speak, get things done.
 >
-> **v0.2.5** — see [releases/0.2.5.md](releases/0.2.5.md) for changelog
+> **v0.2.7** — see [releases/0.2.7.md](releases/0.2.7.md) for changelog
 
 Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust**. It connects to a local AI agent gateway ([Hermes](https://github.com/nousresearch/hermes) or [OpenClaw](https://github.com/nousresearch/openclaw)) via SSE streaming for real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
 
@@ -253,6 +253,18 @@ Open **Settings** from the tray menu.
 - **TTS voices** — primary, auxiliary 1, auxiliary 2 (grouped by language)
 - **Fixed language mode** — force LLM to always respond in a specific language
 - **Voice Output** — enable/disable TTS playback. When off, responses are text-only.
+
+- **Wake-word detection** — hands-free activation via speaker recognition + keyword matching (see below)
+
+### Wake-Word Configuration
+
+Pocket Agent supports voice-activated wake words using **speaker embedding + Whisper keyword matching**. The system learns your voice and a custom phrase during enrollment.
+
+Key `.env` settings:
+
+- **`WAKE_STT_MODEL`** (default: `base`) — Whisper model for wake-word transcription (`tiny` / `base` / `small`)
+- **`WAKE_LANGUAGE`** (default: auto-detect) — **Must match your wake phrase language.** If your phrase is English (e.g. "hey mimiku"), set to `en`. If Chinese, set to `zh`. A mismatch causes Whisper to mis-transcribe or drop words. Mixed-language phrases: try omitting to use auto-detection.
+
 - **Audio format** — WAV (lossless) or MP3 (compact)
 
 Settings persist via Tauri store.
@@ -369,3 +381,8 @@ npm run tauri build
 ## License
 
 MIT
+
+### Third-Party Audio
+
+- 提示音：Sound Effect by DRAGON-STUDIO from Pixabay
+- 启动音：Sound Effect by lucadialessandro from Pixabay
