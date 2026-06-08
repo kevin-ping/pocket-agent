@@ -297,6 +297,22 @@ fn worker_loop(
     loop {
         match rx.recv_timeout(Duration::from_millis(TICK_MS)) {
             Ok(Msg::Stop) => {
+                // Flush any buffered speech before stopping.
+                if !utter_buf.is_empty() && accumulated_speech_ms >= MIN_UTTERANCE_MS {
+                    let flushed = std::mem::take(&mut utter_buf);
+                    eprintln!(
+                        "[conv] Stop: flushing {} samples ({}ms speech)",
+                        flushed.len(), accumulated_speech_ms
+                    );
+                    // Don't break yet — let the SttResult handler do it
+                    // for single-shot, or transition to Speaking for continuous.
+                    spawn_transcribe(flushed, utter_sr);
+                    mode = Mode::Transcribing;
+                    emit_state("transcribing");
+                    // Continue the loop so SttResult can be processed.
+                    // A second Stop will be a hard break.
+                    continue;
+                }
                 let _ = app.emit("conversation-ended", ());
                 break;
             },

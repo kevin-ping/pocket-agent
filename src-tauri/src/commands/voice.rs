@@ -434,8 +434,8 @@ pub fn is_continuous_conversation_active() -> bool {
 }
 
 #[tauri::command]
-pub fn start_wake_word_listening(app: AppHandle, threshold: Option<f32>) -> Result<(), String> {
-    crate::voice::sherpa_wake::start_wake_listener(app, threshold.unwrap_or(0.65))
+pub fn start_wake_word_listening(app: AppHandle, threshold: Option<f32>, speaker_name: Option<String>) -> Result<(), String> {
+    crate::voice::sherpa_wake::start_wake_listener(app, threshold.unwrap_or(0.65), speaker_name)
 }
 
 #[tauri::command]

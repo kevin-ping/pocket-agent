@@ -246,7 +246,7 @@
       const MAX_ATTEMPTS = 20;
       for (let i = 0; i < MAX_ATTEMPTS; i++) {
         try {
-          await invoke('start_wake_word_listening', { threshold: s.wake_word_threshold });
+          await invoke('start_wake_word_listening', { threshold: s.wake_word_threshold, speakerName: s.last_enrolled_speaker || 'Me' });
           if (!conversationActive && islandMode === 'idle') {
             islandMode = 'waiting_for_wake';
           }

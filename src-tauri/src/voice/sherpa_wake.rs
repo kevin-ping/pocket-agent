@@ -175,8 +175,9 @@ fn resample_to_16k(mono: &[i16], source_sr: u32) -> Vec<i16> {
 }
 
 /// Load enrolled embedding from disk. Returns None if not found.
-fn load_enrolled_embedding() -> Option<Vec<f32>> {
-    let path = voiceprints_dir().join("Me.bin");
+fn load_enrolled_embedding(name: &str) -> Option<Vec<f32>> {
+    validate_speaker_name(name).ok()?;
+    let path = voiceprints_dir().join(format!("{}.bin", name));
     let bytes = std::fs::read(path).ok()?;
     if bytes.len() % 4 != 0 {
         return None;
@@ -191,7 +192,7 @@ fn load_enrolled_embedding() -> Option<Vec<f32>> {
 
 // ── Start / Stop ─────────────────────────────────────────────────────────────
 
-pub fn start_wake_listener(app: AppHandle, threshold: f32) -> Result<(), String> {
+pub fn start_wake_listener(app: AppHandle, threshold: f32, speaker_name: Option<String>) -> Result<(), String> {
     if WAKE_ACTIVE
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -200,7 +201,8 @@ pub fn start_wake_listener(app: AppHandle, threshold: f32) -> Result<(), String>
     }
 
     // Check that an enrolled voiceprint exists
-    if load_enrolled_embedding().is_none() {
+    let spk = speaker_name.unwrap_or_else(|| "Me".into());
+    if load_enrolled_embedding(&spk).is_none() {
         WAKE_ACTIVE.store(false, Ordering::Release);
         return Err("No enrolled voiceprint. Record a wake word first.".into());
     }
@@ -732,6 +734,7 @@ fn extract_embedding_http(wav_path: &str) -> Result<Vec<f32>, String> {
 /// Saves both voiceprints/{name}.bin (speaker embedding) and
 /// voiceprints/{name}.wake.npy (Mel-spectrogram fingerprint for wake phrase).
 pub fn enroll_speaker(name: &str, wav_path: &str) -> Result<EnrollResult, String> {
+    validate_speaker_name(name)?;
     let duration_s = wav_duration_from_header(wav_path);
 
     let client = reqwest::blocking::Client::builder()
@@ -789,6 +792,7 @@ pub fn enroll_speaker(name: &str, wav_path: &str) -> Result<EnrollResult, String
 /// Training mode: append wake keyword variant via Python STT server.
 /// Unlike enroll (which resets variants), this only appends a new variant.
 pub fn train_speaker(name: &str, wav_path: &str) -> Result<EnrollResult, String> {
+    validate_speaker_name(name)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -942,11 +946,30 @@ pub fn list_speakers() -> Result<Vec<SpeakerInfo>, String> {
     Ok(out)
 }
 
+/// Validate a speaker name: reject path-traversal and non-identifier chars.
+fn validate_speaker_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 64 {
+        return Err("name must be 1-64 chars".into());
+    }
+    if name.contains('.') || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err("invalid name: path separators or dots not allowed".into());
+    }
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        return Err("name must be alphanumeric, underscore, or hyphen".into());
+    }
+    Ok(())
+}
+
 /// Remove an enrolled speaker.
 pub fn remove_speaker(name: &str) -> Result<(), String> {
-    let path = voiceprints_dir().join(format!("{}.bin", name));
-    if !path.exists() {
-        return Err("speaker not found".into());
+    validate_speaker_name(name)?;
+    let base = voiceprints_dir();
+    let path = base.join(format!("{}.bin", name));
+    // Canonicalize both sides to ensure we stay inside voiceprints/
+    let canon = std::fs::canonicalize(&path).map_err(|e| format!("resolve: {}", e))?;
+    let base_canon = std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
+    if !canon.starts_with(&base_canon) {
+        return Err("path escapes voiceprints directory".into());
     }
-    std::fs::remove_file(&path).map_err(|e| format!("remove: {}", e))
+    std::fs::remove_file(&canon).map_err(|e| format!("remove: {}", e))
 }

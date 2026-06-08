@@ -101,6 +101,9 @@
     reader.onload = () => {
       local.avatar_image = reader.result as string;
     };
+    reader.onerror = () => {
+      console.error('[avatar] image read failed');
+    };
     reader.readAsDataURL(file);
   }
 
