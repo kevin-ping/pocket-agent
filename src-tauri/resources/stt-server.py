@@ -892,9 +892,89 @@ async def wake_check(request: Request, file: UploadFile = File(...)):
         pass  # Fixed-path file reused on next call — no cleanup needed.
 
 
+# --- Startup Self-Check -------------------------------------------------------
+
+def _startup_selfcheck() -> list[str]:
+    """Validate all required dependencies and models are available.
+    Returns a list of warnings (non-fatal); raises SystemExit on fatal errors.
+    """
+    import importlib
+    fatal: list[str] = []
+    warnings: list[str] = []
+
+    # 1. Required Python packages (import_name -> pip_name)
+    required_packages = {
+        "numpy":            "numpy<2.0",
+        "faster_whisper":   "faster-whisper>=1.0.0",
+        "onnxruntime":      "onnxruntime>=1.17",
+        "fastapi":          "fastapi>=0.110",
+        "uvicorn":          "uvicorn>=0.27",
+        "scipy":            "scipy>=1.10",
+        "kaldi_native_fbank": "kaldi-native-fbank>=1.0",
+        "edge_tts":         "edge-tts>=6.1",
+    }
+    optional_packages = {
+        "silero_vad":       "silero-vad>=5.1",
+        "pypinyin":         "pypinyin>=0.51",
+    }
+
+    for mod, pip in required_packages.items():
+        try:
+            importlib.import_module(mod)
+        except ImportError:
+            fatal.append(f"MISSING: {pip} (import '{mod}' failed)")
+
+    for mod, pip in optional_packages.items():
+        try:
+            importlib.import_module(mod)
+        except ImportError:
+            warnings.append(f"optional {pip} not installed — some features disabled")
+
+    # 2. Required model files
+    speaker_model_path = MODELS_DIR / "sherpa-speaker" / "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+    if not speaker_model_path.exists():
+        # Attempt auto-download
+        try:
+            _download_speaker_model(speaker_model_path)
+        except Exception as e:
+            fatal.append(f"MODEL MISSING: {speaker_model_path.name} (auto-download failed: {e})")
+
+    # 3. Verify speaker model loads
+    if speaker_model_path.exists():
+        try:
+            ort.InferenceSession(str(speaker_model_path))
+        except Exception as e:
+            fatal.append(f"MODEL CORRUPT: {speaker_model_path.name} ({e}). Delete and restart to re-download.")
+
+    # 4. Verify av (PyAV) — common source of build failures
+    try:
+        importlib.import_module("av")
+    except ImportError:
+        fatal.append("MISSING: av>=12.0.0,<13 (PyAV). If install fails on x86_64 macOS: brew install pkg-config ffmpeg")
+
+    # Report
+    for w in warnings:
+        print(f"[stt-server] ⚠  {w}", file=sys.stderr, flush=True)
+
+    if fatal:
+        print("[stt-server] ✗ STARTUP SELF-CHECK FAILED:", file=sys.stderr, flush=True)
+        for f_err in fatal:
+            print(f"[stt-server]   ✗ {f_err}", file=sys.stderr, flush=True)
+        print("[stt-server] Fix the above issues and restart.", file=sys.stderr, flush=True)
+        raise SystemExit(1)
+    else:
+        print("[stt-server] ✓ self-check passed (all dependencies & models OK)",
+              file=sys.stderr, flush=True)
+
+    return warnings
+
+
 # --- Entrypoint ---------------------------------------------------------------
 
 def main():
+    # Startup self-check: fail fast if dependencies or models are missing.
+    _startup_selfcheck()
+
     parser = argparse.ArgumentParser(description="STT resident HTTP server")
     parser.add_argument("--port", type=int, default=8651)
     parser.add_argument("--model", type=str, default="tiny")
