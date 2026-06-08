@@ -21,3 +21,6 @@ scipy>=1.10
 
 # Chinese pinyin conversion for wake keyword matching.
 pypinyin>=0.51
+
+# Speaker embedding: fbank feature extraction for 3D-Speaker model.
+kaldi-native-fbank>=1.0
