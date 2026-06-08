@@ -490,14 +490,39 @@ async def vad_endpoint(file: UploadFile = File(...)):
 
 _SPEAKER_SESS = None  # lazily loaded
 
+# HuggingFace URL for the 3D-Speaker ONNX model (sherpa-onnx project).
+_SPEAKER_MODEL_HF_URL = (
+    "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main"
+    "/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+)
+
+
+def _download_speaker_model(dest: Path) -> None:
+    """Download the speaker ONNX model from HuggingFace."""
+    import urllib.request
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".onnx.tmp")
+    try:
+        print(f"[stt-server] downloading speaker model to {dest} ...", file=sys.stderr, flush=True)
+        urllib.request.urlretrieve(_SPEAKER_MODEL_HF_URL, str(tmp))
+        tmp.rename(dest)
+        print(f"[stt-server] speaker model downloaded ({dest.stat().st_size // 1024 // 1024} MB)",
+              file=sys.stderr, flush=True)
+    except Exception as e:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"failed to download speaker model: {e}") from e
+
+
 def _get_speaker_session():
-    """Lazy-load the 3dspeaker ONNX model (192-dim embeddings)."""
+    """Lazy-load the 3dspeaker ONNX model (192-dim embeddings).
+    Auto-downloads from HuggingFace on first use if missing.
+    """
     global _SPEAKER_SESS
     if _SPEAKER_SESS is not None:
         return _SPEAKER_SESS
     model_path = MODELS_DIR / "sherpa-speaker" / "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
     if not model_path.exists():
-        return None
+        _download_speaker_model(model_path)
     _SPEAKER_SESS = ort.InferenceSession(str(model_path))
     print(f"[stt-server] speaker model loaded from {model_path}", file=sys.stderr, flush=True)
     return _SPEAKER_SESS
