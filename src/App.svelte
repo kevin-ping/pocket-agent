@@ -590,6 +590,8 @@
               silenceTimeoutSecs: cfg.silence_timeout_secs,
               pauseToleranceMs: cfg.pause_tolerance_ms,
               speechRmsThreshold: cfg.speech_rms_threshold,
+              bargeInRmsThreshold: cfg.barge_in_rms_threshold,
+              bargeInEnabled: cfg.barge_in_enabled,
             })
               .catch((e) => {
                 console.error('[continuous] start failed', e);
@@ -613,6 +615,8 @@
             silenceTimeoutSecs: cfg.silence_timeout_secs,
             pauseToleranceMs: cfg.pause_tolerance_ms,
             speechRmsThreshold: cfg.speech_rms_threshold,
+            bargeInRmsThreshold: cfg.barge_in_rms_threshold,
+            bargeInEnabled: cfg.barge_in_enabled,
             singleShot: true,
           }).catch((e) => {
             console.error('[single-shot] start failed', e);
@@ -731,12 +735,20 @@
       listen<{ error: string }>('wake-listener-error', (e) => {
         console.warn('[wake] listener error:', e.payload.error);
       }),
+      // Wake check in-progress: dot 3 turns red while /wake/check HTTP call is running
+      listen('wake-checking', () => {
+        if (islandMode === 'waiting_for_wake') islandMode = 'verifying_speaker';
+      }),
+      listen('wake-check-done', () => {
+        if (islandMode === 'verifying_speaker') islandMode = 'waiting_for_wake';
+      }),
       listen('conversation-barge-in', () => {
         debugState('conversation-barge-in');
-        // TTS was cut; clear in-flight UI so the new utterance can render cleanly.
-        chatStore.endStream();
+        // TTS was cut; kill typewriter immediately so text stops mid-sentence.
+        chatStore.abortTypewriter();
         chatStore.clearThinkingSteps();
         chatStore.setVoiceStatus(voiceListeningText());
+        characterState.toListening();
         spiritPhase = 0;
       }),
 

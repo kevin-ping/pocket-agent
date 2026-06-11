@@ -649,6 +649,35 @@
         </div>
 
         <div class="field-row">
+          <span class="field-label">{convLabelsLang($settingsStore.ui_lang).bargeInToggle}</span>
+          <div class="toggle-wrap">
+            <input type="checkbox" id="barge-in-enabled" class="toggle-input" bind:checked={local.barge_in_enabled} />
+            <label for="barge-in-enabled" class="toggle-track">
+              <span class="toggle-thumb"></span>
+            </label>
+          </div>
+        </div>
+
+        {#if local.barge_in_enabled}
+        <div class="field-row">
+          <span class="field-label">
+            {convLabelsLang($settingsStore.ui_lang).bargeInSensitivity}
+            <span class="volume-pct">{convLabelsLang($settingsStore.ui_lang).bargeInSensitivitySuffix(local.barge_in_rms_threshold)}</span>
+          </span>
+          <input
+            class="field-slider"
+            type="range"
+            min="0.02"
+            max="0.15"
+            step="0.01"
+            bind:value={local.barge_in_rms_threshold}
+            aria-label={convLabelsLang($settingsStore.ui_lang).bargeInSensitivity}
+          />
+        </div>
+        <p class="hint">{convLabelsLang($settingsStore.ui_lang).bargeInHint}</p>
+        {/if}
+
+        <div class="field-row">
           <span class="field-label">{convLabelsLang($settingsStore.ui_lang).skipInterruptConfirm}</span>
           <div class="toggle-wrap">
             <input type="checkbox" id="skip-interrupt-confirm" class="toggle-input" bind:checked={local.skip_interrupt_confirmation} />

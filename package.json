@@ -1,9 +1,9 @@
 {
   "name": "pocket-agent",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/clear-dev-port.js && vite",
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri"

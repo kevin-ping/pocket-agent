@@ -169,16 +169,16 @@
     50%      { opacity: 1; }
   }
 
-  /* ── Verifying-speaker state: amber pulse across all 3 dots ── */
-  .island-wrap.verifying-speaker .island-bar {
-    border-color: rgba(255, 200, 100, 0.55);
-    animation: verify-pulse 0.7s ease-in-out infinite;
+  /* ── Verifying-speaker state: red breathing on dot 3 (wake check in progress) ── */
+  .island-wrap.verifying-speaker .bar-3 {
+    border-color: rgba(255, 80, 80, 0.55);
+    animation: verify-breathe 1.2s ease-in-out infinite;
   }
-  .island-wrap.verifying-speaker .island-bar .dot {
-    background: rgba(255, 200, 100, 0.85);
+  .island-wrap.verifying-speaker .bar-3 .dot {
+    background: rgba(255, 80, 80, 0.85);
   }
-  @keyframes verify-pulse {
-    0%, 100% { opacity: 0.6; }
+  @keyframes verify-breathe {
+    0%, 100% { opacity: 0.45; }
     50%      { opacity: 1; }
   }
 </style>

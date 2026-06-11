@@ -846,18 +846,17 @@ async def wake_check(request: Request, file: UploadFile = File(...)):
         threshold = float(request.query_params.get("threshold", "0.65"))
         matched = best_score >= threshold and best_name is not None
 
-        # Always transcribe for debugging (shows what was heard regardless of speaker match).
+        # Wake-phrase keyword matching via Whisper transcription (only when speaker matches).
         keyword_match = False
         wake_text_matched = ""
         probe_text = ""
-        try:
-            probe_text = _transcribe_for_wake(tmp_path)
-            print("[stt-server] wake/check transcription:", repr(probe_text), f"speaker_score={best_score:.3f} matched={matched}", file=sys.stderr, flush=True)
-        except Exception as e:
-            print(f"[stt-server] wake transcription error: {e}", file=sys.stderr, flush=True)
-
-        # Wake-phrase keyword matching (only when speaker matches).
         if matched and best_name:
+            try:
+                probe_text = _transcribe_for_wake(tmp_path)
+                print("[stt-server] wake/check transcription:", repr(probe_text), f"speaker_score={best_score:.3f}", file=sys.stderr, flush=True)
+            except Exception as e:
+                print(f"[stt-server] wake transcription error: {e}", file=sys.stderr, flush=True)
+
             wake_txt_path = _wake_text_path(best_name)
             if wake_txt_path.exists():
                 try:
@@ -886,7 +885,9 @@ async def wake_check(request: Request, file: UploadFile = File(...)):
             "speaker": best_name if matched else None,
         }
     except Exception as e:
+        import traceback
         print(f"[stt-server] wake check error: {e}", file=sys.stderr, flush=True)
+        traceback.print_exc(file=sys.stderr)
         return {"speech_detected": False, "speaker_match": False, "score": 0.0, "speaker": None}
     finally:
         pass  # Fixed-path file reused on next call — no cleanup needed.

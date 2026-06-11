@@ -23,6 +23,8 @@ export interface AppSettings {
   silence_timeout_secs: number;
   pause_tolerance_ms: number;
   speech_rms_threshold: number;
+  barge_in_rms_threshold: number;
+  barge_in_enabled: boolean;
   skip_interrupt_confirmation: boolean;
   wake_word_enabled: boolean;
   wake_word_threshold: number;
@@ -52,6 +54,8 @@ const defaults: AppSettings = {
   silence_timeout_secs: 5,
   pause_tolerance_ms: 1500,
   speech_rms_threshold: 0.015,
+  barge_in_rms_threshold: 0.04,
+  barge_in_enabled: true,
   skip_interrupt_confirmation: true,
   wake_word_enabled: false,
   wake_word_threshold: 0.5,

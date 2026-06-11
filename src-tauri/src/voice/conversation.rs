@@ -62,14 +62,20 @@ const SPEECH_RELEASE_RMS_THRESHOLD: f32 = 0.003;
 const RELEASE_NOISE_FLOOR_MARGIN: f32 = 1.2;
 /// Window after TtsStarted during which Speaking-mode VAD is suppressed.
 /// Covers TTS playback ramp-up and the early speaker-echo burst.
-const BARGE_IN_WARMUP_MS: u64 = 800;
+const BARGE_IN_WARMUP_MS: u64 = 600;
 /// Continuous above-threshold speech required to actually fire barge-in.
 /// Filters short TTS-echo bursts (typically < 200 ms) while letting real
 /// sustained speech interrupt.
-const BARGE_IN_MIN_SUSTAINED_MS: u64 = 400;
+const BARGE_IN_MIN_SUSTAINED_MS: u64 = 350;
 /// Louder RMS bar applied in Speaking mode only, so TTS bleed must clear it
 /// continuously for BARGE_IN_MIN_SUSTAINED_MS before interrupting. ~ -28 dBFS.
 const BARGE_IN_RMS_THRESHOLD: f32 = 0.04;
+/// Release threshold for barge-in hysteresis.  Once barge-in accumulation
+/// starts, RMS must drop below this to reset the run counter.  Prevents
+/// syllable gaps in TTS echo (or user speech) from clearing the counter.
+/// Set well below BARGE_IN_RMS_THRESHOLD so normal inter-syllable dips
+/// (which briefly touch 0.035-0.039) don't break the sustained run.
+const BARGE_IN_RELEASE_RMS: f32 = 0.02;
 const SPEAKING_SAFETY_TIMEOUT_S: u64 = 30;
 const TICK_MS: u64 = 100;
 /// Max consecutive empty STT results before auto-ending the conversation.
@@ -142,6 +148,8 @@ pub fn start_conversation(
     pause_tolerance_ms: Option<u64>,
     speech_rms_threshold: Option<f32>,
     single_shot: Option<bool>,
+    barge_in_rms_threshold: Option<f32>,
+    barge_in_enabled: Option<bool>,
 ) -> Result<(), String> {
     if ACTIVE
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -219,6 +227,8 @@ pub fn start_conversation(
                 pause_tolerance,
                 speech_threshold,
                 single_shot.unwrap_or(false),
+                barge_in_rms_threshold.unwrap_or(BARGE_IN_RMS_THRESHOLD),
+                barge_in_enabled.unwrap_or(true),
             );
             // Only clear shared state if our generation still owns the slot.
             // Otherwise, a newer start_conversation has already taken over.
@@ -257,6 +267,8 @@ fn worker_loop(
     pause_tolerance_ms: u64,
     speech_rms_threshold: f32,
     single_shot: bool,
+    barge_in_rms_threshold: f32,
+    barge_in_enabled: bool,
 ) {
     let device_channels = stream_handle.channels.max(1);
     let mut mode = Mode::Listening;
@@ -280,6 +292,13 @@ fn worker_loop(
     // Continuous above-BARGE_IN_RMS_THRESHOLD time in Speaking mode. Resets on
     // any quiet chunk; barge-in fires only when this clears BARGE_IN_MIN_SUSTAINED_MS.
     let mut barge_in_run_ms: u64 = 0;
+    // Hysteresis: once barge-in run starts, RMS must drop below BARGE_IN_RELEASE_RMS
+    // to reset the counter.  Prevents inter-syllable dips from clearing the tally.
+    let mut barge_in_active: bool = false;
+    // When true, the next completed utterance will be verified against enrolled
+    // speakers before sending to STT.  Set on barge-in so a stranger's voice
+    // doesn't hijack the conversation.
+    let mut verify_next_utterance: bool = false;
     // Hysteresis state: once an above-threshold chunk flips this true, we stay
     // "in speech" through vowel valleys until RMS drops below effective_release.
     // Without this, single-threshold VAD misses inter-syllable dips and the
@@ -306,7 +325,7 @@ fn worker_loop(
                     );
                     // Don't break yet — let the SttResult handler do it
                     // for single-shot, or transition to Speaking for continuous.
-                    spawn_transcribe(flushed, utter_sr);
+                    spawn_transcribe(flushed, utter_sr, false, false);
                     mode = Mode::Transcribing;
                     emit_state("transcribing");
                     // Continue the loop so SttResult can be processed.
@@ -405,7 +424,8 @@ fn worker_loop(
                                     silence_run_ms = 0;
                                     mode = Mode::Transcribing;
                                     emit_state("transcribing");
-                                    spawn_transcribe(flushed, utter_sr);
+                                    spawn_transcribe(flushed, utter_sr, verify_next_utterance, barge_in_enabled);
+                                    verify_next_utterance = false;
                                 }
                             } else {
                                 listening_idle_ms += chunk_ms;
@@ -429,18 +449,33 @@ fn worker_loop(
                         listening_speech_peak_rms = 0.0;
                     }
                     Mode::Speaking => {
-                        // Warmup grace: suppress VAD entirely while TTS is
-                        // ramping up so the speaker ramp + early echo can't
-                        // self-trigger barge-in.
+                        if !barge_in_enabled {
+                            // Barge-in disabled by user — skip all VAD during TTS playback.
+                            continue;
+                        }
+                        // Suppress barge-in detection entirely until TTS audio
+                        // has actually started playing.  Before TtsStarted
+                        // arrives the LLM is still thinking — there is nothing
+                        // to barge into, and any high-RMS reading is ambient
+                        // noise or a race with the IPC round-trip.
+                        let tts_active = tts_started_at.is_some();
                         let in_warmup = tts_started_at
                             .map(|t| t.elapsed().as_millis() < BARGE_IN_WARMUP_MS as u128)
                             .unwrap_or(false);
 
-                        if in_warmup {
+                        if !tts_active || in_warmup {
                             barge_in_run_ms = 0;
-                        } else if rms > BARGE_IN_RMS_THRESHOLD {
+                            barge_in_active = false;
+                        } else if rms > barge_in_rms_threshold {
+                            barge_in_active = true;
+                            barge_in_run_ms = barge_in_run_ms.saturating_add(chunk_ms);
+                        } else if barge_in_active && rms > BARGE_IN_RELEASE_RMS {
+                            // Hysteresis: still in active burst, inter-syllable dip
+                            // above release floor — don't reset the counter.
                             barge_in_run_ms = barge_in_run_ms.saturating_add(chunk_ms);
                         } else {
+                            // Below release floor — burst truly ended, reset.
+                            barge_in_active = false;
                             barge_in_run_ms = 0;
                         }
 
@@ -452,15 +487,18 @@ fn worker_loop(
                             eprintln!("[conv] barge-in detected");
 
                             utter_buf.clear();
-                            utter_buf.extend_from_slice(&mono);
+                            // Don't pre-load this chunk — it contains TTS echo.
+                            // The user must continue speaking into the fresh buffer.
                             utter_sr = sr;
-                            accumulated_speech_ms = chunk_ms;
+                            accumulated_speech_ms = 0;
                             silence_run_ms = 0;
                             listening_idle_ms = 0;
                             speaking_since = None;
                             tts_started_at = None;
                             barge_in_run_ms = 0;
-                            in_speech_burst = true;
+                            barge_in_active = false;
+                            in_speech_burst = false;
+                            verify_next_utterance = true;
                             mode = Mode::Listening;
                             emit_state("listening");
                         }
@@ -502,7 +540,13 @@ fn worker_loop(
                     }
                     mode = Mode::Speaking;
                     speaking_since = Some(Instant::now());
-                    tts_started_at = Some(Instant::now());
+                    // Do NOT set tts_started_at here — TTS won't play for
+                    // several seconds while the LLM thinks.  Starting the
+                    // warmup now means it expires long before audio actually
+                    // reaches the speakers, leaving a window where mic echo
+                    // can trigger a false barge-in.  The real warmup is set by
+                    // Msg::TtsStarted, which fires only when audio begins.
+                    tts_started_at = None;
                     barge_in_run_ms = 0;
                     in_speech_burst = false;
                     emit_state("speaking");
@@ -536,11 +580,10 @@ fn worker_loop(
                     speaking_since = Some(Instant::now());
                     emit_state("speaking");
                 }
-                // Reset warmup window: covers both the first turn (when STT
-                // already opened the Speaking window) and any subsequent
-                // chunk-by-chunk TTS handoffs.
+                // Reset warmup window for the new chunk.  Do NOT reset
+                // barge_in_run_ms — if the user has been speaking across a
+                // chunk boundary we want to honour that accumulation.
                 tts_started_at = Some(Instant::now());
-                barge_in_run_ms = 0;
             }
 
             Ok(Msg::TtsDone) => {
@@ -587,14 +630,59 @@ fn worker_loop(
     eprintln!("[conv] worker exit");
 }
 
-fn spawn_transcribe(samples: Vec<i16>, sample_rate: u32) {
+fn spawn_transcribe(samples: Vec<i16>, sample_rate: u32, verify_speaker: bool, barge_in_enabled: bool) {
     std::thread::Builder::new()
         .name("conv-transcribe".into())
         .spawn(move || {
-            let result = match write_wav(&samples, sample_rate, CONVERSATION_WAV_PATH) {
-                Ok(()) => transcribe(CONVERSATION_WAV_PATH),
-                Err(e) => Err(e),
+            let wav_result = write_wav(&samples, sample_rate, CONVERSATION_WAV_PATH);
+            let wav_path = match wav_result {
+                Ok(()) => CONVERSATION_WAV_PATH,
+                Err(e) => {
+                    let _ = send_msg(Msg::SttResult(Err(e)));
+                    return;
+                }
             };
+
+            // If this utterance came right after a barge-in and the user has
+            // enrolled speakers, verify the voice before transcribing.
+            // Only runs when barge-in toggle is on.
+            if verify_speaker && barge_in_enabled {
+                let vp_dir = crate::voice::sherpa_wake::voiceprints_dir();
+                let has_speakers = vp_dir.exists() && std::fs::read_dir(&vp_dir)
+                    .map(|mut d| d.next().is_some())
+                    .unwrap_or(false);
+                if has_speakers {
+                    eprintln!("[conv] barge-in: verifying speaker...");
+                    match crate::voice::sherpa_wake::verify_speaker(wav_path, None) {
+                        Ok(vr) => {
+                            if vr.verified {
+                                eprintln!(
+                                    "[conv] barge-in speaker ✓ {} ({:.0}% confidence)",
+                                    vr.speaker.as_deref().unwrap_or("?"),
+                                    vr.confidence * 100.0
+                                );
+                            } else {
+                                eprintln!(
+                                    "[conv] barge-in speaker ✗ rejected (best match: {:.0}% — threshold: 70%)",
+                                    vr.confidence * 100.0
+                                );
+                                let _ = send_msg(Msg::SttResult(Ok(SttResult {
+                                    text: String::new(),
+                                    language: String::new(),
+                                })));
+                                return;
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[conv] barge-in speaker verify error: {} — allowing", e);
+                        }
+                    }
+                } else {
+                    eprintln!("[conv] barge-in: no enrolled speakers, skipping verification");
+                }
+            }
+
+            let result = transcribe(wav_path);
             let _ = send_msg(Msg::SttResult(result));
         })
         .ok();

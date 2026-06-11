@@ -70,7 +70,7 @@ const SPEECH_END_SILENCE_MS: u64 = 1500;
 // ── Paths ────────────────────────────────────────────────────────────────────
 
 
-fn voiceprints_dir() -> std::path::PathBuf {
+pub fn voiceprints_dir() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
         .join(".pocket-agent")
@@ -443,8 +443,10 @@ fn wake_http_worker_loop(
                             buffer_full,
                             speech_ended,
                         );
+                        let _ = app.emit("wake-checking", ());
                         match wake_http_check(&samples_to_send, TARGET_SR, 1, threshold) {
                             Ok(result) => {
+                                let _ = app.emit("wake-check-done", ());
                                 if true {
                                     eprintln!("[wake] check: speaker={} keyword={} score={:.3} text=\"{}\"", result.speaker_match, result.keyword_match, result.score, result.keyword_text);
                                 }
@@ -461,6 +463,7 @@ fn wake_http_worker_loop(
                                 }
                             }
                             Err(e) => {
+                                let _ = app.emit("wake-check-done", ());
                                 eprintln!("[wake] HTTP check failed: {}", e);
                             }
                         }
@@ -487,8 +490,10 @@ fn wake_http_worker_loop(
                         samples_to_send.len(),
                         samples_to_send.len() as f32 / TARGET_SR as f32,
                     );
+                    let _ = app.emit("wake-checking", ());
                     match wake_http_check(&samples_to_send, TARGET_SR, 1, threshold) {
                         Ok(result) => {
+                            let _ = app.emit("wake-check-done", ());
                             if true {
                                 eprintln!("[wake] flush: speaker={} keyword={} score={:.3} text=\"{}\"", result.speaker_match, result.keyword_match, result.score, result.keyword_text);
                             }
@@ -504,6 +509,7 @@ fn wake_http_worker_loop(
                             }
                         }
                         Err(e) => {
+                            let _ = app.emit("wake-check-done", ());
                             eprintln!("[wake] flush HTTP check failed: {}", e);
                         }
                     }

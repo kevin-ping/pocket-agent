@@ -252,6 +252,17 @@ function createChatStore() {
     clearThinkingSteps: () =>
       update((s) => ({ ...s, thinkingSteps: [] })),
 
+    /** Immediately stop the typewriter, dropping any unflushed pending chars.
+     *  Used on barge-in so the user sees only what was already displayed. */
+    abortTypewriter: () => {
+      if (typewriterTimer) { clearInterval(typewriterTimer); typewriterTimer = null; }
+      pendingChars = [];
+      streamEnding = false;
+      trailingNewlines = 0;
+      resetCmdState();
+      update((s) => ({ ...s, isStreaming: false }));
+    },
+
     /** Set or clear the voice-mode status line (e.g. "🎤 听着…"). Pass null to clear. */
     setVoiceStatus: (text: string | null) =>
       update((s) => (s.voiceStatus === text ? s : { ...s, voiceStatus: text })),

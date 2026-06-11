@@ -400,6 +400,8 @@ pub fn start_continuous_conversation(
     pause_tolerance_ms: Option<u64>,
     speech_rms_threshold: Option<f32>,
     single_shot: Option<bool>,
+    barge_in_rms_threshold: Option<f32>,
+    barge_in_enabled: Option<bool>,
 ) -> Result<(), String> {
     crate::voice::conversation::start_conversation(
         app,
@@ -407,6 +409,8 @@ pub fn start_continuous_conversation(
         pause_tolerance_ms,
         speech_rms_threshold,
         single_shot,
+        barge_in_rms_threshold,
+        barge_in_enabled,
     )
 }
 

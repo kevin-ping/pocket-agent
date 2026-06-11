@@ -1,6 +1,6 @@
 {
   "productName": "Pocket Agent",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "identifier": "com.hermes.pocket-agent",
   "build": {
     "beforeDevCommand": "npm run dev",

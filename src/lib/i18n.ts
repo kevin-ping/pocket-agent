@@ -313,6 +313,10 @@ export interface ConversationLabels {
   pauseToleranceMsSuffix: (n: number) => string;
   micSensitivity: string;
   micSensitivitySuffix: (v: number) => string;
+  bargeInSensitivity: string;
+  bargeInSensitivitySuffix: (v: number) => string;
+  bargeInToggle: string;
+  bargeInHint: string;
   voiceListening: string;
   /** First-launch venv bootstrap header, e.g. "🛠 语音环境准备中…" */
   voiceSetupInstalling: string;
@@ -354,6 +358,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     pauseToleranceMsSuffix: (ms) => `${fmtSeconds(ms)}秒`,
     micSensitivity: '麦克风灵敏度',
     micSensitivitySuffix: (v) => v <= 0.008 ? '高(离麦克风远)' : v <= 0.014 ? '中' : '低(离麦克风近/嘈杂)',
+    bargeInSensitivity: '打断灵敏度',
+    bargeInSensitivitySuffix: (v) => v.toFixed(2) + ' ' + (v <= 0.03 ? '高(容易打断)' : v <= 0.06 ? '中' : '低(不易打断)'),
+    bargeInToggle: '允许打断回答',
+    bargeInHint: '麦克风听到持续声音就会打断AI回复。数值越大，需要越大声才能打断。笔记本内置麦克风建议 0.04；台式机/外接音箱建议 0.06~0.08；如果频繁误触发请调高。',
     voiceListening: '听着…',
     voiceSetupInstalling: '🛠 语音环境准备中（首次启动约 3-10 分钟）',
     voiceSetupPhase: (p) => p === 'creating-venv' ? '创建虚拟环境' : p === 'upgrading-pip' ? '升级 pip' : p === 'installing-deps' ? '下载安装依赖' : p,
@@ -386,6 +394,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     pauseToleranceMsSuffix: (ms) => `${fmtSeconds(ms)}s`,
     micSensitivity: 'Mic Sensitivity',
     micSensitivitySuffix: (v) => v <= 0.008 ? 'High (far from mic)' : v <= 0.014 ? 'Medium' : 'Low (close/noisy)',
+    bargeInSensitivity: 'Interrupt Sensitivity',
+    bargeInSensitivitySuffix: (v) => v.toFixed(2) + ' ' + (v <= 0.03 ? 'High (easy)' : v <= 0.06 ? 'Medium' : 'Low (hard)'),
+    bargeInToggle: 'Allow Interrupting Response',
+    bargeInHint: 'Sustained sound above this threshold interrupts AI speech. Higher = harder to interrupt. Laptop built-in mic: 0.04. Desktop / external speakers: 0.06–0.08. Raise if false triggers occur.',
     voiceListening: 'Listening…',
     voiceSetupInstalling: '🛠 Setting up voice environment (first launch, 3-10 min)',
     voiceSetupPhase: (p) => p === 'creating-venv' ? 'creating virtualenv' : p === 'upgrading-pip' ? 'upgrading pip' : p === 'installing-deps' ? 'downloading dependencies' : p,
@@ -418,6 +430,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     pauseToleranceMsSuffix: (ms) => `${fmtSeconds(ms)}秒`,
     micSensitivity: 'マイク感度',
     micSensitivitySuffix: (v) => v <= 0.008 ? '高（マイクから遠い）' : v <= 0.014 ? '中' : '低（近い/騒がしい）',
+    bargeInSensitivity: '割り込み感度',
+    bargeInSensitivitySuffix: (v) => v.toFixed(2) + ' ' + (v <= 0.03 ? '高（割り込みやすい）' : v <= 0.06 ? '中' : '低（割り込みにくい）'),
+    bargeInToggle: '割り込み許可',
+    bargeInHint: 'マイクが一定以上の音を検出するとAIの発話を中断します。数値が大きいほど中断しにくくなります。ノートPC内蔵マイク：0.04、デスクトップ/外部スピーカー：0.06〜0.08。誤検出が多い場合は上げてください。',
     voiceListening: '聞いています…',
     voiceSetupInstalling: '🛠 音声環境を準備中（初回起動：3-10 分）',
     voiceSetupPhase: (p) => p === 'creating-venv' ? '仮想環境を作成中' : p === 'upgrading-pip' ? 'pip をアップグレード中' : p === 'installing-deps' ? '依存関係をダウンロード中' : p,
@@ -450,6 +466,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     pauseToleranceMsSuffix: (ms) => `${fmtSeconds(ms)}초`,
     micSensitivity: '마이크 감도',
     micSensitivitySuffix: (v) => v <= 0.008 ? '높음 (마이크에서 멀리)' : v <= 0.014 ? '중간' : '낮음 (가깝거나 시끄러움)',
+    bargeInSensitivity: '인터럽트 감도',
+    bargeInSensitivitySuffix: (v) => v.toFixed(2) + ' ' + (v <= 0.03 ? '높음 (쉽게)' : v <= 0.06 ? '중간' : '낮음 (어려움)'),
+    bargeInToggle: '인터럽트 허용',
+    bargeInHint: '마이크가 일정 이상의 소리를 감지하면 AI 응답을 중단합니다. 숫자가 클수록 중단하기 어렵습니다. 노트북 내장 마이크: 0.04, 데스크톱/외부 스피커: 0.06~0.08. 오탐지가 잦으면 값을 올리세요.',
     voiceListening: '듣는 중…',
     voiceSetupInstalling: '🛠 음성 환경 준비 중 (첫 실행, 3-10분)',
     voiceSetupPhase: (p) => p === 'creating-venv' ? '가상 환경 생성 중' : p === 'upgrading-pip' ? 'pip 업그레이드 중' : p === 'installing-deps' ? '의존성 다운로드 중' : p,
@@ -482,6 +502,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     pauseToleranceMsSuffix: (ms) => `${fmtSeconds(ms)}s`,
     micSensitivity: 'Sensibilité du micro',
     micSensitivitySuffix: (v) => v <= 0.008 ? 'Élevée (loin du micro)' : v <= 0.014 ? 'Moyenne' : 'Faible (proche/bruyant)',
+    bargeInSensitivity: 'Sensibilité d\'interruption',
+    bargeInSensitivitySuffix: (v) => v.toFixed(2) + ' ' + (v <= 0.03 ? 'Élevée (facile d\'interrompre)' : v <= 0.06 ? 'Moyenne' : 'Faible (difficile d\'interrompre)'),
+    bargeInToggle: 'Autoriser l\'interruption',
+    bargeInHint: 'Un son soutenu au-dessus de ce seuil interrompt la réponse IA. Plus élevé = plus difficile d\'interrompre. Micro intégré : 0.04. Enceintes externes : 0.06–0.08. Augmentez en cas de faux déclenchements.',
     voiceListening: 'À l\'écoute…',
     voiceSetupInstalling: '🛠 Préparation de l\'environnement vocal (premier lancement, 3-10 min)',
     voiceSetupPhase: (p) => p === 'creating-venv' ? 'création de l\'environnement virtuel' : p === 'upgrading-pip' ? 'mise à jour de pip' : p === 'installing-deps' ? 'téléchargement des dépendances' : p,
@@ -514,6 +538,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     pauseToleranceMsSuffix: (ms) => `${fmtSeconds(ms)}s`,
     micSensitivity: 'Mikrofonempfindlichkeit',
     micSensitivitySuffix: (v) => v <= 0.008 ? 'Hoch (weit vom Mikrofon)' : v <= 0.014 ? 'Mittel' : 'Niedrig (nah/laut)',
+    bargeInSensitivity: 'Unterbrechungsempfindlichkeit',
+    bargeInSensitivitySuffix: (v) => v.toFixed(2) + ' ' + (v <= 0.03 ? 'Hoch (leicht zu unterbrechen)' : v <= 0.06 ? 'Mittel' : 'Niedrig (schwer zu unterbrechen)'),
+    bargeInToggle: 'Unterbrechung erlauben',
+    bargeInHint: 'Anhaltender Schall über diesem Schwellenwert unterbricht die AI-Antwort. Höher = schwerer zu unterbrechen. Laptop-Mikro: 0.04. Desktop/externe Lautsprecher: 0.06–0.08. Bei Fehlauslösungen erhöhen.',
     voiceListening: 'Höre zu…',
     voiceSetupInstalling: '🛠 Sprachumgebung wird eingerichtet (Erststart, 3-10 Min)',
     voiceSetupPhase: (p) => p === 'creating-venv' ? 'erstelle virtuelle Umgebung' : p === 'upgrading-pip' ? 'aktualisiere pip' : p === 'installing-deps' ? 'lade Abhängigkeiten' : p,
@@ -546,6 +574,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     pauseToleranceMsSuffix: (ms) => `${fmtSeconds(ms)}s`,
     micSensitivity: 'Sensibilidad del micrófono',
     micSensitivitySuffix: (v) => v <= 0.008 ? 'Alta (lejos del micrófono)' : v <= 0.014 ? 'Media' : 'Baja (cerca/ruidoso)',
+    bargeInSensitivity: 'Sensibilidad de interrupción',
+    bargeInSensitivitySuffix: (v) => v.toFixed(2) + ' ' + (v <= 0.03 ? 'Alta (fácil interrumpir)' : v <= 0.06 ? 'Media' : 'Baja (difícil interrumpir)'),
+    bargeInToggle: 'Permitir interrumpir',
+    bargeInHint: 'Un sonido sostenido por encima de este umbral interrumpe la respuesta de la IA. Más alto = más difícil interrumpir. Micrófono integrado: 0.04. Altavoces externos: 0.06–0.08. Aumente si hay falsos disparos.',
     voiceListening: 'Escuchando…',
     voiceSetupInstalling: '🛠 Configurando entorno de voz (primer arranque, 3-10 min)',
     voiceSetupPhase: (p) => p === 'creating-venv' ? 'creando entorno virtual' : p === 'upgrading-pip' ? 'actualizando pip' : p === 'installing-deps' ? 'descargando dependencias' : p,
