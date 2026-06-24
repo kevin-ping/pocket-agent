@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio, Child};
 use std::io::BufRead;
 use std::sync::Mutex;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 /// Store the STT server child process so we can kill it when PA exits.
 static STT_CHILD: Mutex<Option<Child>> = Mutex::new(None);
@@ -195,6 +195,10 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
         eprintln!("[stt] resident server already running on :8651");
         APP_READY.store(true, std::sync::atomic::Ordering::Release);
         if let Some(h) = app_handle.as_ref() {
+            if let Some(window) = h.get_webview_window("main") {
+                let _ = window.show();
+                eprintln!("[stt] window shown (existing server)");
+            }
             let _ = h.emit("app-ready", ());
         }
         return;
@@ -271,6 +275,10 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
                             eprintln!("[stt] resident server healthy on :8651");
             APP_READY.store(true, std::sync::atomic::Ordering::Release);
                             if let Some(h) = probe_handle.as_ref() {
+                                if let Some(window) = h.get_webview_window("main") {
+                                    let _ = window.show();
+                                    eprintln!("[stt] window shown (new server)");
+                                }
                                 let _ = h.emit("app-ready", ());
                             }
                             return;

@@ -165,7 +165,11 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                     let remaining = AUDIO_QUEUE_DEPTH.load(Ordering::SeqCst);
                     eprintln!("[AUDIO] done (gen={}, remaining={})", prep.generation, remaining);
                     if !prep.silent && prep.generation == AUDIO_GENERATION.load(Ordering::SeqCst) && remaining == 0 {
+                        eprintln!("[AUDIO] emitting chat-audio-done (gen={})", prep.generation);
                         let _ = prep.app.emit("chat-audio-done", ());
+                    } else {
+                        eprintln!("[AUDIO] skip chat-audio-done (silent={} gen={} audio_gen={} remaining={})",
+                            prep.silent, prep.generation, AUDIO_GENERATION.load(Ordering::SeqCst), remaining);
                     }
                 }
             })
@@ -1074,27 +1078,40 @@ fn strip_all_cmd_tags(text: &str) -> String {
 }
 
 /// Extract [CMD:...] tags from text, execute them, return text with tags removed.
+///
+/// Commands are executed in detached threads to avoid blocking the async runtime.
+/// std::process::Command::output() waits for stdout/stderr pipes to close - GUI apps
+/// like Chrome inherit the pipe write-end and never close it, which blocks the tokio
+/// worker thread and freezes the UI (chat-stream-end never emits, PA stuck in SPEAKING).
 fn execute_commands(text: &str) -> String {
     let re = regex::Regex::new(r#"\[CMD:([^\]]+)\]"#).unwrap();
 
     for cap in re.captures_iter(text) {
-        let cmd_str = &cap[1];
-        eprintln!("[LOCAL_CMD] executing: {}", cmd_str);
+        let cmd_str = cap[1].to_string();
+        eprintln!("[LOCAL_CMD] dispatching: {}", cmd_str);
 
-        let result = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd_str)
-            .output();
+        // Spawn a detached thread so .output() cannot block the async runtime.
+        if let Err(e) = std::thread::Builder::new()
+            .name("local-cmd".to_string())
+            .spawn(move || {
+                let result = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd_str)
+                    .output();
 
-        match result {
-            Ok(output) => {
-                if output.status.success() {
-                    eprintln!("[LOCAL_CMD] OK");
-                } else {
-                    eprintln!("[LOCAL_CMD] exit={}: {}", output.status, String::from_utf8_lossy(&output.stderr));
+                match result {
+                    Ok(output) => {
+                        if output.status.success() {
+                            eprintln!("[LOCAL_CMD] OK: {}", cmd_str);
+                        } else {
+                            eprintln!("[LOCAL_CMD] exit={}: {}", output.status, String::from_utf8_lossy(&output.stderr));
+                        }
+                    }
+                    Err(e) => eprintln!("[LOCAL_CMD] error: {}", e),
                 }
-            }
-            Err(e) => eprintln!("[LOCAL_CMD] error: {}", e),
+            })
+        {
+            eprintln!("[LOCAL_CMD] thread spawn failed: {}", e);
         }
     }
 

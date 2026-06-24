@@ -865,15 +865,16 @@
   let unsubSettings: (() => void) | null = null;
 
   onMount(async () => {
-    // 启动音效：后端所有服务就绪后播放
+// 启动音效 + 窗口显示：后端所有服务就绪后才显示窗口并播放声效
     const playStartSound = async () => {
-      console.log('[app] all services ready, playing start sound');
+      console.log("[app] all services ready, showing window + playing start sound");
+      try { await appWindow.show(); } catch (e) { console.warn("[app] show failed:", e); }
       try {
-        const audio = new Audio('app_start.mp3');
+        const audio = new Audio("app_start.mp3");
         audio.volume = 0.3;
         await audio.play();
       } catch (e) {
-        console.warn('[app] start sound error:', e);
+        console.warn("[app] start sound error:", e);
       }
     };
     // 先查状态：如果后端已经 ready，直接播放；否则监听事件

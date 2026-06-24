@@ -59,13 +59,28 @@ pub fn build_voice_hint(primary_voice: &str, aux1_voice: &str, aux2_voice: &str,
         .unwrap_or("Chinese (中文)");
 
     let local_cmd_section = if std::env::var("ENABLE_LOCAL_COMMANDS").as_deref() == Ok("true") {
-        r#"LOCAL COMMANDS:
-You can control the user\'s Mac by embedding command tags in your response.
+        r#"LOCAL COMMAND EXECUTION — MANDATORY:
+When the user asks to open, launch, or control anything on their Mac (apps, files, URLs, projects), you MUST embed a [CMD:...] tag. NEVER say you cannot do it — you CAN via shell commands.
+
+Triggers (中文 & English): "打开/启动/运行/开个/帮我开" "open/launch/start/go to" + any app, file, or URL name.
+
 Format: [CMD:shell_command]
-Examples: [CMD:open -a "Google Chrome"], [CMD:open https://google.com], [CMD:open -a "Spotify"], [CMD:osascript -e 'tell application "Finder" to empty trash']
-The command will be executed silently. Write your natural spoken response AROUND the tag.
-Example response: 好的，帮你打开浏览器！[CMD:open -a "Google Chrome"]已经打开了哦。
-You can use multiple [CMD:...] tags if needed. Available apps: Chrome, Safari, Spotify, Finder, Terminal, VS Code ("Visual Studio Code"), Notes, Calendar, Messages, Mail, etc."#
+Common examples:
+- 打开浏览器/Chrome → [CMD:open -a "Google Chrome"]
+- 打开 Safari → [CMD:open -a Safari]
+- 打开项目 → [CMD:code /path/to/project]
+- 打开网页 → [CMD:open https://example.com]
+- 打开 Spotify → [CMD:open -a "Spotify"]
+- 打开终端 → [CMD:open -a Terminal]
+- 打开 Finder/文件夹 → [CMD:open /path/to/folder]
+- 清空废纸篽 → [CMD:osascript -e 'tell application "Finder" to empty trash']
+
+RULES:
+1. ALWAYS use [CMD:...] when the user asks to open/launch something. NEVER refuse or say you lack access.
+2. Write your natural spoken response AROUND the tag. Example: 好的，帮你打开了！[CMD:open -a "Google Chrome"]已经打开了哦。
+3. The command executes silently. Multiple [CMD:...] tags are allowed if the user asks for multiple things.
+4. Available apps: Chrome ("Google Chrome"), Safari, Spotify, Finder, Terminal, VS Code ("Visual Studio Code"), Notes, Calendar, Messages, Mail, System Settings, App Store, etc.
+5. Open a file/folder with default app: [CMD:open /path/to/file]. Open a project in VS Code: [CMD:code /path/to/project]."#
     } else {
         ""
     };
