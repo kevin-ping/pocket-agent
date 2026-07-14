@@ -52,6 +52,8 @@ static AUDIO_SENDER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sende
 static AUDIO_GENERATION: AtomicU64 = AtomicU64::new(0);
 static AUDIO_QUEUE_DEPTH: AtomicUsize = AtomicUsize::new(0);
 static TURN_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Tracks the generation of the last non-silent audio for chat-audio-done emit.
+static LAST_NON_SILENT_GEN: AtomicU64 = AtomicU64::new(0);
 
 fn current_audio_sink() -> &'static Mutex<Option<std::sync::Arc<rodio::Sink>>> {
     CURRENT_AUDIO_SINK.get_or_init(|| Mutex::new(None))
@@ -84,6 +86,12 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                                 eprintln!("[TTS-GEN] gen={} chars={} ok={}", generation, text.chars().count(), tts_ok);
 
                                 let text_len = text.chars().count();
+
+                                // Track last non-silent audio generation for chat-audio-done emit
+                                if !silent {
+                                    LAST_NON_SILENT_GEN.store(generation, Ordering::SeqCst);
+                                }
+
                                 let _ = prep_tx.send(PreparedAudio {
                                     tts_file,
                                     text,
@@ -164,12 +172,21 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                     audio_queue_release(prep.generation);
                     let remaining = AUDIO_QUEUE_DEPTH.load(Ordering::SeqCst);
                     eprintln!("[AUDIO] done (gen={}, remaining={})", prep.generation, remaining);
-                    if !prep.silent && prep.generation == AUDIO_GENERATION.load(Ordering::SeqCst) && remaining == 0 {
+
+                    // Emit chat-audio-done when the last non-silent audio finishes.
+                    // This ensures we emit even if the last audio was not the last in queue
+                    // (e.g., status announcements after the main response).
+                    let is_last_non_silent = !prep.silent && 
+                        prep.generation == LAST_NON_SILENT_GEN.load(Ordering::SeqCst) &&
+                        prep.generation == AUDIO_GENERATION.load(Ordering::SeqCst);
+
+                    if is_last_non_silent {
                         eprintln!("[AUDIO] emitting chat-audio-done (gen={})", prep.generation);
                         let _ = prep.app.emit("chat-audio-done", ());
                     } else {
-                        eprintln!("[AUDIO] skip chat-audio-done (silent={} gen={} audio_gen={} remaining={})",
-                            prep.silent, prep.generation, AUDIO_GENERATION.load(Ordering::SeqCst), remaining);
+                        eprintln!("[AUDIO] skip chat-audio-done (silent={} gen={} audio_gen={} remaining={} last_non_silent={})",
+                            prep.silent, prep.generation, AUDIO_GENERATION.load(Ordering::SeqCst), remaining,
+                            LAST_NON_SILENT_GEN.load(Ordering::SeqCst));
                     }
                 }
             })
@@ -456,9 +473,31 @@ fn split_sentences(buffer: &str) -> (Vec<String>, String) {
     let chars: Vec<char> = buffer.chars().collect();
     let mut last_split = 0;
 
+    // Track whether we are inside a [CMD:...] tag so we don't split mid-tag.
+    // URL periods inside CMD tags would otherwise be treated as sentence ends.
+    let mut in_cmd_tag = false;
+
     let mut i = 0;
     while i < chars.len() {
         let ch = chars[i];
+
+        // Detect [CMD: tag start and ] tag end
+        if !in_cmd_tag {
+            // Check for "[CMD:" prefix
+            let remaining_str: String = chars[i..].iter().collect();
+            if remaining_str.starts_with("[CMD:") {
+                in_cmd_tag = true;
+                // Skip past "[CMD:"
+                i += 5;
+                continue;
+            }
+        } else {
+            if ch == ']' {
+                in_cmd_tag = false;
+            }
+            i += 1;
+            continue;
+        }
 
         // Check if this is a sentence-ending char
         let is_end = matches!(ch, '。' | '！' | '？' | '!' | '?' | '\n');
@@ -860,16 +899,28 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
     let speak_app = app.clone();
     let speak_format = "wav".to_string();
 
+    // Track the first sentence's voice so subsequent sentences use the same voice.
+    // This ensures consistency: if sentence 1 is Chinese, sentence 2 (even if English URL)
+    // will still be read with the Chinese voice.
+    let sentence_voice: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
     let on_sentence: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>> = if tts_on {
         Some(std::sync::Arc::new(move |sentence: &str| {
-            // TTS only: generate and play audio. speaking-start is emitted
-            // in send_message() before run_hermes_turn() to guarantee ordering.
-            // speak_internal handles queue waiting (30s blocking) so no sentence
-            // is dropped — it just waits for the pipeline to catch up.
-            let emotion = detect_emotion(sentence);
+            // Strip [CMD:...] tags — they won't appear in chat box, so don't read them.
             let clean_sentence = strip_all_cmd_tags(sentence);
             if clean_sentence.is_empty() { return; }
-            let voice = select_voice(&clean_sentence, &primary, &aux1, &aux2, &fixed, &user_lang);
+
+            // Use first sentence's voice for all subsequent sentences.
+            // Only detect voice on the first non-empty sentence.
+            let voice = {
+                let mut guard = sentence_voice.lock().unwrap();
+                if guard.is_none() {
+                    *guard = Some(select_voice(&clean_sentence, &primary, &aux1, &aux2, &fixed, &user_lang));
+                }
+                guard.clone().unwrap()
+            };
+
+            let emotion = detect_emotion(&clean_sentence);
             speak_internal(&speak_app, &clean_sentence, &emotion, &voice, &speak_format, speak_generation, false);
         }))
     } else {
