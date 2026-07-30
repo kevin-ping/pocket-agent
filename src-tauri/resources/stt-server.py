@@ -121,13 +121,63 @@ def _extract_mfcc_sequence(samples: np.ndarray, sr: int = 16000) -> np.ndarray:
     return np.array([], dtype=np.float32).reshape(0, 0)
 
 
+# ── Whisper 幻觉输出过滤 (借鉴白龙马 whisper_server.py) ──
+_HALLUCINATION_FRAGMENTS = [
+    # 中文视频平台创作者习语（Whisper 对这类说话极易幻觉）
+    "字幕", "翻译", "感谢收看", "感谢观看", "谢谢收看", "谢谢观看",
+    "请订阅", "请关注", "点赞", "订阅", "转发", "打赏",
+    "作词", "作曲", "制作人", "出品", "版权",
+    "明镜", "栏目", "不吝",
+    # 英文常见幻觉
+    "subtitles by", "thank you for watching", "please subscribe",
+    "amara.org", "translated by", "music:", "♪", "♫", "♬", "🎵", "🎶",
+]
+
+_HALLU_RE_PUNCT = re.compile(r'^[\s\W]+$')
+_HALLU_RE_TIMESTAMP = re.compile(r'^[\d\s:.,。，…]+$')
+_HALLU_RE_SPLIT = re.compile(r'[,，、。.！!？?\s]+')
+
+
+def _is_hallucination(text: str) -> bool:
+    """检测 Whisper 常见幻觉输出，返回 True 表示应当过滤。"""
+    if not text:
+        return True
+    t = text.strip()
+    if not t:
+        return True
+    # 纯标点或特殊字符
+    if _HALLU_RE_PUNCT.match(t):
+        return True
+    # 过短（单个汉字/字母/符号）
+    if len(t) <= 1:
+        return True
+    # 包含已知幻觉片段（不区分大小写）
+    tl = t.lower()
+    for frag in _HALLUCINATION_FRAGMENTS:
+        if frag.lower() in tl:
+            return True
+    # 单字符重复（如"啊啊啊啊"、"嗯嗯嗯嗯"）
+    unique_chars = set(c for c in t if c.strip())
+    if len(unique_chars) <= 2 and len(t) >= 5:
+        return True
+    # 全部是数字或省略号组合（时间戳幻觉）
+    if _HALLU_RE_TIMESTAMP.match(t):
+        return True
+    # 短语级重复（如"我会说,我会说,我会说,…"）
+    segs = [s.strip() for s in _HALLU_RE_SPLIT.split(t) if s.strip()]
+    if len(segs) >= 4 and len(set(segs)) <= 2:
+        return True
+    return False
+
+
 def _transcribe_for_wake(tmp_wav_path: str) -> str:
     """Transcribe audio for wake-word keyword matching using Whisper.
-    
+
     Uses the dedicated wake model (WAKE_STT_MODEL) if available, falls back
     to the main STT model. Forces WAKE_LANGUAGE if set to avoid mis-detection.
-    
-    Returns lowercased transcription text. Returns empty string on failure.
+
+    Returns lowercased transcription text. Returns empty string on failure
+    or if the result is detected as a Whisper hallucination.
     """
     model = state.whisper_wake if state.whisper_wake is not None else state.whisper
     if model is None:
@@ -138,6 +188,10 @@ def _transcribe_for_wake(tmp_wav_path: str) -> str:
             kwargs["language"] = state.wake_lang
         segments, info = model.transcribe(tmp_wav_path, **kwargs)
         text = " ".join(seg.text.strip() for seg in segments).strip().lower()
+        if _is_hallucination(text):
+            print(f"[stt-server] wake hallucination filtered: {text!r}",
+                  file=sys.stderr, flush=True)
+            return ""
         return text
     except Exception as e:
         print(f"[stt-server] wake whisper error: {e}", file=sys.stderr, flush=True)
@@ -800,7 +854,7 @@ async def wake_check(request: Request, file: UploadFile = File(...)):
             return {"speech_detected": False, "speaker_match": False, "score": 0.0, "speaker": None}
 
         segments = get_speech_timestamps(wav_audio, state.vad,
-                                         threshold=0.7,
+                                         threshold=0.5,
                                          return_seconds=True)
         if not segments:
             return {"speech_detected": False, "speaker_match": False, "score": 0.0, "speaker": None}

@@ -43,12 +43,18 @@ const DETECTION_COOLDOWN_MS: u64 = 1500;
 
 // ── Energy-VAD constants (mirrors conversation.rs) ─────────────────────────────────────
 
-/// RMS threshold for speech detection. ~ -36 dBFS, tuned for laptop built-in mic.
-const SPEECH_RMS_THRESHOLD: f32 = 0.015;
+/// RMS threshold for speech detection (onset). Borrowed from 白龙马 NEAR_SPEECH level.
+/// Lowered from 0.015 to 0.010 to catch quieter wake words.
+const SPEECH_RMS_THRESHOLD: f32 = 0.010;
 /// Noise-floor multiplier for adaptive threshold.
 const NOISE_FLOOR_MARGIN: f32 = 1.6;
 /// Hard cap on effective threshold so noisy rooms don't deafen the mic.
-const EFFECTIVE_THRESHOLD_CAP: f32 = 0.03;
+/// Lowered from 0.03 to 0.02 to keep wake sensitivity in moderate noise.
+const EFFECTIVE_THRESHOLD_CAP: f32 = 0.02;
+/// Minimum peak RMS across the entire utterance buffer before sending to ASR.
+/// Borrowed from 白龙马 MIN_UTTERANCE_PEAK_RMS: filters noise that passed onset
+/// threshold but isn't loud enough to be real speech.
+const MIN_UTTERANCE_PEAK_RMS: f32 = 0.015;
 /// Hysteresis release: once in a speech burst, RMS must drop below this to exit.
 const SPEECH_RELEASE_RMS_THRESHOLD: f32 = 0.003;
 /// Release-threshold noise-floor companion.
@@ -61,8 +67,9 @@ const LOOKBACK_MS: u64 = 500;
 /// How long to buffer after speech starts (max capture window).
 const MAX_BUFFER_S: f32 = 3.0;
 
-/// Minimum audio duration to send for wake check (too short = Whisper returns garbage).
-const MIN_SEND_S: f32 = 0.8;
+/// Minimum audio duration to send for wake check.
+/// Lowered from 0.8 to 0.5 to allow short wake words like "星引" (~0.5s).
+const MIN_SEND_S: f32 = 0.5;
 
 /// If speech stops, wait this long before sending what we have.
 const SPEECH_END_SILENCE_MS: u64 = 1500;
@@ -344,6 +351,9 @@ fn wake_http_worker_loop(
     let mut speech_run_ms: u64 = 0;
     let mut silence_run_ms: u64 = 0;
 
+    // Track peak RMS across the buffered utterance (白龙马 MIN_UTTERANCE_PEAK_RMS).
+    let mut buffer_peak_rms: f32 = 0.0;
+
     // Pre-buffer (ring): always stores the last ~500ms of resampled 16kHz audio.
     // When speech is confirmed, its contents are prepended to audio_buf
     // so the start of the utterance ("一" in "一二三四") is not lost.
@@ -423,6 +433,9 @@ fn wake_http_worker_loop(
                     // Once buffering is active, also append to audio_buf.
                     if is_buffering {
                         audio_buf.extend_from_slice(&resampled);
+                        if rms > buffer_peak_rms {
+                            buffer_peak_rms = rms;
+                        }
                     }
                 }
                 // Send if buffer full (3s) OR speech ended (silence after buffering)
@@ -434,7 +447,12 @@ fn wake_http_worker_loop(
                 let min_send_samples = (TARGET_SR as f32 * MIN_SEND_S) as usize;
                 let enough_audio = audio_buf.len() >= min_send_samples;
                 if (buffer_full || speech_ended) && enough_audio {
-                    if !audio_buf.is_empty() {
+                    if buffer_peak_rms < MIN_UTTERANCE_PEAK_RMS && !audio_buf.is_empty() {
+                        eprintln!(
+                            "[wake] skipping low-peak buffer: peak_rms={:.4} < {:.4} ({} samples)",
+                            buffer_peak_rms, MIN_UTTERANCE_PEAK_RMS, audio_buf.len()
+                        );
+                    } else if !audio_buf.is_empty() {
                         let samples_to_send: Vec<i16> = audio_buf.drain(..).collect();
                         eprintln!(
                             "[wake] sending {} samples ({:.1}s) buffer_full={} speech_ended={}",
@@ -470,6 +488,7 @@ fn wake_http_worker_loop(
                     }
                     is_buffering = false;
                     silence_run_ms = 0;
+                    buffer_peak_rms = 0.0;
                     audio_buf.clear();
                     pre_buf.clear();
                 } else if speech_ended {
@@ -477,13 +496,14 @@ fn wake_http_worker_loop(
                         audio_buf.len(), audio_buf.len() as f32 / TARGET_SR as f32, MIN_SEND_S);
                     is_buffering = false;
                     silence_run_ms = 0;
+                    buffer_peak_rms = 0.0;
                     audio_buf.clear();
                     pre_buf.clear();
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
                 // If buffering and mic goes silent, flush what we have
-                if is_buffering && !audio_buf.is_empty() {
+                if is_buffering && !audio_buf.is_empty() && buffer_peak_rms >= MIN_UTTERANCE_PEAK_RMS {
                     let samples_to_send: Vec<i16> = audio_buf.drain(..).collect();
                     eprintln!(
                         "[wake] timeout flush: {} samples ({:.1}s)",
@@ -517,6 +537,7 @@ fn wake_http_worker_loop(
                 is_buffering = false;
                 silence_run_ms = 0;
                 speech_run_ms = 0;
+                buffer_peak_rms = 0.0;
             }
             Err(RecvTimeoutError::Disconnected) => {
                 return Err("mic channel disconnected".into());
