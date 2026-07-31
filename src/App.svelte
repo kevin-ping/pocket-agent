@@ -9,7 +9,6 @@
   import DynamicIsland from './lib/components/DynamicIsland.svelte';
   import Icon from './lib/components/Icon.svelte';
   import ChatPanel from './lib/components/ChatPanel.svelte';
-  import SettingsPanel from './lib/components/SettingsPanel.svelte';
   import StatusPanel from './lib/components/StatusPanel.svelte';
   import BreakConfirmModal from './lib/components/BreakConfirmModal.svelte';
 
@@ -70,7 +69,6 @@
   }
 
   // ─── Context menu ───
-  let muted = false;
   let islandMode: "idle" | "recording" | "thinking" | "waiting_for_wake" | "verifying_speaker" = "idle";
   let spiritPhase = 0;
   let audioLevel = 0;
@@ -131,16 +129,29 @@
   function startBridgeThinking() {
     bridgeThinkingActive = true;
     clearBridgeFallbackTimer();
-    islandMode = 'thinking';
-    spiritPhase = 2;
-    firstStreamDelta = false;
-    characterState.toThinking();
+    enterThinkingVisuals();
     chatStore.addThinkingStep('🤔 正在思考...');
     cancelPendingStatusSpeech();
     pendingStatusSpeech = setTimeout(() => speakStatus({ kind: 'thinking' }), 250);
     bridgeFallbackTimer = setTimeout(() => {
       stopBridgeThinking('暂时还没有收到 Hermes 回推');
     }, 30000);
+  }
+
+  function enterThinkingVisuals() {
+    islandMode = 'thinking';
+    spiritPhase = Math.max(spiritPhase, 2);
+    firstStreamDelta = false;
+    characterState.toThinking();
+  }
+
+  function finishThinkingVisualsForReply() {
+    chatStore.finishThinkingPhase();
+    if (get(characterState) === 'thinking') {
+      characterState.toIdle();
+      islandMode = 'idle';
+      spiritPhase = 0;
+    }
   }
 
   const DEBUG_UI_STATE = String(import.meta.env.VITE_PA_DEBUG_UI || '').toLowerCase() === 'true';
@@ -184,30 +195,11 @@
     });
   }
 
-  // ─── Settings panel ───
-  let showSettings = false;
-  let prevWindowState: { x: number; y: number; w: number; h: number } | null = null;
-
-  async function openSettings() {
-    prevWindowState = await layoutStore.openSettings();
-    // Wait for WebView to process the window resize before rendering the panel
-    await new Promise<void>(resolve => requestAnimationFrame(resolve));
-    showSettings = true;
-  }
-
   async function openChatHistory() {
     try {
       await invoke('open_chat_history');
     } catch (e) {
       console.error('Failed to open chat history:', e);
-    }
-  }
-
-  async function closeSettings() {
-    showSettings = false;
-    if (prevWindowState) {
-      await layoutStore.closeSettings(prevWindowState);
-      prevWindowState = null;
     }
   }
 
@@ -400,12 +392,13 @@
 
   async function setupListeners() {
     chatStore.setOnCmdDetected(() => {
+      enterThinkingVisuals();
       chatStore.addThinkingStep('🔧 运行命令');
       speakStatus({ kind: 'running-command' });
     });
     unlisten = await Promise.all([
       listen('chat-thinking-start', () => {
-        characterState.toThinking();
+        enterThinkingVisuals();
         chatStore.addThinkingStep('🤔 正在思考...');
         cancelPendingStatusSpeech();
         pendingStatusSpeech = setTimeout(() => speakStatus({ kind: 'thinking' }), 250);
@@ -432,12 +425,15 @@
         debugState('chat-audio-playing');
         islandMode = 'idle';
         characterState.toSpeaking();
-        chatStore.clearThinkingSteps();
+        chatStore.finishThinkingPhase();
         spiritPhase = 3;
       }),
       listen<{ delta: string }>('chat-stream', (e) => {
         cancelPendingStatusSpeech();
         if (!firstStreamDelta) debugState('chat-stream:first-delta', { deltaPreview: e.payload.delta.slice(0, 40) });
+        if (!firstStreamDelta) {
+          finishThinkingVisualsForReply();
+        }
         chatStore.appendDelta(e.payload.delta);
         if (!firstStreamDelta) {
           firstStreamDelta = true;
@@ -450,6 +446,9 @@
         debugState('chat-stream-end');
         islandMode = 'idle';
         chatStore.endStream();
+        if (!lastSpeakingHadAudio) {
+          chatStore.clearThinkingSteps();
+        }
         // If audio is expected, let chat-audio-playing / chat-audio-done drive the transition.
         if (!lastSpeakingHadAudio && get(characterState) !== 'speaking') {
           characterState.toIdle();
@@ -461,6 +460,7 @@
         debugState('chat-audio-done');
         chatStore.endStream();
         chatStore.finishTypewriterNow();
+        chatStore.clearThinkingSteps();
         if (conversationActive) {
           // Hand control back to the conversation worker; it drives characterState via
           // conversation-state events. Skip the toIdle transition here.
@@ -477,11 +477,13 @@
 
       // LLM intermediate thinking/reasoning updates (in-place update of last 🤔 step)
       listen<string>('chat-thinking', (e) => {
+        enterThinkingVisuals();
         chatStore.updateLastThinkingStep(e.payload);
       }),
 
       // Tool call start notification
       listen<string>('chat-tool-call', (e) => {
+        enterThinkingVisuals();
         cancelPendingStatusSpeech();
         try {
           const payload = JSON.parse(e.payload);
@@ -529,9 +531,11 @@
 
       // Bridge-mode intermediate events (reasoning + tool calls from Hermes via bridge)
       listen<string>("bridge-thinking", (e) => {
+        enterThinkingVisuals();
         chatStore.updateLastThinkingStep(e.payload);
       }),
       listen<string>("bridge-tool-call", (e) => {
+        enterThinkingVisuals();
         cancelPendingStatusSpeech();
         try {
           const payload = JSON.parse(e.payload);
@@ -658,6 +662,8 @@
         islandMode = 'idle';
         spiritPhase = 0;
         characterState.toIdle();
+        chatStore.clearThinkingSteps();
+        chatStore.setVoiceStatus(null);
         if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
         invoke('cancel_voice_recording').catch(console.error);
       }),
@@ -781,8 +787,8 @@
       listen('accessibility-permission-required', () => {
         showAccessibilityGuide = true;
       }),
-      listen('tray-open-settings', () => {
-        openSettings();
+      listen('settings-changed', () => {
+        settingsStore.load();
       }),
       listen('tray-open-history', () => {
         openChatHistory();
@@ -830,7 +836,10 @@
       avatarX = pos.x / scale + (layoutStore.EXPANDED_W - layoutStore.AVATAR_W);
     }
     try {
-      await settingsStore.save({ window_x: Math.round(avatarX), window_y: Math.round(pos.y / scale) });
+      await invoke('save_window_position', {
+        x: Math.round(avatarX),
+        y: Math.round(pos.y / scale),
+      });
     } catch {}
   }
 
@@ -860,8 +869,8 @@
     }
   }
 
-  // Track wake_word_enabled across settings changes so toggling the switch in
-  // SettingsPanel arms / disarms immediately, without requiring a PA restart.
+  // Track wake_word_enabled across settings changes so a settings-window save
+  // updates the main PA runtime without requiring a restart.
   let prevWakeEnabled = false;
   let unsubSettings: (() => void) | null = null;
 
@@ -886,7 +895,10 @@
       listen('app-ready', () => playStartSound()).catch(console.error);
     }
     
-    await settingsStore.load();
+    const settingsLoaded = await settingsStore.load();
+    if (!settingsLoaded) {
+      chatStore.setError('Settings database is unavailable. Pocket Agent is using safe defaults.');
+    }
     // Apply double-click mode setting to hotkey listener
     const s = $settingsStore;
     if (s.double_click_to_record) {
@@ -949,6 +961,7 @@
         spiritPhase={spiritPhase}
         mediaSkins={mediaSkins}
         on:expand={() => layoutStore.toggle()}
+        on:contextmenu={() => invoke('open_settings_window')}
       />
       <DynamicIsland mode={islandMode} audioLevel={audioLevel} />
     </div>
@@ -969,11 +982,6 @@
     <div class="status-row"><StatusPanel /></div>
   {/if}
 
-
-  <!-- Settings panel (takes over window when open) -->
-  {#if showSettings}
-    <SettingsPanel bind:visible={showSettings} onclose={closeSettings} />
-  {/if}
 
   <!-- Break confirm modal: shown when user triggers a new turn while one is in progress -->
   <BreakConfirmModal

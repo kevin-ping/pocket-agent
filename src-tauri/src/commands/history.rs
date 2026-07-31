@@ -558,17 +558,12 @@ fn generate_html(messages: &[ChatMessage], avatar_data_uri: &str) -> String {
 
 /// Generate and open chat history HTML
 #[tauri::command]
-pub async fn open_chat_history(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn open_chat_history(_app: tauri::AppHandle) -> Result<(), String> {
     let messages = get_all_messages()?;
 
-    // Read avatar_image from Tauri KV store (settings.json)
-    let avatar_data_uri = {
-        use tauri_plugin_store::StoreExt;
-        let avatar = app.store("settings.json").ok().and_then(|store| {
-            store.get("avatar_image").and_then(|v| v.as_str().map(String::from))
-        });
-        avatar.unwrap_or_default()
-    };
+    // Read the current avatar from settings.db, the settings source of truth.
+    let avatar_data_uri = super::settings_repository::get_asset("avatar_image")?
+        .unwrap_or_default();
 
     let html = generate_html(&messages, &avatar_data_uri);
     

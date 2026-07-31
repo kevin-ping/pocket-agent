@@ -32,7 +32,7 @@ export interface AppSettings {
   last_enrolled_speaker: string;
 }
 
-const defaults: AppSettings = {
+export const SETTINGS_DEFAULTS: AppSettings = {
   volume: 0.8,
   character_skin: 'default-css',
   dialog_style: 'bubble',
@@ -64,7 +64,7 @@ const defaults: AppSettings = {
 };
 
 function createSettingsStore() {
-  const { subscribe, set, update } = writable<AppSettings>(defaults);
+  const { subscribe, set, update } = writable<AppSettings>(SETTINGS_DEFAULTS);
 
   return {
     subscribe,
@@ -73,19 +73,18 @@ function createSettingsStore() {
     load: async () => {
       try {
         const config = await invoke<AppSettings>('get_config');
-        set({ ...defaults, ...config });
+        set({ ...SETTINGS_DEFAULTS, ...config });
+        return true;
       } catch (e) {
         console.warn('[settings] load failed, using defaults:', e);
+        return false;
       }
     },
 
     save: async (partial: Partial<AppSettings>): Promise<void> => {
       let next: AppSettings | null = null;
-      let oldDoubleClickValue: boolean | undefined;
-      
       // Merge partial into current store state
       update((current) => {
-        oldDoubleClickValue = current.double_click_to_record;
         next = { ...current, ...partial };
         return current; // Don't update store until save succeeds
       });
@@ -96,18 +95,11 @@ function createSettingsStore() {
       }
       
       try {
-        // Save complete config to Rust
-        await invoke('save_config', { config: next });
-        
-        // Update store with merged result
-        set(next);
-        
-        
-        // Notify Rust if double-click mode changed
-        if (partial.double_click_to_record !== undefined && 
-            oldDoubleClickValue !== partial.double_click_to_record) {
-          await invoke('set_double_click_mode', { enabled: partial.double_click_to_record });
-        }
+        const result = await invoke<{ config: AppSettings; revision: number }>(
+          'save_config',
+          { config: next },
+        );
+        set({ ...SETTINGS_DEFAULTS, ...result.config });
       } catch (e) {
         console.error('[settings] save failed:', e);
         throw e;

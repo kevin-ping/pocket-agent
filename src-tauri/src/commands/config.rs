@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_store::StoreExt;
+
+use super::settings_repository::{self, SaveConfigResponse};
 
 // IMPORTANT: This is sent as a SYSTEM message to force spoken-style output.
 // The model MUST obey this — no formatting, no visual-only content, no symbols.
@@ -227,7 +229,7 @@ impl Default for AppConfig {
     }
 }
 
-pub fn load_config(app: &AppHandle) -> AppConfig {
+pub(crate) fn load_legacy_config(app: &AppHandle) -> AppConfig {
     let Ok(store) = app.store("settings.json") else {
         return AppConfig::default();
     };
@@ -264,56 +266,148 @@ pub fn load_config(app: &AppHandle) -> AppConfig {
     }
 }
 
-#[tauri::command]
-pub fn get_config(app: AppHandle) -> AppConfig {
-    load_config(&app)
+pub fn load_config(_app: &AppHandle) -> AppConfig {
+    settings_repository::load().unwrap_or_else(|error| {
+        eprintln!("[settings] database read failed, using defaults: {error}");
+        AppConfig::default()
+    })
 }
 
 #[tauri::command]
-pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
-    let store = app.store("settings.json").map_err(|e| e.to_string())?;
-    store.set("volume", serde_json::json!(config.volume));
-    store.set("character_skin", serde_json::json!(config.character_skin));
-    store.set("dialog_style", serde_json::json!(config.dialog_style));
-    store.set("tts_format", serde_json::json!(config.tts_format));
-    store.set("tts_primary_voice", serde_json::json!(config.tts_primary_voice));
-    store.set("tts_aux1_voice", serde_json::json!(config.tts_aux1_voice));
-    store.set("tts_aux2_voice", serde_json::json!(config.tts_aux2_voice));
-    if let Some(x) = config.window_x { store.set("window_x", serde_json::json!(x)); }
-    if let Some(y) = config.window_y { store.set("window_y", serde_json::json!(y)); }
-    if let Some(img) = &config.avatar_image { store.set("avatar_image", serde_json::json!(img)); }
-    else { store.set("avatar_image", serde_json::json!(null)); }
-    if let Some(gif) = &config.avatar_gif { store.set("avatar_gif", serde_json::json!(gif)); }
-    else { store.set("avatar_gif", serde_json::json!(null)); }
-    store.set("fixed_lang", serde_json::json!(config.fixed_lang));
-    store.set("ui_lang", serde_json::json!(config.ui_lang));
-    store.set("hotkey_code", serde_json::json!(config.hotkey_code));
-    store.set("hotkey_name", serde_json::json!(config.hotkey_name));
-    let old_tts = store.get("tts_enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-    if old_tts != config.tts_enabled {
-        println!("[config] voice_output set to: {}", config.tts_enabled);
+pub async fn get_config(_app: AppHandle) -> Result<AppConfig, String> {
+    // SQLite and avatar decoding are blocking operations. Keep them off the
+    // Tauri command thread so a large avatar cannot stall the settings webview.
+    tauri::async_runtime::spawn_blocking(settings_repository::load)
+        .await
+        .map_err(|e| format!("settings read task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn save_settings_page_config(
+    app: AppHandle,
+    mut config: AppConfig,
+) -> Result<SaveConfigResponse, String> {
+    // Assets and the PA widget position are owned by separate flows. Preserve
+    // them here so the settings page only transfers the small scalar config.
+    let current = tauri::async_runtime::spawn_blocking(settings_repository::load)
+        .await
+        .map_err(|e| format!("settings read task failed: {e}"))??;
+    config.avatar_image = current.avatar_image;
+    config.avatar_gif = current.avatar_gif;
+    config.window_x = current.window_x;
+    config.window_y = current.window_y;
+    let mut saved = save_config(app, config).await?;
+    saved.config.avatar_image = None;
+    saved.config.avatar_gif = None;
+    Ok(saved)
+}
+
+#[tauri::command]
+pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<SaveConfigResponse, String> {
+    let old = settings_repository::load()?;
+    let saved = settings_repository::save(&config)?;
+
+    let apply_result = (|| -> Result<(), String> {
+        if old.hotkey_code != saved.config.hotkey_code {
+            crate::voice::hotkey::update_hotkey(saved.config.hotkey_code);
+        }
+        if old.double_click_to_record != saved.config.double_click_to_record {
+            crate::voice::hotkey::set_double_click_mode(saved.config.double_click_to_record);
+        }
+        let wake_changed = old.wake_word_enabled != saved.config.wake_word_enabled
+            || (old.wake_word_threshold - saved.config.wake_word_threshold).abs() > f32::EPSILON
+            || old.last_enrolled_speaker != saved.config.last_enrolled_speaker;
+        if wake_changed {
+            crate::commands::voice::stop_wake_word_listening()?;
+            if saved.config.wake_word_enabled {
+                crate::commands::voice::start_wake_word_listening(
+                    app.clone(),
+                    Some(saved.config.wake_word_threshold),
+                    Some(saved.config.last_enrolled_speaker.clone()),
+                )?;
+            }
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = apply_result {
+        let _ = settings_repository::save(&old);
+        crate::voice::hotkey::update_hotkey(old.hotkey_code);
+        crate::voice::hotkey::set_double_click_mode(old.double_click_to_record);
+        let _ = crate::commands::voice::stop_wake_word_listening();
+        if old.wake_word_enabled {
+            let _ = crate::commands::voice::start_wake_word_listening(
+                app.clone(),
+                Some(old.wake_word_threshold),
+                Some(old.last_enrolled_speaker.clone()),
+            );
+        }
+        return Err(format!("apply settings failed; changes rolled back: {error}"));
     }
-    store.set("tts_enabled", serde_json::json!(config.tts_enabled));
-    store.set("double_click_to_record", serde_json::json!(config.double_click_to_record));
-    store.set("continuous_conversation", serde_json::json!(config.continuous_conversation));
-    store.set("silence_timeout_secs", serde_json::json!(config.silence_timeout_secs));
-    store.set("pause_tolerance_ms", serde_json::json!(config.pause_tolerance_ms));
-    store.set("speech_rms_threshold", serde_json::json!(config.speech_rms_threshold));
-    store.set("barge_in_rms_threshold", serde_json::json!(config.barge_in_rms_threshold));
-    store.set("barge_in_enabled", serde_json::json!(config.barge_in_enabled));
-    store.set("skip_interrupt_confirmation", serde_json::json!(config.skip_interrupt_confirmation));
-    store.set("wake_word_enabled", serde_json::json!(config.wake_word_enabled));
-    store.set("wake_word_threshold", serde_json::json!(config.wake_word_threshold));
-    store.set("speaker_verification_enabled", serde_json::json!(config.speaker_verification_enabled));
-    store.set("last_enrolled_speaker", serde_json::json!(config.last_enrolled_speaker));
-    store.save().map_err(|e| e.to_string())?;
+
+    app.emit("settings-changed", serde_json::json!({ "revision": saved.revision }))
+        .map_err(|e| e.to_string())?;
+    Ok(saved)
+}
+
+#[tauri::command]
+pub fn open_settings_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("settings") {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    // Only inject the small scalar settings snapshot. Avatar blobs are fetched
+    // independently after the form is visible.
+    let bootstrap = match settings_repository::load() {
+        Ok(mut config) => {
+            config.avatar_image = None;
+            config.avatar_gif = None;
+            serde_json::json!({ "config": config })
+        }
+        Err(error) => serde_json::json!({ "error": error }),
+    };
+    let bootstrap_json = serde_json::to_string(&bootstrap).map_err(|e| e.to_string())?;
+    WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
+        .initialization_script(format!(
+            "window.__PA_SETTINGS_BOOTSTRAP__ = {bootstrap_json};"
+        ))
+        .title("Pocket Agent Settings")
+        .inner_size(820.0, 650.0)
+        .min_inner_size(720.0, 560.0)
+        .resizable(true)
+        .decorations(true)
+        .center()
+        .build()
+        .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_setting_asset(key: String) -> Result<Option<String>, String> {
+    settings_repository::get_asset(&key)
+}
+
+#[tauri::command]
+pub fn save_setting_asset(app: AppHandle, key: String, data_uri: String) -> Result<(), String> {
+    let revision = settings_repository::save_asset(&key, &data_uri)?;
+    app.emit("settings-changed", serde_json::json!({ "revision": revision }))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_setting_asset(app: AppHandle, key: String) -> Result<(), String> {
+    let revision = settings_repository::delete_asset(&key)?;
+    app.emit("settings-changed", serde_json::json!({ "revision": revision }))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_window_position(x: f64, y: f64) -> Result<(), String> {
+    settings_repository::save_window_position(x, y)
 }
 
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
     app.exit(0);
 }
-
-
-

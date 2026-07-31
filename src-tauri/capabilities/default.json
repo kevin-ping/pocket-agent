@@ -2,10 +2,11 @@
   "identifier": "default",
   "description": "Pocket Agent default capabilities",
   "platforms": ["macOS", "windows", "linux"],
-  "windows": ["main"],
+  "windows": ["main", "settings"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
+    "core:window:allow-close",
     "core:window:allow-set-position",
     "core:window:allow-outer-position",
     "core:window:allow-set-size",

@@ -1084,6 +1084,70 @@ pub async fn speak_text(
     Ok(())
 }
 
+/// Play a voice sample from the settings window without emitting chat events
+/// or changing the saved configuration.
+#[tauri::command]
+pub async fn preview_voice(
+    voice: String,
+    tts_format: Option<String>,
+    volume: Option<f32>,
+) -> Result<(), String> {
+    if voice.is_empty()
+        || !voice.ends_with("Neural")
+        || !voice.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err("invalid preview voice".to_string());
+    }
+    let format = tts_format.unwrap_or_else(|| "wav".to_string());
+    if !matches!(format.as_str(), "wav" | "mp3") {
+        return Err("invalid preview audio format".to_string());
+    }
+    let playback_volume = volume.unwrap_or(0.8).clamp(0.0, 1.0);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let text = if voice.starts_with("zh-HK-") {
+            "你好，我係你嘅語音智能助手，好高興可以同你一齊交流。"
+        } else if voice.starts_with("zh-TW-") {
+            "你好，我是你的語音智慧助理，很高興能和你一起交流。"
+        } else if voice.starts_with("zh-") {
+            "你好，我是你的语音智能助手，很高兴能和你一起交流。"
+        } else if voice.starts_with("ja-") {
+            "こんにちは、私はあなたの音声AIアシスタントです。あなたとお話しできてうれしいです。"
+        } else if voice.starts_with("ko-") {
+            "안녕하세요. 저는 당신의 음성 인공지능 비서입니다. 함께 이야기하게 되어 기쁩니다."
+        } else if voice.starts_with("fr-") {
+            "Bonjour, je suis votre assistant vocal intelligent. Je suis ravi de pouvoir échanger avec vous."
+        } else if voice.starts_with("de-") {
+            "Hallo, ich bin Ihr intelligenter Sprachassistent. Ich freue mich, mit Ihnen zu sprechen."
+        } else if voice.starts_with("es-") {
+            "Hola, soy tu asistente de voz inteligente. Me alegra mucho poder hablar contigo."
+        } else {
+            "Hello, I'm your intelligent voice assistant. I'm very happy to talk with you."
+        };
+        let path = tts_path(&format);
+        if !generate_tts_to(text, &path, &voice, "+0%", "+0%") {
+            return Err("voice preview generation failed".to_string());
+        }
+
+        let (stream, stream_handle) =
+            rodio::OutputStream::try_default().map_err(|e| format!("audio output: {e}"))?;
+        let sink = rodio::Sink::try_new(&stream_handle)
+            .map_err(|e| format!("audio preview sink: {e}"))?;
+        sink.set_volume(playback_volume);
+        let file = std::fs::File::open(&path)
+            .map_err(|e| format!("open voice preview: {e}"))?;
+        let source = rodio::Decoder::new(std::io::BufReader::new(file))
+            .map_err(|e| format!("decode voice preview: {e}"))?;
+        sink.append(source);
+        sink.sleep_until_end();
+        drop(stream);
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("voice preview task failed: {e}"))?
+}
+
 /// Speak a short status announcement (e.g. "正在思考", "查询 weather").
 /// Differs from `speak_text`:
 ///   - Does NOT emit chat-speaking-start/chat-stream/chat-stream-end, so the

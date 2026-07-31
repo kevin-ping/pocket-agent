@@ -252,6 +252,20 @@ function createChatStore() {
     clearThinkingSteps: () =>
       update((s) => ({ ...s, thinkingSteps: [] })),
 
+    /** The final answer has started. Remove reasoning text while keeping tool
+     *  activity visible until the text/audio response is fully finished. */
+    finishThinkingPhase: () =>
+      update((s) => {
+        const toolSteps = s.thinkingSteps.filter((step) => step.startsWith('🔧'));
+        if (
+          toolSteps.length === s.thinkingSteps.length &&
+          toolSteps.every((step, index) => step === s.thinkingSteps[index])
+        ) {
+          return s;
+        }
+        return { ...s, thinkingSteps: toolSteps };
+      }),
+
     /** Immediately stop the typewriter, dropping any unflushed pending chars.
      *  Used on barge-in so the user sees only what was already displayed. */
     abortTypewriter: () => {

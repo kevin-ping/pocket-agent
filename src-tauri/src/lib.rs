@@ -29,6 +29,12 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle();
 
+            // settings.db is the single source of truth. Initialize and migrate
+            // the legacy Tauri settings.json before any service reads config.
+            if let Err(e) = commands::settings_repository::initialize(handle) {
+                eprintln!("[settings] database initialization failed: {}", e);
+            }
+
             // Initialize chat history database
             if let Err(e) = commands::history::init_db() {
                 eprintln!("[history] failed to init db: {}", e);
@@ -97,7 +103,7 @@ pub fn run() {
 
             app.on_menu_event(move |app, event| {
                 if event.id().as_ref() == "app-settings" {
-                    let _ = app.emit("tray-open-settings", ());
+                    let _ = commands::config::open_settings_window(app.clone());
                 }
             });
 
@@ -116,7 +122,7 @@ pub fn run() {
                 .on_menu_event(move |app, event| {
                     match event.id().as_ref() {
                         "tray-settings" => {
-                            let _ = app.emit("tray-open-settings", ());
+                            let _ = commands::config::open_settings_window(app.clone());
                         }
                         "tray-history" => {
                             let _ = app.emit("tray-open-history", ());
@@ -136,11 +142,18 @@ pub fn run() {
             commands::chat::send_message,
             commands::chat::speak,
             commands::chat::speak_text,
+            commands::chat::preview_voice,
             commands::chat::speak_status,
             commands::chat::discard_pending_turn,
             commands::chat::reset_hotkey_active_state,
             commands::config::get_config,
             commands::config::save_config,
+            commands::config::save_settings_page_config,
+            commands::config::open_settings_window,
+            commands::config::get_setting_asset,
+            commands::config::save_setting_asset,
+            commands::config::delete_setting_asset,
+            commands::config::save_window_position,
             commands::config::quit_app,
             commands::history::open_chat_history,
             commands::history::save_chat_message,
@@ -172,8 +185,8 @@ pub fn run() {
             voice::hotkey::update_hotkey,
             voice::hotkey::set_double_click_mode,
         ])
-        .on_window_event(|_window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
                 voice::stt::shutdown_stt_server();
             }
         })

@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { resolve } from 'node:path';
 
 export default defineConfig(async () => ({
   plugins: [svelte()],
@@ -13,6 +14,12 @@ export default defineConfig(async () => ({
   },
   envPrefix: ['VITE_', 'TAURI_ENV_*'],
   build: {
+    rollupOptions: {
+      input: {
+        main: resolve(process.cwd(), 'index.html'),
+        settings: resolve(process.cwd(), 'settings.html'),
+      },
+    },
     target: process.env.TAURI_ENV_PLATFORM === 'windows'
       ? 'chrome105'
       : 'safari13',   // macOS 10.13 搭载 Safari 13 的 WebKit

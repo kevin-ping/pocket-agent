@@ -14,7 +14,6 @@
   let hasContent = $derived(
     showSetup ||
     $chatStore.thinkingSteps.length > 0 ||
-    $chatStore.isStreaming ||
     $characterState === 'thinking' ||
     $chatStore.voiceStatus !== null
   );
@@ -43,7 +42,7 @@
           {#each $chatStore.thinkingSteps as step}
             <span class="step">{step}</span>
           {/each}
-        {:else if $chatStore.isStreaming || $characterState === 'thinking'}
+        {:else if $characterState === 'thinking'}
           <span class="step placeholder">🤔 正在思考...</span>
         {/if}
       </div>
