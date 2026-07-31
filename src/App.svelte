@@ -460,6 +460,7 @@
       listen('chat-audio-done', () => {
         debugState('chat-audio-done');
         chatStore.endStream();
+        chatStore.finishTypewriterNow();
         if (conversationActive) {
           // Hand control back to the conversation worker; it drives characterState via
           // conversation-state events. Skip the toIdle transition here.

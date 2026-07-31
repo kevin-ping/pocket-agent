@@ -5,7 +5,7 @@ use crate::AppState;
 use futures_util::StreamExt;
 use std::process::Command;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 static CURRENT_AUDIO_SINK: std::sync::OnceLock<std::sync::Mutex<Option<std::sync::Arc<rodio::Sink>>>> = std::sync::OnceLock::new();
@@ -52,8 +52,15 @@ static AUDIO_SENDER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sende
 static AUDIO_GENERATION: AtomicU64 = AtomicU64::new(0);
 static AUDIO_QUEUE_DEPTH: AtomicUsize = AtomicUsize::new(0);
 static TURN_GENERATION: AtomicU64 = AtomicU64::new(0);
-/// Tracks the generation of the last non-silent audio for chat-audio-done emit.
-static LAST_NON_SILENT_GEN: AtomicU64 = AtomicU64::new(0);
+/// Non-silent audio jobs submitted-but-not-yet-finished for the current AUDIO_GENERATION.
+/// Used to fire chat-audio-done exactly once, when the LAST sentence of a (possibly
+/// multi-sentence) turn finishes playing — not after every sentence.
+static PENDING_NON_SILENT: AtomicI64 = AtomicI64::new(0);
+/// True once the submitter (run_hermes_turn / speak_text) knows no more non-silent
+/// jobs will be submitted for the current generation.
+static SUBMISSION_DONE: AtomicBool = AtomicBool::new(true);
+/// Generation for which chat-audio-done has already been emitted (dedup guard); 0 = none yet.
+static AUDIO_DONE_EMITTED_GEN: AtomicU64 = AtomicU64::new(0);
 
 fn current_audio_sink() -> &'static Mutex<Option<std::sync::Arc<rodio::Sink>>> {
     CURRENT_AUDIO_SINK.get_or_init(|| Mutex::new(None))
@@ -86,11 +93,6 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                                 eprintln!("[TTS-GEN] gen={} chars={} ok={}", generation, text.chars().count(), tts_ok);
 
                                 let text_len = text.chars().count();
-
-                                // Track last non-silent audio generation for chat-audio-done emit
-                                if !silent {
-                                    LAST_NON_SILENT_GEN.store(generation, Ordering::SeqCst);
-                                }
 
                                 let _ = prep_tx.send(PreparedAudio {
                                     tts_file,
@@ -173,20 +175,12 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                     let remaining = AUDIO_QUEUE_DEPTH.load(Ordering::SeqCst);
                     eprintln!("[AUDIO] done (gen={}, remaining={})", prep.generation, remaining);
 
-                    // Emit chat-audio-done when the last non-silent audio finishes.
-                    // This ensures we emit even if the last audio was not the last in queue
-                    // (e.g., status announcements after the main response).
-                    let is_last_non_silent = !prep.silent && 
-                        prep.generation == LAST_NON_SILENT_GEN.load(Ordering::SeqCst) &&
-                        prep.generation == AUDIO_GENERATION.load(Ordering::SeqCst);
-
-                    if is_last_non_silent {
-                        eprintln!("[AUDIO] emitting chat-audio-done (gen={})", prep.generation);
-                        let _ = prep.app.emit("chat-audio-done", ());
-                    } else {
-                        eprintln!("[AUDIO] skip chat-audio-done (silent={} gen={} audio_gen={} remaining={} last_non_silent={})",
-                            prep.silent, prep.generation, AUDIO_GENERATION.load(Ordering::SeqCst), remaining,
-                            LAST_NON_SILENT_GEN.load(Ordering::SeqCst));
+                    // chat-audio-done fires once per turn, when every non-silent sentence
+                    // submitted for this generation (see PENDING_NON_SILENT) has finished
+                    // playing — not after each individual sentence.
+                    if !prep.silent {
+                        PENDING_NON_SILENT.fetch_sub(1, Ordering::SeqCst);
+                        maybe_emit_audio_done(&prep.app, prep.generation);
                     }
                 }
             })
@@ -269,6 +263,35 @@ fn audio_queue_release(generation: u64) {
 /// Reset counter on stop/cancel.
 pub fn audio_queue_reset() {
     AUDIO_QUEUE_DEPTH.store(0, Ordering::SeqCst);
+}
+
+/// Reset chat-audio-done tracking for a freshly allocated speak generation
+/// (called once per turn, before any sentences are submitted).
+fn begin_audio_submission() {
+    PENDING_NON_SILENT.store(0, Ordering::SeqCst);
+    SUBMISSION_DONE.store(false, Ordering::SeqCst);
+    AUDIO_DONE_EMITTED_GEN.store(0, Ordering::SeqCst);
+}
+
+/// Emit chat-audio-done exactly once for `generation`, once all of its non-silent
+/// sentences have been submitted (SUBMISSION_DONE) and finished playing (PENDING_NON_SILENT <= 0).
+fn maybe_emit_audio_done(app: &AppHandle, generation: u64) {
+    if generation != AUDIO_GENERATION.load(Ordering::SeqCst) {
+        return;
+    }
+    if !SUBMISSION_DONE.load(Ordering::SeqCst) {
+        return;
+    }
+    if PENDING_NON_SILENT.load(Ordering::SeqCst) > 0 {
+        return;
+    }
+    if AUDIO_DONE_EMITTED_GEN
+        .compare_exchange(0, generation, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        eprintln!("[AUDIO] emitting chat-audio-done (gen={})", generation);
+        let _ = app.emit("chat-audio-done", ());
+    }
 }
 
 /// Get edge-tts binary path from env var, fallback to "edge-tts"
@@ -588,6 +611,9 @@ fn speak_internal(
         show_text,
         silent: false,
     });
+    if generation == AUDIO_GENERATION.load(Ordering::SeqCst) {
+        PENDING_NON_SILENT.fetch_add(1, Ordering::SeqCst);
+    }
     true
 }
 
@@ -758,6 +784,11 @@ async fn run_hermes_turn(
                 eprintln!("[SSE] flushing last sentence ({} chars)", trimmed.len());
                 cb(trimmed);
             }
+            // No more sentences will be submitted for this generation — chat-audio-done
+            // can now fire once the already-submitted sentences finish playing (or
+            // immediately below, if they already have).
+            SUBMISSION_DONE.store(true, Ordering::SeqCst);
+            maybe_emit_audio_done(app, AUDIO_GENERATION.load(Ordering::SeqCst));
         }
 
         eprintln!("[SSE] <<< stream complete [{}] ({} chars)", chrono::Local::now().format("%H:%M:%S%.3f"), full_response.len());
@@ -896,6 +927,7 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
     }
 
     let speak_generation = AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    begin_audio_submission();
     let speak_app = app.clone();
     let speak_format = "wav".to_string();
 
@@ -1039,11 +1071,15 @@ pub async fn speak_text(
     let aux1 = tts_aux1_voice.unwrap_or_default();
     let aux2 = tts_aux2_voice.unwrap_or_default();
     let generation = AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    begin_audio_submission();
 
     let voice = override_voice.unwrap_or_else(|| select_voice(&text, &primary, &aux1, &aux2, "", ""));
     let emotion_str = emotion.unwrap_or_else(|| detect_emotion(&text));
 
     speak_internal(&app, &text, &emotion_str, &voice, &format, generation, true);
+    // Single-shot: the one (and only) sentence has already been submitted above.
+    SUBMISSION_DONE.store(true, Ordering::SeqCst);
+    maybe_emit_audio_done(&app, generation);
 
     Ok(())
 }

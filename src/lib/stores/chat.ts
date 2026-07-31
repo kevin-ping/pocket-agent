@@ -334,6 +334,22 @@ function createChatStore() {
       if (!typewriterTimer) finalizeStream();
     },
 
+    /** TTS audio has finished playing — the fixed ms/char typewriter pace doesn't
+     *  track real speech duration, so it can still be mid-sentence at this point.
+     *  Flush any remaining buffered chars immediately so text never lags behind audio. */
+    finishTypewriterNow: () => {
+      if (typewriterTimer) { clearInterval(typewriterTimer); typewriterTimer = null; }
+      if (pendingChars.length > 0) {
+        const remaining = pendingChars.join('');
+        pendingChars = [];
+        update((s) => ({
+          ...s,
+          streamingContent: s.streamingContent ? s.streamingContent + remaining : remaining.replace(/^\s+/, ''),
+        }));
+      }
+      if (streamEnding) finalizeStream();
+    },
+
     setError: (msg: string) => {
       if (typewriterTimer) { clearInterval(typewriterTimer); typewriterTimer = null; }
       if (pendingChars.length > 0) pendingChars = [];
