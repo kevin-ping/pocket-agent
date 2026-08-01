@@ -573,6 +573,11 @@ pub fn get_wake_variant_count(name: String) -> usize {
 }
 
 #[tauri::command]
+pub fn get_wake_words(name: String) -> Vec<String> {
+    crate::voice::sherpa_wake::get_wake_words(&name)
+}
+
+#[tauri::command]
 pub fn verify_speaker(
     audio_path: String,
     threshold: Option<f32>,

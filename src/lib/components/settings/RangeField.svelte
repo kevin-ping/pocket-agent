@@ -6,6 +6,7 @@
     max,
     step,
     display,
+    hint = '',
     change,
   }: {
     label: string;
@@ -14,6 +15,7 @@
     max: number;
     step: number;
     display: string;
+    hint?: string;
     change: (value: number) => void;
   } = $props();
 
@@ -26,7 +28,7 @@
 </script>
 
 <div class="field range">
-  <span class="field-label">{label}<small>{display}</small></span>
+  <span class="field-label">{label}<small>{display}</small>{#if hint}<em class="field-hint">{hint}</em>{/if}</span>
   <input
     aria-label={label}
     type="range"
@@ -38,3 +40,6 @@
     oninput={(event) => change(Number(event.currentTarget.value))}
   />
 </div>
+<style>
+  .field-hint{display:block;color:#9aa3b8;margin-top:3px;font-size:10px;line-height:1.4}
+</style>

@@ -71,6 +71,7 @@
   let enrolling = $state(false);
   let enrollCountdown = $state(0);
   let variantCount = $state(0);
+  let wakeWords = $state<string[]>([]);
   let previewingField = $state<'primary' | 'aux1' | 'aux2' | null>(null);
   let fileInput = $state<HTMLInputElement>(undefined!);
   let gifInput = $state<HTMLInputElement>(undefined!);
@@ -130,7 +131,7 @@
   }
 
   if (bootstrap?.config) {
-    void loadAssets();
+    void (async () => { await loadAssets(); await refreshVariantCount(); })();
   } else if (!bootstrap) {
     void loadSettings();
   }
@@ -257,10 +258,11 @@
   }
 
   async function refreshVariantCount() {
-    if (!local?.last_enrolled_speaker) { variantCount = 0; return; }
+    if (!local?.last_enrolled_speaker) { variantCount = 0; wakeWords = []; return; }
     try {
       variantCount = await invoke<number>('get_wake_variant_count', { name: local.last_enrolled_speaker });
-    } catch { variantCount = 0; }
+      wakeWords = await invoke<string[]>('get_wake_words', { name: local.last_enrolled_speaker });
+    } catch { variantCount = 0; wakeWords = []; }
   }
 
   function requestEnrollment(rename = false) {
@@ -386,21 +388,21 @@
           </section>
         {:else if active === 'conversation'}
           <section class="card">
-            <Toggle label={text.continuous} value={local.continuous_conversation} change={() => local && (local.continuous_conversation = !local.continuous_conversation)} />
-            <RangeField label={text.silenceTimeout} value={local.silence_timeout_secs} min={3} max={10} step={1} display={`${local.silence_timeout_secs} ${text.seconds}`} change={(v) => local && (local.silence_timeout_secs = v)} />
-            <RangeField label={text.pauseTolerance} value={local.pause_tolerance_ms} min={500} max={5000} step={100} display={`${local.pause_tolerance_ms} ${text.milliseconds}`} change={(v) => local && (local.pause_tolerance_ms = v)} />
-            <RangeField label={text.micSensitivity} value={local.speech_rms_threshold} min={0.003} max={0.020} step={0.001} display={local.speech_rms_threshold.toFixed(3)} change={(v) => local && (local.speech_rms_threshold = v)} />
+            <Toggle label={text.continuous} hint={text.hintContinuous} value={local.continuous_conversation} change={() => local && (local.continuous_conversation = !local.continuous_conversation)} />
+            <RangeField label={text.silenceTimeout} hint={text.hintSilenceTimeout} value={local.silence_timeout_secs} min={3} max={10} step={1} display={`${local.silence_timeout_secs} ${text.seconds}`} change={(v) => local && (local.silence_timeout_secs = v)} />
+            <RangeField label={text.pauseTolerance} hint={text.hintPauseTolerance} value={local.pause_tolerance_ms} min={500} max={5000} step={100} display={`${local.pause_tolerance_ms} ${text.milliseconds}`} change={(v) => local && (local.pause_tolerance_ms = v)} />
+            <RangeField label={text.micSensitivity} hint={text.hintMicSensitivity} value={local.speech_rms_threshold} min={0.003} max={0.020} step={0.001} display={local.speech_rms_threshold.toFixed(3)} change={(v) => local && (local.speech_rms_threshold = v)} />
           </section>
         {:else if active === 'interruption'}
           <section class="card">
-            <Toggle label={text.allowInterruption} value={local.barge_in_enabled} change={() => local && (local.barge_in_enabled = !local.barge_in_enabled)} />
-            <RangeField label={text.interruptSensitivity} value={local.barge_in_rms_threshold} min={0.02} max={0.15} step={0.01} display={local.barge_in_rms_threshold.toFixed(2)} change={(v) => local && (local.barge_in_rms_threshold = v)} />
-            <Toggle label={text.skipConfirmation} value={local.skip_interrupt_confirmation} change={() => local && (local.skip_interrupt_confirmation = !local.skip_interrupt_confirmation)} />
+            <Toggle label={text.allowInterruption} hint={text.hintAllowInterruption} value={local.barge_in_enabled} change={() => local && (local.barge_in_enabled = !local.barge_in_enabled)} />
+            <RangeField label={text.interruptSensitivity} hint={text.hintInterruptSensitivity} value={local.barge_in_rms_threshold} min={0.02} max={0.15} step={0.01} display={local.barge_in_rms_threshold.toFixed(2)} change={(v) => local && (local.barge_in_rms_threshold = v)} />
+            <Toggle label={text.skipConfirmation} hint={text.hintSkipConfirmation} value={local.skip_interrupt_confirmation} change={() => local && (local.skip_interrupt_confirmation = !local.skip_interrupt_confirmation)} />
           </section>
         {:else if active === 'wake'}
           <section class="card">
-            <Toggle label={text.wakeEnabled} value={local.wake_word_enabled} change={() => local && (local.wake_word_enabled = !local.wake_word_enabled)} />
-            <RangeField label={text.wakeSensitivity} value={local.wake_word_threshold} min={0.30} max={0.90} step={0.05} display={`${Math.round(local.wake_word_threshold * 100)}${text.percent}`} change={(v) => local && (local.wake_word_threshold = v)} />
+            <Toggle label={text.wakeEnabled} hint={text.hintWakeEnabled} value={local.wake_word_enabled} change={() => local && (local.wake_word_enabled = !local.wake_word_enabled)} />
+            <RangeField label={text.wakeSensitivity} hint={text.hintWakeSensitivity} value={local.wake_word_threshold} min={0.30} max={0.90} step={0.05} display={`${Math.round(local.wake_word_threshold * 100)}${text.percent}`} change={(v) => local && (local.wake_word_threshold = v)} />
             <div class="sample">
               <div><strong>{text.sample}</strong><p>{local.last_enrolled_speaker || text.noSample}{variantCount ? ` · ${variantCount} ${text.variants}` : ''}</p></div>
               <div class="actions">
@@ -409,6 +411,16 @@
                 {#if local.last_enrolled_speaker}<button class="secondary" onclick={train} disabled={enrolling}>{text.trainSample}</button>{/if}
               </div>
             </div>
+            {#if wakeWords.length > 0}
+              <div class="wake-words">
+                <span class="wake-label">{text.wakeWordsLabel}</span>
+                <div class="wake-tags">
+                  {#each wakeWords as word}
+                    <span class="wake-tag">{word}</span>
+                  {/each}
+                </div>
+              </div>
+            {/if}
           </section>
         {/if}
       </div>
@@ -439,20 +451,20 @@
 <style>
   :global {
   :global(*){box-sizing:border-box} :global(html,body,#app){margin:0;width:100%;height:100%;overflow:hidden}
-  :global(body){font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0b0d15;color:#edf0fa;-webkit-font-smoothing:antialiased}
-  button,select,input{font:inherit}.shell{height:100%;min-height:0;display:grid;grid-template-columns:224px 1fr;background:radial-gradient(circle at 75% 0,#202744 0,transparent 36%),#0b0d15}
-  aside{padding:28px 16px 20px;border-right:1px solid #282d3d;background:rgba(13,15,25,.88);display:flex;flex-direction:column}.brand{display:flex;gap:12px;align-items:center;padding:0 10px 26px}
-  .logo{width:42px;height:42px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(145deg,#859bff,#7465e7);font-size:14px;font-weight:800;box-shadow:0 8px 24px #6174ff35}
-  h1,h2,h3,p{margin:0}.brand h1{font-size:16px}.brand p,header p{font-size:11px;color:#8f96aa;margin-top:4px}nav{display:flex;flex-direction:column;gap:5px}nav button{border:0;background:transparent;color:#9da4b8;padding:11px 12px;border-radius:10px;text-align:left;cursor:pointer;display:flex;gap:11px;align-items:center}nav button span{width:20px;text-align:center;color:#7f8dba}nav button:hover{background:#ffffff08;color:#dce2f3}nav button.active{background:#788cff1c;color:#dce5ff;box-shadow:inset 0 0 0 1px #8294ff25}nav button.active span{color:#93a5ff}.immediate{margin-top:auto;padding:12px;font-size:10px;line-height:1.5;color:#687084}
-  main{min-width:0;min-height:0;height:100%;display:grid;grid-template-rows:88px minmax(0,1fr) 72px;overflow:hidden}header{padding:27px 36px 20px;border-bottom:1px solid #242938;display:flex;align-items:center}header h2{font-size:22px}.content{min-height:0;padding:26px 36px;overflow:auto;overscroll-behavior:contain}.card{max-width:720px;border:1px solid #292f40;border-radius:16px;background:#121621cc;overflow:hidden;box-shadow:0 16px 50px #0002}
-  .field{min-height:66px;padding:14px 20px;display:flex;align-items:center;justify-content:space-between;gap:30px;border-bottom:1px solid #242938}.field:last-child{border-bottom:0}.field-label{font-size:13px;color:#d8ddeb}.field small{display:block;color:#8b94ad;margin-top:5px;font-size:11px;font-weight:500}.control{min-width:250px;display:flex;justify-content:flex-end}
-  select,.modal input{width:250px;border:1px solid #333b50;background:#0d111b;color:#e8edfa;border-radius:9px;padding:9px 11px;outline:none}select:focus,input:focus{border-color:#7f91e9}input[type=range]{width:250px;accent-color:#8195ff}.toggle{width:42px;height:24px;padding:2px;border:0;border-radius:20px;background:#313748;cursor:pointer;transition:.15s}.toggle span{display:block;width:20px;height:20px;border-radius:50%;background:#c7cbd6;transition:.15s}.toggle.on{background:#788dff}.toggle.on span{transform:translateX(18px);background:white}
-  button.primary,button.secondary,button.ghost{border-radius:9px;padding:9px 14px;cursor:pointer;border:1px solid transparent;color:#eaf0ff}button.primary{background:#7589f4}button.primary:hover{background:#8497ff}button.primary:disabled{opacity:.4;cursor:default}button.secondary{background:#20283b;border-color:#36405b}button.secondary:hover{background:#29334a}button.ghost{background:transparent;border-color:#333a4c;color:#adb5ca}button.ghost:hover{background:#ffffff0a}.danger{color:#ff9299!important}.working{color:#f2d27b!important}
-  footer{min-height:72px;border-top:1px solid #242938;padding:16px 36px;display:flex;gap:10px;align-items:center;justify-content:flex-end;background:#0d1019;position:relative;z-index:2}.message{margin-right:auto;color:#79d7ae;font-size:12px}.message .error{color:#ff8d96}
-  .voice-field{border-bottom:1px solid #242938}.voice-field .field{border:0;padding-bottom:7px}.voice-control{display:flex;align-items:center;gap:8px}.voice-control select{width:182px}.preview-button{width:98px;min-width:98px;max-width:98px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid #36405b;background:#20283b;color:#eaf0ff;border-radius:9px;padding:9px 8px;cursor:pointer}.preview-button:hover{background:#29334a}.preview-button:disabled{opacity:.45;cursor:default}.check{display:flex;justify-content:flex-end;align-items:center;gap:7px;padding:0 20px 13px;color:#8f98af;font-size:11px}.check input{accent-color:#8295ff}.asset-grid{display:grid;grid-template-columns:1fr 1fr;gap:0}.asset{padding:28px;text-align:center}.asset+ .asset{border-left:1px solid #292f40}.preview{width:110px;height:110px;margin:0 auto 17px;border-radius:25px;background:linear-gradient(145deg,#1f2944,#171b2b);border:1px solid #36415d;display:grid;place-items:center;overflow:hidden;color:#8294ff;font-weight:800}.preview img{width:100%;height:100%;object-fit:cover}.asset h3{font-size:14px}.asset p{height:42px;margin:7px 0 14px;color:#7f879b;font-size:10px;line-height:1.5}.asset button+button{margin-left:7px}
-  .sample{padding:22px 20px;display:flex;align-items:center;justify-content:space-between;gap:20px}.sample strong{font-size:13px}.sample p{font-size:11px;color:#818aa0;margin-top:6px}.actions{display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end}.center{height:100%;display:grid;place-items:center;color:#8e97aa}.spinner{width:24px;height:24px;border:2px solid #30384c;border-top-color:#8396ff;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.error{color:#ff8e98}
-  .error-state{align-content:center;justify-items:center;gap:14px;padding:30px;text-align:center}.error-state p{max-width:520px;line-height:1.5}
-  .backdrop{position:fixed;inset:0;background:#05060bb8;display:grid;place-items:center;z-index:20}.modal{width:390px;background:#151925;border:1px solid #333a4d;border-radius:16px;padding:24px;box-shadow:0 24px 80px #0008}.modal h3{font-size:17px}.modal p{color:#8d96aa;font-size:12px;line-height:1.5;margin:8px 0 20px}.modal label{display:grid;gap:8px;font-size:12px}.modal input{width:100%}.modal-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:22px}
-  @media(max-width:740px){.shell{grid-template-columns:180px 1fr}.content,header,footer{padding-left:22px;padding-right:22px}.field{gap:14px}.control,select,input[type=range]{min-width:0;width:210px}.asset-grid{grid-template-columns:1fr}.asset+.asset{border-left:0;border-top:1px solid #292f40}}
+  :global(body){font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f5f9;color:#1e2235;-webkit-font-smoothing:antialiased}
+  button,select,input{font:inherit}.shell{height:100%;min-height:0;display:grid;grid-template-columns:200px 1fr;background:radial-gradient(circle at 75% 0,#dde3ff 0,transparent 36%),#f4f5f9}
+  aside{padding:20px 12px 16px;border-right:1px solid #e2e5ed;background:#ffffff;display:flex;flex-direction:column}.brand{display:flex;gap:10px;align-items:center;padding:0 8px 18px}
+  .logo{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:linear-gradient(145deg,#859bff,#7465e7);font-size:12px;font-weight:800;box-shadow:0 6px 18px #6174ff35;color:#fff}
+  h1,h2,h3,p{margin:0}.brand h1{font-size:14px;color:#1e2235}.brand p,header p{font-size:10px;color:#6a7185;margin-top:3px}nav{display:flex;flex-direction:column;gap:3px}nav button{border:0;background:transparent;color:#5a6178;padding:8px 10px;border-radius:8px;text-align:left;cursor:pointer;display:flex;gap:10px;align-items:center;font-size:12px}nav button span{width:18px;text-align:center;color:#8890a8;font-size:13px}nav button:hover{background:#0000000a;color:#2a2f42}nav button.active{background:#788cff18;color:#3a4566;box-shadow:inset 0 0 0 1px #8294ff30}nav button.active span{color:#7080ff}.immediate{margin-top:auto;padding:10px;font-size:9px;line-height:1.5;color:#939aab}
+  main{min-width:0;min-height:0;height:100%;display:grid;grid-template-rows:58px minmax(0,1fr) 52px;overflow:hidden}header{padding:14px 28px;border-bottom:1px solid #e2e5ed;display:flex;align-items:center}header h2{font-size:17px;color:#1e2235}.content{min-height:0;padding:18px 28px;overflow:auto;overscroll-behavior:contain}.card{max-width:680px;border:1px solid #e2e5ed;border-radius:12px;background:#ffffff;overflow:hidden;box-shadow:0 3px 14px #0000000a}
+  .field{min-height:46px;padding:9px 16px;display:flex;align-items:center;justify-content:space-between;gap:20px;border-bottom:1px solid #e8eaf0}.field:last-child{border-bottom:0}.field-label{font-size:12px;color:#2a2f42}.field small{display:block;color:#7a8298;margin-top:3px;font-size:10px;font-weight:500}.field-hint{display:block;color:#9aa3b8;margin-top:3px;font-size:10px;font-style:normal;line-height:1.4}.control{min-width:220px;display:flex;justify-content:flex-end}
+  select,.modal input{width:220px;border:1px solid #d4d8e0;background:#ffffff;color:#1e2235;border-radius:7px;padding:6px 10px;outline:none;font-size:12px}select:focus,input:focus{border-color:#7589f4}input[type=range]{width:220px;accent-color:#7589f4}.toggle{width:38px;height:22px;padding:2px;border:0;border-radius:18px;background:#d4d8e0;cursor:pointer;transition:.15s}.toggle span{display:block;width:18px;height:18px;border-radius:50%;background:#ffffff;transition:.15s;box-shadow:0 1px 3px #00000030}.toggle.on{background:#7589f4}.toggle.on span{transform:translateX(16px);background:white}
+  button.primary,button.secondary,button.ghost{border-radius:7px;padding:6px 12px;cursor:pointer;border:1px solid transparent;color:#1e2235;font-size:12px}button.primary{background:#7589f4;color:#fff}button.primary:hover{background:#6478e8}button.primary:disabled{opacity:.4;cursor:default}button.secondary{background:#f0f2f8;border-color:#d4d8e0;color:#1e2235}button.secondary:hover{background:#e8eaf2}button.ghost{background:transparent;border-color:#d4d8e0;color:#5a6178}button.ghost:hover{background:#0000000a}.danger{color:#e53e5c!important}.working{color:#c99700!important}
+  footer{min-height:52px;border-top:1px solid #e2e5ed;padding:10px 28px;display:flex;gap:8px;align-items:center;justify-content:flex-end;background:#ffffff;position:relative;z-index:2}.message{margin-right:auto;color:#1a9d63;font-size:11px}.message .error{color:#e53e5c}
+  .voice-field{border-bottom:1px solid #e8eaf0}.voice-field .field{border:0;padding-bottom:5px}.voice-control{display:flex;align-items:center;gap:6px}.voice-control select{width:165px}.preview-button{width:84px;min-width:84px;max-width:84px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid #d4d8e0;background:#f0f2f8;color:#1e2235;border-radius:7px;padding:6px 6px;cursor:pointer;font-size:11px}.preview-button:hover{background:#e8eaf2}.preview-button:disabled{opacity:.45;cursor:default}.check{display:flex;justify-content:flex-end;align-items:center;gap:6px;padding:0 16px 9px;color:#7a8298;font-size:10px}.check input{accent-color:#7589f4}.asset-grid{display:grid;grid-template-columns:1fr 1fr;gap:0}.asset{padding:18px;text-align:center}.asset+ .asset{border-left:1px solid #e2e5ed}.preview{width:84px;height:84px;margin:0 auto 12px;border-radius:18px;background:linear-gradient(145deg,#f0f2f8,#e8eaf2);border:1px solid #d4d8e0;display:grid;place-items:center;overflow:hidden;color:#7589f4;font-weight:800}.preview img{width:100%;height:100%;object-fit:cover}.asset h3{font-size:13px;color:#1e2235}.asset p{height:32px;margin:5px 0 10px;color:#7a8298;font-size:10px;line-height:1.5}.asset button+button{margin-left:6px}
+  .wake-words{padding:12px 16px;border-top:1px solid #e8eaf0}.wake-label{display:block;font-size:12px;font-weight:600;color:#1e2235;margin-bottom:8px}.wake-tags{display:flex;flex-wrap:wrap;gap:6px}.wake-tag{display:inline-flex;align-items:center;background:#eef1f7;border:1px solid #dde2ec;color:#3a4156;font-size:11px;font-weight:500;padding:4px 10px;border-radius:14px}.sample{padding:16px;display:flex;align-items:center;justify-content:space-between;gap:16px}.sample strong{font-size:12px;color:#1e2235}.sample p{font-size:10px;color:#7a8298;margin-top:4px}.actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.center{height:100%;display:grid;place-items:center;color:#8e97aa}.spinner{width:22px;height:22px;border:2px solid #d4d8e0;border-top-color:#7589f4;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.error{color:#e53e5c}
+  .error-state{align-content:center;justify-items:center;gap:12px;padding:24px;text-align:center}.error-state p{max-width:480px;line-height:1.5}
+  .backdrop{position:fixed;inset:0;background:#00000033;display:grid;place-items:center;z-index:20}.modal{width:360px;background:#ffffff;border:1px solid #e2e5ed;border-radius:12px;padding:20px;box-shadow:0 20px 60px #00000030}.modal h3{font-size:15px;color:#1e2235}.modal p{color:#6a7185;font-size:11px;line-height:1.5;margin:6px 0 16px}.modal label{display:grid;gap:6px;font-size:11px;color:#2a2f42}.modal input{width:100%}.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+  @media(max-width:740px){.shell{grid-template-columns:170px 1fr}.content,header,footer{padding-left:18px;padding-right:18px}.field{gap:12px}.control,select,input[type=range]{min-width:0;width:190px}.asset-grid{grid-template-columns:1fr}.asset+.asset{border-left:0;border-top:1px solid #e2e5ed}}
   }
 </style>

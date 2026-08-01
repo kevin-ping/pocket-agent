@@ -884,6 +884,17 @@ pub fn get_wake_variant_count(name: &str) -> usize {
     }
 }
 
+/// Return the wake keyword strings for a speaker.
+pub fn get_wake_words(name: &str) -> Vec<String> {
+    let vp_dir = voiceprints_dir();
+    let wake_txt = vp_dir.join(format!("{}.wake.txt", name));
+    if !wake_txt.exists() {
+        return Vec::new();
+    }
+    let Ok(data) = std::fs::read_to_string(&wake_txt) else { return Vec::new() };
+    serde_json::from_str::<Vec<String>>(&data).unwrap_or_default()
+}
+
 /// Verify: extract embedding from WAV, compare with all enrolled.
 pub fn verify_speaker(wav_path: &str, threshold: Option<f32>) -> Result<VerifyResult, String> {
     let thr = threshold.unwrap_or(0.7);

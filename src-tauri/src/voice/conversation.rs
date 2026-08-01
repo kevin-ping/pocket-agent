@@ -84,11 +84,7 @@ const TICK_MS: u64 = 100;
 /// and return to wake/Fn-key idle state.
 const MAX_CONSECUTIVE_EMPTY_STT: u32 = 1;
 
-/// "Patient" idle deadline used at conversation start and immediately after
-/// TtsDone — gives the user time to think before the conversation auto-ends.
-/// The shorter `silence_timeout_s` from settings is only used after an empty
-/// STT result (user already failed to produce intelligible speech once).
-const POST_TTS_IDLE_TIMEOUT_S: u64 = 20;
+// Use the user-configured silence_timeout_s everywhere — no hardcoded override.
 const CONVERSATION_WAV_PATH: &str = "/tmp/pocket-agent-conversation.wav";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -254,7 +250,7 @@ pub fn start_conversation(
     let _ = app.emit("conversation-state", "listening");
     eprintln!(
         "[conv] started — initial wait {}s, post-empty wait {}s, pause tolerance {}ms, mic sensitivity {:.4}",
-        POST_TTS_IDLE_TIMEOUT_S, timeout, pause_tolerance, speech_threshold
+        timeout, timeout, pause_tolerance, speech_threshold
     );
     Ok(())
 }
@@ -277,10 +273,8 @@ fn worker_loop(
     let mut silence_run_ms: u64 = 0;
     let mut accumulated_speech_ms: u64 = 0;
     let mut listening_idle_ms: u64 = 0;
-    // Active idle deadline. Starts patient (POST_TTS) so the user has time to
-    // begin the first turn; switches to the shorter settings value only after
-    // an empty STT result.
-    let mut current_idle_target_ms: u64 = POST_TTS_IDLE_TIMEOUT_S * 1000;
+    // Active idle deadline — uses silence_timeout_s from user settings.
+    let mut current_idle_target_ms: u64 = silence_timeout_s * 1000;
     let mut speaking_since: Option<Instant> = None;
     // Rolling EMA of RMS during quiet Listening — adapts threshold to room noise.
     let mut noise_floor: f32 = 0.0;
@@ -590,7 +584,7 @@ fn worker_loop(
                 mode = Mode::Listening;
                 listening_idle_ms = 0;
                 // Patient deadline: give the user time to think before the next turn.
-                current_idle_target_ms = POST_TTS_IDLE_TIMEOUT_S * 1000;
+                current_idle_target_ms = silence_timeout_s * 1000;
                 silence_run_ms = 0;
                 accumulated_speech_ms = 0;
                 tts_started_at = None;
@@ -611,7 +605,7 @@ fn worker_loop(
                             );
                             mode = Mode::Listening;
                             listening_idle_ms = 0;
-                            current_idle_target_ms = POST_TTS_IDLE_TIMEOUT_S * 1000;
+                            current_idle_target_ms = silence_timeout_s * 1000;
                             speaking_since = None;
                             tts_started_at = None;
                             barge_in_run_ms = 0;
