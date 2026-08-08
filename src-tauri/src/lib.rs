@@ -177,6 +177,7 @@ pub fn run() {
             commands::voice::train_speaker,
             commands::voice::get_wake_variant_count,
             commands::voice::get_wake_words,
+            commands::voice::remove_wake_word,
             commands::voice::verify_speaker,
             commands::voice::list_speakers,
             commands::voice::remove_speaker,

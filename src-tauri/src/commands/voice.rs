@@ -578,6 +578,11 @@ pub fn get_wake_words(name: String) -> Vec<String> {
 }
 
 #[tauri::command]
+pub fn remove_wake_word(name: String, word: String) -> Vec<String> {
+    crate::voice::sherpa_wake::remove_wake_word(&name, &word)
+}
+
+#[tauri::command]
 pub fn verify_speaker(
     audio_path: String,
     threshold: Option<f32>,

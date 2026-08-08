@@ -72,12 +72,13 @@
   let enrollCountdown = $state(0);
   let variantCount = $state(0);
   let wakeWords = $state<string[]>([]);
+  let pendingWakeDeletes = $state<string[]>([]);
   let previewingField = $state<'primary' | 'aux1' | 'aux2' | null>(null);
   let fileInput = $state<HTMLInputElement>(undefined!);
   let gifInput = $state<HTMLInputElement>(undefined!);
 
   let text = $derived(settingsText(local?.ui_lang ?? 'en'));
-  let dirty = $derived(!!local && JSON.stringify(local) !== baseline);
+  let dirty = $derived((!!local && JSON.stringify(local) !== baseline) || pendingWakeDeletes.length > 0);
   let sections = $derived([
     { id: 'general' as Section, icon: '⌘', label: text.general },
     { id: 'avatar' as Section, icon: '◉', label: text.avatar },
@@ -154,6 +155,13 @@
       local = { ...result.config, avatar_image: avatarImage, avatar_gif: avatarGif };
       avatarImageChanged = false;
       avatarGifChanged = false;
+      if (pendingWakeDeletes.length && local.last_enrolled_speaker) {
+        for (const w of pendingWakeDeletes) {
+          wakeWords = await invoke<string[]>('remove_wake_word', { name: local.last_enrolled_speaker, word: w });
+        }
+        variantCount = wakeWords.length;
+        pendingWakeDeletes = [];
+      }
       baseline = JSON.stringify(local);
       notice = text.saved;
     } catch (e) {
@@ -165,6 +173,7 @@
 
   async function cancel() {
     if (dirty && !window.confirm(text.dirtyConfirm)) return;
+    pendingWakeDeletes = [];
     baseline = local ? JSON.stringify(local) : '';
     if (!appWindow) {
       error = `${text.actionError}: settings window handle is unavailable`;
@@ -263,6 +272,12 @@
       variantCount = await invoke<number>('get_wake_variant_count', { name: local.last_enrolled_speaker });
       wakeWords = await invoke<string[]>('get_wake_words', { name: local.last_enrolled_speaker });
     } catch { variantCount = 0; wakeWords = []; }
+  }
+
+  function toggleWakeDelete(word: string) {
+    pendingWakeDeletes = pendingWakeDeletes.includes(word)
+      ? pendingWakeDeletes.filter((w) => w !== word)
+      : [...pendingWakeDeletes, word];
   }
 
   function requestEnrollment(rename = false) {
@@ -411,14 +426,21 @@
                 {#if local.last_enrolled_speaker}<button class="secondary" onclick={train} disabled={enrolling}>{text.trainSample}</button>{/if}
               </div>
             </div>
-            {#if wakeWords.length > 0}
+            {#if local.last_enrolled_speaker}
               <div class="wake-words">
                 <span class="wake-label">{text.wakeWordsLabel}</span>
-                <div class="wake-tags">
-                  {#each wakeWords as word}
-                    <span class="wake-tag">{word}</span>
-                  {/each}
-                </div>
+                {#if wakeWords.length > 0}
+                  <div class="wake-tags">
+                    {#each wakeWords as word}
+                      <span class="wake-tag" class:pending-delete={pendingWakeDeletes.includes(word)}>
+                        {word}
+                        <button class="wake-del" aria-label={text.remove} onclick={() => toggleWakeDelete(word)}>×</button>
+                      </span>
+                    {/each}
+                  </div>
+                {:else}
+                  <p class="wake-empty">{text.wakeWordsEmpty}</p>
+                {/if}
               </div>
             {/if}
           </section>
@@ -462,7 +484,11 @@
   button.primary,button.secondary,button.ghost{border-radius:7px;padding:6px 12px;cursor:pointer;border:1px solid transparent;color:#1e2235;font-size:12px}button.primary{background:#7589f4;color:#fff}button.primary:hover{background:#6478e8}button.primary:disabled{opacity:.4;cursor:default}button.secondary{background:#f0f2f8;border-color:#d4d8e0;color:#1e2235}button.secondary:hover{background:#e8eaf2}button.ghost{background:transparent;border-color:#d4d8e0;color:#5a6178}button.ghost:hover{background:#0000000a}.danger{color:#e53e5c!important}.working{color:#c99700!important}
   footer{min-height:52px;border-top:1px solid #e2e5ed;padding:10px 28px;display:flex;gap:8px;align-items:center;justify-content:flex-end;background:#ffffff;position:relative;z-index:2}.message{margin-right:auto;color:#1a9d63;font-size:11px}.message .error{color:#e53e5c}
   .voice-field{border-bottom:1px solid #e8eaf0}.voice-field .field{border:0;padding-bottom:5px}.voice-control{display:flex;align-items:center;gap:6px}.voice-control select{width:165px}.preview-button{width:84px;min-width:84px;max-width:84px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid #d4d8e0;background:#f0f2f8;color:#1e2235;border-radius:7px;padding:6px 6px;cursor:pointer;font-size:11px}.preview-button:hover{background:#e8eaf2}.preview-button:disabled{opacity:.45;cursor:default}.check{display:flex;justify-content:flex-end;align-items:center;gap:6px;padding:0 16px 9px;color:#7a8298;font-size:10px}.check input{accent-color:#7589f4}.asset-grid{display:grid;grid-template-columns:1fr 1fr;gap:0}.asset{padding:18px;text-align:center}.asset+ .asset{border-left:1px solid #e2e5ed}.preview{width:84px;height:84px;margin:0 auto 12px;border-radius:18px;background:linear-gradient(145deg,#f0f2f8,#e8eaf2);border:1px solid #d4d8e0;display:grid;place-items:center;overflow:hidden;color:#7589f4;font-weight:800}.preview img{width:100%;height:100%;object-fit:cover}.asset h3{font-size:13px;color:#1e2235}.asset p{height:32px;margin:5px 0 10px;color:#7a8298;font-size:10px;line-height:1.5}.asset button+button{margin-left:6px}
-  .wake-words{padding:12px 16px;border-top:1px solid #e8eaf0}.wake-label{display:block;font-size:12px;font-weight:600;color:#1e2235;margin-bottom:8px}.wake-tags{display:flex;flex-wrap:wrap;gap:6px}.wake-tag{display:inline-flex;align-items:center;background:#eef1f7;border:1px solid #dde2ec;color:#3a4156;font-size:11px;font-weight:500;padding:4px 10px;border-radius:14px}.sample{padding:16px;display:flex;align-items:center;justify-content:space-between;gap:16px}.sample strong{font-size:12px;color:#1e2235}.sample p{font-size:10px;color:#7a8298;margin-top:4px}.actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.center{height:100%;display:grid;place-items:center;color:#8e97aa}.spinner{width:22px;height:22px;border:2px solid #d4d8e0;border-top-color:#7589f4;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.error{color:#e53e5c}
+  .wake-words{padding:12px 16px;border-top:1px solid #e8eaf0}.wake-label{display:block;font-size:12px;font-weight:600;color:#1e2235;margin-bottom:8px}.wake-tags{display:flex;flex-wrap:wrap;gap:6px}.wake-tag{display:inline-flex;align-items:center;gap:4px;background:#eef1f7;border:1px solid #dde2ec;color:#3a4156;font-size:11px;font-weight:500;padding:4px 6px 4px 10px;border-radius:14px}
+.wake-tag.pending-delete{opacity:.5;text-decoration:line-through}
+.wake-del{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;padding:0;border:none;background:transparent;color:#8a91a6;font-size:14px;line-height:1;border-radius:8px;cursor:pointer;text-decoration:none}
+.wake-del:hover{background:#dce0ea;color:#c0392b}
+.wake-empty{margin:0;font-size:11px;color:#8a91a6}.sample{padding:16px;display:flex;align-items:center;justify-content:space-between;gap:16px}.sample strong{font-size:12px;color:#1e2235}.sample p{font-size:10px;color:#7a8298;margin-top:4px}.actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.center{height:100%;display:grid;place-items:center;color:#8e97aa}.spinner{width:22px;height:22px;border:2px solid #d4d8e0;border-top-color:#7589f4;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.error{color:#e53e5c}
   .error-state{align-content:center;justify-items:center;gap:12px;padding:24px;text-align:center}.error-state p{max-width:480px;line-height:1.5}
   .backdrop{position:fixed;inset:0;background:#00000033;display:grid;place-items:center;z-index:20}.modal{width:360px;background:#ffffff;border:1px solid #e2e5ed;border-radius:12px;padding:20px;box-shadow:0 20px 60px #00000030}.modal h3{font-size:15px;color:#1e2235}.modal p{color:#6a7185;font-size:11px;line-height:1.5;margin:6px 0 16px}.modal label{display:grid;gap:6px;font-size:11px;color:#2a2f42}.modal input{width:100%}.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
   @media(max-width:740px){.shell{grid-template-columns:170px 1fr}.content,header,footer{padding-left:18px;padding-right:18px}.field{gap:12px}.control,select,input[type=range]{min-width:0;width:190px}.asset-grid{grid-template-columns:1fr}.asset+.asset{border-left:0;border-top:1px solid #e2e5ed}}

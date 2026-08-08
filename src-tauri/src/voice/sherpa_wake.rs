@@ -895,6 +895,17 @@ pub fn get_wake_words(name: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(&data).unwrap_or_default()
 }
 
+/// Remove one wake keyword for a speaker; returns the remaining list.
+pub fn remove_wake_word(name: &str, word: &str) -> Vec<String> {
+    let wake_txt = voiceprints_dir().join(format!("{}.wake.txt", name));
+    let mut words = get_wake_words(name);
+    words.retain(|w| w != word);
+    if let Ok(data) = serde_json::to_string(&words) {
+        let _ = std::fs::write(&wake_txt, data);
+    }
+    words
+}
+
 /// Verify: extract embedding from WAV, compare with all enrolled.
 pub fn verify_speaker(wav_path: &str, threshold: Option<f32>) -> Result<VerifyResult, String> {
     let thr = threshold.unwrap_or(0.7);
