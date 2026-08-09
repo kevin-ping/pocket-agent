@@ -230,12 +230,27 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
     let stt_model = std::env::var("STT_MODEL").unwrap_or_else(|_| "base".to_string());
     eprintln!("[stt] using Whisper model: {}", stt_model);
 
+    // Derive lang-prompt from primary TTS voice to control Whisper output script.
+    // zh-TW, zh-HK, zh-MO, ja-* → traditional; everything else → simplified.
+    let primary_voice = std::env::var("TTS_PRIMARY_VOICE").unwrap_or_default();
+    let lang_prompt = if primary_voice.starts_with("zh-TW")
+        || primary_voice.starts_with("zh-HK")
+        || primary_voice.starts_with("zh-MO")
+        || primary_voice.starts_with("ja-")
+    {
+        "trad"
+    } else {
+        ""
+    };
+
     match Command::new(&python)
         .arg(&server_script)
         .arg("--port")
         .arg("8651")
         .arg("--model")
         .arg(&stt_model)
+        .arg("--lang-prompt")
+        .arg(&lang_prompt)
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())  // Show model loading progress in PA logs
         .spawn()

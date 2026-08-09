@@ -16,6 +16,7 @@
 // worker thread, so the worker is the sole owner of mutable state — no shared
 // locks beyond the channel itself and the active-flag atomic.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Mutex, OnceLock};
@@ -67,6 +68,8 @@ const BARGE_IN_WARMUP_MS: u64 = 600;
 /// Filters short TTS-echo bursts (typically < 200 ms) while letting real
 /// sustained speech interrupt.
 const BARGE_IN_MIN_SUSTAINED_MS: u64 = 350;
+/// Pre-roll buffer max duration (from Hermes)
+const BARGE_IN_PREROLL_MAX_MS: u64 = 500;
 /// Louder RMS bar applied in Speaking mode only, so TTS bleed must clear it
 /// continuously for BARGE_IN_MIN_SUSTAINED_MS before interrupting. ~ -28 dBFS.
 const BARGE_IN_RMS_THRESHOLD: f32 = 0.04;
@@ -289,6 +292,10 @@ fn worker_loop(
     // Hysteresis: once barge-in run starts, RMS must drop below BARGE_IN_RELEASE_RMS
     // to reset the counter.  Prevents inter-syllable dips from clearing the tally.
     let mut barge_in_active: bool = false;
+    // Pre-roll buffer from Hermes: capture audio before barge-in triggers
+    let mut barge_preroll: VecDeque<Vec<i16>> = VecDeque::new();
+    let mut barge_preroll_samples: u64 = 0;
+    let preroll_cap = ((stream_handle.sample_rate as u64 / 1000) * BARGE_IN_PREROLL_MAX_MS) as usize;
     // When true, the next completed utterance will be verified against enrolled
     // speakers before sending to STT.  Set on barge-in so a stranger's voice
     // doesn't hijack the conversation.
@@ -444,9 +451,22 @@ fn worker_loop(
                     }
                     Mode::Speaking => {
                         if !barge_in_enabled {
-                            // Barge-in disabled by user — skip all VAD during TTS playback.
                             continue;
                         }
+
+                        // Pre-roll buffer: always capture audio during Speaking (from Hermes)
+                        // This ensures the user's first words aren't lost when barge-in triggers
+                        let mono_owned = mono.to_vec();
+                        barge_preroll.push_back(mono_owned);
+                        barge_preroll_samples = barge_preroll_samples.saturating_add(mono.len() as u64);
+                        while barge_preroll_samples > preroll_cap as u64 {
+                            if let Some(old) = barge_preroll.pop_front() {
+                                barge_preroll_samples = barge_preroll_samples.saturating_sub(old.len() as u64);
+                            } else {
+                                break;
+                            }
+                        }
+
                         // Suppress barge-in detection entirely until TTS audio
                         // has actually started playing.  Before TtsStarted
                         // arrives the LLM is still thinking — there is nothing
@@ -480,9 +500,13 @@ fn worker_loop(
                             let _ = app.emit("conversation-barge-in", ());
                             eprintln!("[conv] barge-in detected");
 
+                            // Drain pre-roll into utter_buf (from Hermes)
+                            // This captures the user's first words before barge-in triggered
                             utter_buf.clear();
-                            // Don't pre-load this chunk — it contains TTS echo.
-                            // The user must continue speaking into the fresh buffer.
+                            for chunk in barge_preroll.drain(..) {
+                                utter_buf.extend_from_slice(&chunk);
+                            }
+                            barge_preroll_samples = 0;
                             utter_sr = sr;
                             accumulated_speech_ms = 0;
                             silence_run_ms = 0;

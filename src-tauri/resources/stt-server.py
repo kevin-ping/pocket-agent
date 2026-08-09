@@ -104,6 +104,8 @@ class State:
     whisper_wake: Optional[WhisperModel] = None
     whisper_wake_name: str = ""
     wake_lang: str = ""
+    whisper_prompt: str = "以下是普通话的句子。"
+    use_traditional: bool = False
     vad = None
 
 # Wake-phrase keyword matching via Whisper transcription.
@@ -128,6 +130,8 @@ _HALLUCINATION_FRAGMENTS = [
     "请订阅", "请关注", "点赞", "订阅", "转发", "打赏",
     "作词", "作曲", "制作人", "出品", "版权",
     "明镜", "栏目", "不吝",
+    # initial_prompt 文本本身（Whisper 会把 prompt 幻觉为输出）
+    "以下是普通话的句子", "以下是繁體中文的句子",
     # 英文常见幻觉
     "subtitles by", "thank you for watching", "please subscribe",
     "amara.org", "translated by", "music:", "♪", "♫", "♬", "🎵", "🎶",
@@ -183,11 +187,12 @@ def _transcribe_for_wake(tmp_wav_path: str) -> str:
     if model is None:
         return ""
     try:
-        kwargs = dict(beam_size=3)
+        kwargs = dict(beam_size=3, initial_prompt=state.whisper_prompt)
         if state.wake_lang:
             kwargs["language"] = state.wake_lang
         segments, info = model.transcribe(tmp_wav_path, **kwargs)
         text = " ".join(seg.text.strip() for seg in segments).strip().lower()
+        text = _t2s(text)
         if _is_hallucination(text):
             print(f"[stt-server] wake hallucination filtered: {text!r}",
                   file=sys.stderr, flush=True)
@@ -198,11 +203,47 @@ def _transcribe_for_wake(tmp_wav_path: str) -> str:
         return ""
 
 
+# Compact T2S: only covers pairs Whisper commonly flips for short
+# wake words.  With initial_prompt forcing simplified output this is a
+# safety net, not the primary fix.
+_SIMP_TRAD_PAIRS = {
+    '學': '学', '與': '与', '個': '个', '們': '们', '這': '这',
+    '來': '来', '說': '说', '見': '见', '會': '会', '對': '对',
+    '時': '时', '過': '过', '還': '还', '進': '进', '現': '现',
+    '發': '发', '開': '开', '電': '电', '機': '机', '經': '经',
+    '動': '动', '點': '点', '問': '问', '關': '关', '應': '应',
+    '體': '体', '論': '论', '讓': '让', '記': '记', '員': '员',
+    '結': '结', '辦': '办', '識': '识', '響': '响', '顧': '顾',
+    '國': '国', '際': '际', '區': '区', '報': '报', '華': '华',
+    '網': '网', '權': '权', '選': '选', '傳': '传', '藝': '艺',
+    '節': '节', '藥': '药', '觀': '观', '計': '计', '認': '认',
+    '議': '议', '講': '讲', '證': '证', '讀': '读', '變': '变',
+    '續': '续', '誰': '谁', '類': '类', '頭': '头', '龍': '龙',
+    '風': '风', '雲': '云', '業': '业', '專': '专', '書': '书',
+    '無': '无', '長': '长', '東': '东', '兩': '两', '麼': '么',
+    '後': '后', '內': '内', '舊': '旧', '傑': '杰', '偉': '伟',
+    '強': '强', '輝': '辉', '蘭': '兰', '蓮': '莲', '瑩': '莹',
+    '穎': '颖', '瑤': '瑶', '豐': '丰', '麗': '丽', '舉': '举',
+    '鄉': '乡', '買': '买', '亂': '乱', '絲': '丝', '嚴': '严',
+}
+
+def _t2s(text: str) -> str:
+    """Convert Traditional → Simplified, but ONLY when the user's primary
+    voice is NOT a traditional-using language.  If the user chose zh-TW,
+    zh-HK, zh-MO, or ja, we preserve traditional output."""
+    if getattr(state, "use_traditional", False):
+        return text
+    return ''.join(_SIMP_TRAD_PAIRS.get(ch, ch) for ch in text)
+
+
 def _clean_wake_text(text: str) -> str:
-    """Strip punctuation, spaces, and normalize for wake keyword storage."""
+    """Strip punctuation, spaces, normalize case, and unify CJK simplification."""
     import re
     # Remove all punctuation and whitespace, keep only word characters (includes CJK)
     cleaned = re.sub(r'[^\w]', '', text.lower()).strip()
+    # Unify traditional → simplified so Whisper's random 繁/简 output
+    # doesn't fragment keyword matching (e.g. 同學 → 同学)
+    cleaned = _t2s(cleaned)
     return cleaned
 
 
@@ -495,11 +536,19 @@ async def transcribe(file: UploadFile = File(...)):
                 return {"text": "", "language": "", "warning": "no speech"}
 
         t0 = time.time()
-        segments, info = state.whisper.transcribe(tmp_path, beam_size=5)
-        text = " ".join(seg.text.strip() for seg in segments).strip()
+        segments, info = state.whisper.transcribe(
+            tmp_path, beam_size=5, initial_prompt=state.whisper_prompt
+        )
+        text = _t2s(" ".join(seg.text.strip() for seg in segments).strip())
         elapsed = time.time() - t0
         print(f"[stt-server] transcribed in {elapsed:.1f}s lang={info.language}",
               file=sys.stderr, flush=True)
+
+        # Filter hallucinations (including initial_prompt echo-back)
+        if _is_hallucination(text):
+            print(f"[stt-server] hallucination filtered: {text!r}",
+                  file=sys.stderr, flush=True)
+            return {"text": "", "language": info.language, "warning": "hallucination filtered"}
 
         if text:
             return {"text": text, "language": info.language}
@@ -1036,6 +1085,9 @@ def main():
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--compute-type", type=str, default="int8")
     parser.add_argument("--no-vad", action="store_true")
+    parser.add_argument("--lang-prompt", type=str, default="",
+                        help="initial_prompt for Whisper to control output script "
+                             "(e.g. simplified vs traditional Chinese)")
     args = parser.parse_args()
 
     # SEC-RV-1-2: mint a per-launch bearer token before any endpoint is
@@ -1093,6 +1145,17 @@ def main():
 
     # Load wake language override
     state.wake_lang = os.environ.get("WAKE_LANGUAGE", "")
+    # Build Whisper initial_prompt from --lang-prompt flag.
+    # "trad" → traditional Chinese, "ja" → Japanese, empty → simplified Chinese.
+    _lp = args.lang_prompt.strip()
+    if _lp in ("trad", "ja"):
+        state.whisper_prompt = "以下是繁體中文的句子。"
+        state.use_traditional = True
+    else:
+        state.whisper_prompt = "以下是普通话的句子。"
+        state.use_traditional = False
+    print(f"[stt-server] whisper initial_prompt: {state.whisper_prompt!r}",
+          file=sys.stderr, flush=True)
     if state.wake_lang:
         print(f"[stt-server] wake language forced: {state.wake_lang}", file=sys.stderr, flush=True)
 

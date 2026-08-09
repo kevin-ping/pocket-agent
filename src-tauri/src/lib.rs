@@ -70,11 +70,13 @@ pub fn run() {
             // start the STT server once the venv is ready.
             {
                 let venv_handle = handle.clone();
+                let voice_for_stt = config.tts_primary_voice.clone();
                 std::thread::Builder::new()
                     .name("venv-bootstrap".to_string())
                     .spawn(move || {
                         match voice::venv::ensure_venv(&venv_handle) {
                             Ok(()) => {
+                                std::env::set_var("TTS_PRIMARY_VOICE", &voice_for_stt);
                                 voice::stt::ensure_stt_server(Some(venv_handle.clone()));
                             }
                             Err(e) => eprintln!("[venv] bootstrap failed: {}", e),
