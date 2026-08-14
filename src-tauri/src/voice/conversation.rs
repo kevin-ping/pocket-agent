@@ -494,11 +494,31 @@ fn worker_loop(
                         }
 
                         if barge_in_run_ms >= BARGE_IN_MIN_SUSTAINED_MS {
-                            // Barge-in: cut TTS, switch to a fresh listening
+                            // VAD confirmation gate: RMS alone can't distinguish
+                            // human speech from whistles, claps, door slams, etc.
+                            // Flatten the pre-roll buffer (recent audio at device
+                            // sample rate) and ask Silero if it contains real speech.
+                            let vad_samples: Vec<i16> = barge_preroll.iter()
+                                .flatten()
+                                .copied()
+                                .collect();
+                            let has_speech = crate::commands::voice::check_silero_vad_samples(
+                                &vad_samples, sr,
+                            );
+                            if !has_speech {
+                                eprintln!(
+                                    "[conv] barge-in RMS sustained but Silero VAD says no speech — ignoring"
+                                );
+                                barge_in_run_ms = 0;
+                                barge_in_active = false;
+                                continue;
+                            }
+
+                            // Barge-in confirmed: cut TTS, switch to a fresh listening
                             // buffer pre-loaded with this chunk.
                             crate::commands::chat::stop_audio_queue();
                             let _ = app.emit("conversation-barge-in", ());
-                            eprintln!("[conv] barge-in detected");
+                            eprintln!("[conv] barge-in detected (VAD confirmed)");
 
                             // Drain pre-roll into utter_buf (from Hermes)
                             // This captures the user's first words before barge-in triggered

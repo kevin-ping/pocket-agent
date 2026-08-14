@@ -330,16 +330,25 @@ pub fn get_audio_level() -> f32 {
 
 /// Check recent audio with Silero VAD via Python STT server.
 /// Returns true if human speech is detected in the last ~1s of audio.
-fn check_silero_vad() -> bool {
+pub(crate) fn check_silero_vad() -> bool {
     // Read ~1s of recent mono samples (16kHz = 16000 samples)
     let samples = crate::voice::record::read_vad_samples(16000);
     if samples.len() < 3200 {
         // Less than 200ms of audio, not enough for VAD
         return false;
     }
+    check_silero_vad_samples(&samples, 16000)
+}
+
+/// Check raw audio samples with Silero VAD. Works with any sample rate — the
+/// Python server handles the actual analysis; we just build a valid WAV.
+pub(crate) fn check_silero_vad_samples(samples: &[i16], sample_rate: u32) -> bool {
+    if samples.len() < 3200 {
+        return false;
+    }
 
     // Build WAV bytes
-    let sr: u32 = 16000;
+    let sr: u32 = sample_rate;
     let data_len = samples.len() * 2;
     let mut wav = Vec::with_capacity(44 + data_len);
     wav.extend_from_slice(b"RIFF");
@@ -355,7 +364,7 @@ fn check_silero_vad() -> bool {
     wav.extend_from_slice(&16u16.to_le_bytes());  // bits per sample
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&(data_len as u32).to_le_bytes());
-    for &s in &samples {
+    for &s in samples {
         wav.extend_from_slice(&s.to_le_bytes());
     }
 

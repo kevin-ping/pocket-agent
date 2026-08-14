@@ -189,10 +189,14 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
     })
 }
 
-/// Stop the pipeline and reset queue counter. Called on fn-key press.
+/// Stop the pipeline and reset queue counter. Called on fn-key press and barge-in.
 pub fn stop_audio_queue() {
     eprintln!("[AUDIO] stop requested");
     AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst);
+    // Supersede any in-flight SSE turn so its sentence callback stops
+    // reserving queue slots that will never be released (leak → queue
+    // full → new turn's TTS silently dropped).
+    TURN_GENERATION.fetch_add(1, Ordering::SeqCst);
     audio_queue_reset();
     let sink = current_audio_sink().lock().unwrap().take();
     if let Some(sink) = sink {
