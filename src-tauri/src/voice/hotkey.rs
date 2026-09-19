@@ -10,9 +10,17 @@ static HOTKEY_ACTIVE_STATE: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 /// the break-confirmation popup: the prior press already flipped the toggle, so
 /// without this the next press would be interpreted as "stop" instead of "start".
 pub fn reset_active_state() {
-    if let Some(flag) = HOTKEY_ACTIVE_STATE.get() {
-        flag.store(false, Ordering::SeqCst);
-    }
+    set_active_state(false);
+}
+
+/// Force the hotkey press/release toggle to `state`. Sessions can begin or end
+/// without a hotkey press at all (wake word starts one, idle timeout ends one);
+/// without syncing the toggle, the next physical press is read as the opposite
+/// of what the user intends and appears to do nothing.
+pub fn set_active_state(state: bool) {
+    HOTKEY_ACTIVE_STATE
+        .get_or_init(|| Arc::new(AtomicBool::new(false)))
+        .store(state, Ordering::SeqCst);
 }
 
 /// Global flag: when true, the main hotkey listener ignores keys (capture in progress)

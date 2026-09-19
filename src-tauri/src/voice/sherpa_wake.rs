@@ -475,6 +475,10 @@ fn wake_http_worker_loop(
                                     {
                                         last_detection_time = now;
                                         eprintln!("[wake] MATCH! score={:.3} keyword={}", result.score, result.keyword_match);
+                                        // Wake starts a session without a key press —
+                                        // mark the hotkey toggle active so the user's
+                                        // next press reads as "stop", not "start".
+                                        crate::voice::hotkey::set_active_state(true);
                                         let _ = app.emit("fn-key-down", ());
                                         eprintln!("[wake] emitted fn-key-down");
                                     }
@@ -524,6 +528,7 @@ fn wake_http_worker_loop(
                                 {
                                     last_detection_time = now;
                                     eprintln!("[wake] MATCH (flush)! score={:.3}", result.score);
+                                    crate::voice::hotkey::set_active_state(true);
                                     let _ = app.emit("fn-key-down", ());
                                 }
                             }

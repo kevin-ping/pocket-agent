@@ -178,7 +178,13 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                     // chat-audio-done fires once per turn, when every non-silent sentence
                     // submitted for this generation (see PENDING_NON_SILENT) has finished
                     // playing — not after each individual sentence.
-                    if !prep.silent {
+                    // Only decrement for the generation the counter belongs to;
+                    // a stale sentence finishing late would otherwise consume a
+                    // current-generation credit and fire chat-audio-done early
+                    // (or, symmetrically, never).
+                    if !prep.silent
+                        && prep.generation == AUDIO_GENERATION.load(Ordering::SeqCst)
+                    {
                         PENDING_NON_SILENT.fetch_sub(1, Ordering::SeqCst);
                         maybe_emit_audio_done(&prep.app, prep.generation);
                     }
@@ -650,13 +656,15 @@ fn emit_text_without_tts(app: &AppHandle, full_response: &str, emotion: &str) {
     if cleaned.is_empty() { return; }
 
     // Text-only fallback: no audio plays, but UI still wants the "speaking" animation
-    // while text streams. Fire chat-audio-playing alongside speaking-start.
-    let _ = app.emit("chat-audio-playing", ());
+    // while text streams. speaking-start must come first — it carries has_audio,
+    // which the frontend reads when chat-audio-playing arrives to decide whether
+    // to arm barge-in. Reversed, this turn would inherit the previous turn's flag.
     let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
         emotion: emotion.to_string(),
         total_chars: cleaned.chars().count(),
         has_audio: false,
     });
+    let _ = app.emit("chat-audio-playing", ());
     for ch in cleaned.chars() {
         let _ = app.emit("chat-stream", ChatStreamPayload { delta: ch.to_string() });
     }
@@ -931,6 +939,11 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
     }
 
     let speak_generation = AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    // Slots reserved by the superseded generation are never released (their
+    // release is generation-gated), so without this reset they leak. Ten leaked
+    // slots fill the queue and every later sentence blocks 30s then drops —
+    // the assistant "goes quiet mid-reply".
+    audio_queue_reset();
     begin_audio_submission();
     let speak_app = app.clone();
     let speak_format = "wav".to_string();
@@ -1018,6 +1031,10 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
     } else {
         let emotion = detect_emotion(&full_response);
         emit_text_without_tts(&app, &full_response, &emotion);
+        // No audio will ever play for this turn, so nothing else would emit
+        // chat-audio-done — the continuous-conversation worker would sit in
+        // Speaking until its 30s safety timeout.
+        let _ = app.emit("chat-audio-done", ());
     }
 
     Ok(())

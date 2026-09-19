@@ -99,6 +99,52 @@
   // ─── Continuous conversation mode ───
   let conversationActive = false;
   let bridgeFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  /// Timestamp of the last barge-in. The mic is already open when we return to
+  /// listening, so the prompt chime would be recorded as part of the user's
+  /// utterance; suppress it for a moment after an interrupt.
+  let lastBargeInAt = 0;
+  const BARGE_IN_PROMPT_MUTE_MS = 1000;
+
+  /// Start or stop a continuous conversation. Shared by fn-key-down and
+  /// fn-key-up: the hotkey state machine alternates which of the two it emits,
+  /// so treating either as the toggle keeps one press = one action regardless
+  /// of which half of the cycle the key is currently on.
+  function toggleContinuousConversation() {
+    const cfg = get(settingsStore);
+    if (conversationActive) {
+      invoke('stop_continuous_conversation').catch(console.error);
+      conversationActive = false;
+      chatStore.setVoiceStatus(null);
+      islandMode = 'idle';
+      spiritPhase = 0;
+      characterState.toIdle();
+      return;
+    }
+    requestNewTurn(() => {
+      playPromptSound();
+      conversationActive = true;
+      islandMode = 'recording';
+      spiritPhase = 0;
+      firstStreamDelta = false;
+      chatStore.clear();
+      chatStore.setVoiceStatus(voiceListeningText());
+      characterState.toListening();
+      invoke('start_continuous_conversation', {
+        silenceTimeoutSecs: cfg.silence_timeout_secs,
+        pauseToleranceMs: cfg.pause_tolerance_ms,
+        speechRmsThreshold: cfg.speech_rms_threshold,
+        bargeInRmsThreshold: cfg.barge_in_rms_threshold,
+        bargeInEnabled: cfg.barge_in_enabled,
+      })
+        .catch((e) => {
+          console.error('[continuous] start failed', e);
+          conversationActive = false;
+          characterState.toIdle();
+          islandMode = 'idle';
+          chatStore.setError(`连续对话启动失败: ${e}`);
+        });
+    });
+  }
 
   function voiceListeningText(): string {
     return `🎤 ${convLabels(get(settingsStore).tts_primary_voice).voiceListening}`;
@@ -415,9 +461,6 @@
         if (!e.payload.has_audio && !$layoutStore.expanded) {
           layoutStore.toggle();
         }
-        if (conversationActive && e.payload.has_audio) {
-          invoke('notify_conversation_tts_started').catch(console.error);
-        }
       }),
       listen('chat-audio-playing', () => {
         cancelPendingStatusSpeech();
@@ -427,6 +470,12 @@
         characterState.toSpeaking();
         chatStore.finishThinkingPhase();
         spiritPhase = 3;
+        // Arm barge-in only once audio is actually playing. chat-speaking-start
+        // fires before the LLM request, so arming there burns the 600ms warmup
+        // during thinking and lets ambient speech kill a reply that never played.
+        if (conversationActive && lastSpeakingHadAudio) {
+          invoke('notify_conversation_tts_started').catch(console.error);
+        }
       }),
       listen<{ delta: string }>('chat-stream', (e) => {
         cancelPendingStatusSpeech();
@@ -573,39 +622,7 @@
           return;
         }
         if (cfg.continuous_conversation) {
-          if (conversationActive) {
-            invoke('stop_continuous_conversation').catch(console.error);
-            conversationActive = false;
-            chatStore.setVoiceStatus(null);
-            islandMode = 'idle';
-            spiritPhase = 0;
-            characterState.toIdle();
-            return;
-          }
-          requestNewTurn(() => {
-            playPromptSound();
-            conversationActive = true;
-            islandMode = 'recording';
-            spiritPhase = 0;
-            firstStreamDelta = false;
-            chatStore.clear();
-            chatStore.setVoiceStatus(voiceListeningText());
-            characterState.toListening();
-            invoke('start_continuous_conversation', {
-              silenceTimeoutSecs: cfg.silence_timeout_secs,
-              pauseToleranceMs: cfg.pause_tolerance_ms,
-              speechRmsThreshold: cfg.speech_rms_threshold,
-              bargeInRmsThreshold: cfg.barge_in_rms_threshold,
-              bargeInEnabled: cfg.barge_in_enabled,
-            })
-              .catch((e) => {
-                console.error('[continuous] start failed', e);
-                conversationActive = false;
-                characterState.toIdle();
-                islandMode = 'idle';
-                chatStore.setError(`连续对话启动失败: ${e}`);
-              });
-          });
+          toggleContinuousConversation();
           return;
         }
         requestNewTurn(() => {
@@ -635,7 +652,8 @@
       listen('fn-key-up', () => {
         debugState('fn-key-up');
         if (get(settingsStore).continuous_conversation) {
-          // In continuous mode, hotkey is a toggle on key-down; key-up is a no-op.
+          // Continuous mode: every press is a toggle, whichever event it emits.
+          toggleContinuousConversation();
           return;
         }
         // Single-shot mode: stop conversation worker and reset state immediately.
@@ -698,7 +716,9 @@
         debugState('conversation-state', { state: s });
         if (!conversationActive) return;
         if (s === 'listening') {
-          playPromptSound();
+          if (Date.now() - lastBargeInAt >= BARGE_IN_PROMPT_MUTE_MS) {
+            playPromptSound();
+          }
           chatStore.setVoiceStatus(voiceListeningText());
           characterState.toListening();
           islandMode = 'recording';
@@ -751,6 +771,7 @@
       }),
       listen('conversation-barge-in', () => {
         debugState('conversation-barge-in');
+        lastBargeInAt = Date.now();
         // TTS was cut; kill typewriter immediately so text stops mid-sentence.
         chatStore.abortTypewriter();
         chatStore.clearThinkingSteps();

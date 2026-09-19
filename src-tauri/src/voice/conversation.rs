@@ -84,8 +84,10 @@ const TICK_MS: u64 = 100;
 /// Max consecutive empty STT results before auto-ending the conversation.
 /// Each empty result means VAD detected sound but Silero/Whisper found no human speech
 /// (birds, clicks, background noise). After this many in a row, end the conversation
-/// and return to wake/Fn-key idle state.
-const MAX_CONSECUTIVE_EMPTY_STT: u32 = 1;
+/// and return to wake/Fn-key idle state. Kept at 3 so a single cough / "嗯"
+/// filtered by hallucination-suppression doesn't kill the session — the real
+/// session end is the silence_timeout_s idle deadline.
+const MAX_CONSECUTIVE_EMPTY_STT: u32 = 3;
 
 // Use the user-configured silence_timeout_s everywhere — no hardcoded override.
 const CONVERSATION_WAV_PATH: &str = "/tmp/pocket-agent-conversation.wav";
@@ -100,6 +102,10 @@ enum Mode {
 enum Msg {
     AudioChunk(Vec<i16>, u32),
     SttResult(Result<SttResult, String>),
+    /// Speaker verification rejected a barge-in utterance. Distinct from an
+    /// empty SttResult so a legitimate barge-in by an unenrolled voice never
+    /// counts toward MAX_CONSECUTIVE_EMPTY_STT and never reaches the LLM.
+    VerifyRejected,
     TtsStarted,
     TtsDone,
     Stop,
@@ -213,6 +219,11 @@ pub fn start_conversation(
     let speech_threshold = speech_rms_threshold
         .unwrap_or(SPEECH_RMS_THRESHOLD)
         .clamp(0.003, 0.030);
+    // Same range the settings DB validates against — a stale or hand-edited
+    // value must not silently disarm (too high) or hair-trigger (too low) barge-in.
+    let barge_in_threshold = barge_in_rms_threshold
+        .unwrap_or(BARGE_IN_RMS_THRESHOLD)
+        .clamp(0.02, 0.15);
     let app_clone = app.clone();
 
     std::thread::Builder::new()
@@ -226,7 +237,7 @@ pub fn start_conversation(
                 pause_tolerance,
                 speech_threshold,
                 single_shot.unwrap_or(false),
-                barge_in_rms_threshold.unwrap_or(BARGE_IN_RMS_THRESHOLD),
+                barge_in_threshold,
                 barge_in_enabled.unwrap_or(true),
             );
             // Only clear shared state if our generation still owns the slot.
@@ -236,6 +247,12 @@ pub fn start_conversation(
                 if still_mine {
                     *guard = None;
                     ACTIVE.store(false, Ordering::Release);
+                    // Sessions can end without a key press (idle timeout,
+                    // single-shot break, Stop). Clear the hotkey toggle so the
+                    // next press starts a session — but only while we still own
+                    // the slot, or a late exit would clobber a newer session's
+                    // active state and reintroduce the press/release mismatch.
+                    crate::voice::hotkey::set_active_state(false);
                 }
             }
         })
@@ -502,16 +519,29 @@ fn worker_loop(
                                 .flatten()
                                 .copied()
                                 .collect();
-                            let has_speech = crate::commands::voice::check_silero_vad_samples(
+                            match crate::commands::voice::check_silero_vad_samples(
                                 &vad_samples, sr,
-                            );
-                            if !has_speech {
-                                eprintln!(
-                                    "[conv] barge-in RMS sustained but Silero VAD says no speech — ignoring"
-                                );
-                                barge_in_run_ms = 0;
-                                barge_in_active = false;
-                                continue;
+                            ) {
+                                Some(true) => {}
+                                Some(false) => {
+                                    eprintln!(
+                                        "[conv] barge-in RMS sustained but Silero VAD says no speech — ignoring"
+                                    );
+                                    barge_in_run_ms = 0;
+                                    barge_in_active = false;
+                                    continue;
+                                }
+                                None => {
+                                    // stt-server unreachable/slow. RMS has already
+                                    // been sustained for BARGE_IN_MIN_SUSTAINED_MS,
+                                    // which is evidence enough — fail open so a
+                                    // degraded VAD service can't make interruption
+                                    // permanently impossible. Speaker verification
+                                    // still gates the utterance downstream.
+                                    eprintln!(
+                                        "[conv] Silero VAD unavailable — failing open on sustained RMS barge-in"
+                                    );
+                                }
                             }
 
                             // Barge-in confirmed: cut TTS, switch to a fresh listening
@@ -586,6 +616,9 @@ fn worker_loop(
                     // Msg::TtsStarted, which fires only when audio begins.
                     tts_started_at = None;
                     barge_in_run_ms = 0;
+                    barge_in_active = false;
+                    barge_preroll.clear();
+                    barge_preroll_samples = 0;
                     in_speech_burst = false;
                     emit_state("speaking");
                 } else {
@@ -607,9 +640,34 @@ fn worker_loop(
                     speaking_since = None;
                     tts_started_at = None;
                     barge_in_run_ms = 0;
+                    barge_in_active = false;
+                    barge_preroll.clear();
+                    barge_preroll_samples = 0;
                     in_speech_burst = false;
                     emit_state("listening");
                 }
+            }
+
+            Ok(Msg::VerifyRejected) => {
+                // Barge-in utterance failed speaker verification. TTS was
+                // already cut at barge-in time and can't be resumed, but the
+                // conversation itself must survive: return to Listening
+                // without touching consecutive_empty_stt.
+                eprintln!("[conv] speaker verify rejected — utterance discarded, back to listening");
+                mode = Mode::Listening;
+                listening_idle_ms = 0;
+                current_idle_target_ms = silence_timeout_s * 1000;
+                silence_run_ms = 0;
+                accumulated_speech_ms = 0;
+                utter_buf.clear();
+                speaking_since = None;
+                tts_started_at = None;
+                barge_in_run_ms = 0;
+                barge_in_active = false;
+                barge_preroll.clear();
+                barge_preroll_samples = 0;
+                in_speech_burst = false;
+                emit_state("listening");
             }
 
             Ok(Msg::TtsStarted) => {
@@ -630,12 +688,35 @@ fn worker_loop(
                 // Patient deadline: give the user time to think before the next turn.
                 current_idle_target_ms = silence_timeout_s * 1000;
                 silence_run_ms = 0;
-                accumulated_speech_ms = 0;
                 tts_started_at = None;
-                barge_in_run_ms = 0;
-                in_speech_burst = false;
-                utter_buf.clear();
                 speaking_since = None;
+
+                utter_buf.clear();
+                if barge_in_active && barge_in_run_ms >= MIN_UTTERANCE_MS {
+                    // The user started talking over the TTS tail and audio ended
+                    // before barge-in could fire. Carry the pre-roll into the new
+                    // listening buffer instead of discarding it, or their opening
+                    // syllables are lost from the transcript.
+                    //
+                    // Requiring a full MIN_UTTERANCE_MS run matters: a shorter
+                    // carry-over would leave accumulated_speech_ms non-zero but
+                    // below the flush bar, and Listening would then never take
+                    // the idle branch — silence_timeout_s would stop working.
+                    for chunk in barge_preroll.iter() {
+                        utter_buf.extend_from_slice(chunk);
+                    }
+                    utter_sr = stream_handle.sample_rate;
+                    accumulated_speech_ms = barge_in_run_ms;
+                    in_speech_burst = true;
+                } else {
+                    accumulated_speech_ms = 0;
+                    in_speech_burst = false;
+                }
+                // Stale pre-roll must never bleed into a later turn.
+                barge_preroll.clear();
+                barge_preroll_samples = 0;
+                barge_in_run_ms = 0;
+                barge_in_active = false;
                 emit_state("listening");
             }
 
@@ -653,6 +734,9 @@ fn worker_loop(
                             speaking_since = None;
                             tts_started_at = None;
                             barge_in_run_ms = 0;
+                            barge_in_active = false;
+                            barge_preroll.clear();
+                            barge_preroll_samples = 0;
                             in_speech_burst = false;
                             emit_state("listening");
                         }
@@ -704,10 +788,9 @@ fn spawn_transcribe(samples: Vec<i16>, sample_rate: u32, verify_speaker: bool, b
                                     "[conv] barge-in speaker ✗ rejected (best match: {:.0}% — threshold: 70%)",
                                     vr.confidence * 100.0
                                 );
-                                let _ = send_msg(Msg::SttResult(Ok(SttResult {
-                                    text: String::new(),
-                                    language: String::new(),
-                                })));
+                                // Discard the utterance entirely: no stt-result,
+                                // no empty-STT counting — just keep listening.
+                                let _ = send_msg(Msg::VerifyRejected);
                                 return;
                             }
                         }

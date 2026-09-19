@@ -330,6 +330,8 @@ pub fn get_audio_level() -> f32 {
 
 /// Check recent audio with Silero VAD via Python STT server.
 /// Returns true if human speech is detected in the last ~1s of audio.
+/// Infrastructure failures are treated as "no speech" here (fail-closed): the
+/// wake path must never start a session on an unverified signal.
 pub(crate) fn check_silero_vad() -> bool {
     // Read ~1s of recent mono samples (16kHz = 16000 samples)
     let samples = crate::voice::record::read_vad_samples(16000);
@@ -337,14 +339,20 @@ pub(crate) fn check_silero_vad() -> bool {
         // Less than 200ms of audio, not enough for VAD
         return false;
     }
-    check_silero_vad_samples(&samples, 16000)
+    check_silero_vad_samples(&samples, 16000).unwrap_or(false)
 }
 
 /// Check raw audio samples with Silero VAD. Works with any sample rate — the
 /// Python server handles the actual analysis; we just build a valid WAV.
-pub(crate) fn check_silero_vad_samples(samples: &[i16], sample_rate: u32) -> bool {
+///
+/// Returns `None` when the check could not be performed at all (stt-server
+/// down / busy / timed out / bad response), so callers can decide their own
+/// failure policy instead of being forced into a silent `false`. Callers that
+/// already hold independent evidence of speech (e.g. sustained RMS) should
+/// fail-open on `None`; callers with no other evidence should fail-closed.
+pub(crate) fn check_silero_vad_samples(samples: &[i16], sample_rate: u32) -> Option<bool> {
     if samples.len() < 3200 {
-        return false;
+        return Some(false);
     }
 
     // Build WAV bytes
@@ -368,12 +376,15 @@ pub(crate) fn check_silero_vad_samples(samples: &[i16], sample_rate: u32) -> boo
         wav.extend_from_slice(&s.to_le_bytes());
     }
 
+    // 800ms: this call blocks the conversation worker thread during the
+    // barge-in confirmation gate, so a slow stt-server must not stall the
+    // interrupt. Past the deadline the caller applies its own failure policy.
     let client = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_millis(800))
         .build()
     {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(_) => return None,
     };
 
     let part = match reqwest::blocking::multipart::Part::bytes(wav)
@@ -381,7 +392,7 @@ pub(crate) fn check_silero_vad_samples(samples: &[i16], sample_rate: u32) -> boo
         .mime_str("audio/wav")
     {
         Ok(p) => p,
-        Err(_) => return false,
+        Err(_) => return None,
     };
 
     let form = reqwest::blocking::multipart::Form::new().part("file", part);
@@ -391,14 +402,13 @@ pub(crate) fn check_silero_vad_samples(samples: &[i16], sample_rate: u32) -> boo
         .multipart(form)
         .send()
     {
-        Ok(resp) => {
-            if let Ok(v) = resp.json::<serde_json::Value>() {
-                v["has_speech"].as_bool().unwrap_or(false)
-            } else {
-                false
-            }
-        }
-        Err(_) => false,
+        // A response without a usable has_speech field is an infrastructure
+        // failure too, not a "no speech" verdict.
+        Ok(resp) => match resp.json::<serde_json::Value>() {
+            Ok(v) => v["has_speech"].as_bool(),
+            Err(_) => None,
+        },
+        Err(_) => None,
     }
 }
 
@@ -425,6 +435,11 @@ pub fn start_continuous_conversation(
 
 #[tauri::command]
 pub fn stop_continuous_conversation() -> Result<(), String> {
+    // Stopping the conversation must also silence whatever is already queued —
+    // otherwise the assistant keeps reading a long reply after the user has
+    // explicitly ended the session. Safe for single-shot too: that path stops
+    // before send_message allocates its turn, so the generation bump is a no-op.
+    crate::commands::chat::stop_audio_queue();
     crate::voice::conversation::stop_conversation();
     Ok(())
 }
