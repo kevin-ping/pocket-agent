@@ -8,6 +8,10 @@ Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust*
 
 ---
 
+## On-demand computer interaction
+
+Install Hermes and Pocket Agent on each Mac, then enable the Hermes API computer tool and grant CuaDriver permissions. Text and voice requests can inspect a window, perform an authorized action, and read it again to check the result. The main model may be text-only; Hermes can use auxiliary vision when pixels are needed. See the [Mac installation and troubleshooting guide](docs/computer-interaction.md). The chat panel includes **▣** to inspect and **ⓘ** to check setup; no continuous screen monitoring is enabled.
+
 ## How It Works
 
 ```

@@ -11,6 +11,7 @@
   import ChatPanel from './lib/components/ChatPanel.svelte';
   import StatusPanel from './lib/components/StatusPanel.svelte';
   import BreakConfirmModal from './lib/components/BreakConfirmModal.svelte';
+  import ComputerApproval from './lib/components/ComputerApproval.svelte';
 
   import { characterState } from './lib/stores/character';
   import { chatStore } from './lib/stores/chat';
@@ -62,7 +63,7 @@
         ttsEnabled: get(settingsStore).tts_enabled,
       });
     } catch (e) {
-      chatStore.setError(`连接失败: ${e}`);
+      chatStore.setError(`请求未完成: ${e}`);
       characterState.toIdle();
       spiritPhase = 0;
     }
@@ -1010,6 +1011,7 @@
     onbreak={confirmBreak}
     oncancel={cancelBreak}
   />
+  <ComputerApproval />
 
   <!-- Accessibility guide overlay -->
   {#if showAccessibilityGuide}

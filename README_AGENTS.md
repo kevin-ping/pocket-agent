@@ -177,6 +177,10 @@ If Stop is only queued onto the audio thread, `rodio::Sink::sleep_until_end()` c
 
 ## Architecture Summary
 
+### On-demand Mac interaction
+
+Install Hermes, CuaDriver and Pocket Agent on each Mac. See [computer interaction setup](docs/computer-interaction.md) for per-profile `api_server` tool enablement, capability checks, macOS permissions, auxiliary vision, and the approval/stop protocol. A remote gateway does not automatically control the Pocket Agent client's Mac.
+
 ```
 PA (Tauri + Svelte)
   ├── Hotkey (CGEventTap, global)

@@ -678,7 +678,24 @@ async fn run_hermes_turn(
 ) -> Result<String, String> {
     let mut full_response = String::new();
     let mut sentence_buffer = String::new();
-    let max_retries = 2;
+    // A disconnected request may already have changed the desktop. Never replay
+    // a local Hermes UI turn automatically, even before its first SSE event.
+    let desktop_tools = request.mode == HermesTurnMode::Ui
+        && get_api_agent().is_none()
+        && super::computer::is_local_gateway(&get_api_url());
+    let max_retries = if desktop_tools { 0 } else { 2 };
+    let mut effective_hint = request.voice_hint.clone().unwrap_or_default();
+    let use_runs = if desktop_tools {
+        match super::computer::get_computer_status(Some(false)).await {
+            Ok(status) if status.available => true,
+            status => {
+                let reason = match status { Ok(status) => status.message, Err(error) => error };
+                effective_hint.push_str(&format!("\nDesktop integration is unavailable: {}. Do not use computer_use or local commands this turn. If the user requests desktop work, explain this setup issue. Ordinary conversation can continue.", reason));
+                false
+            }
+        }
+    } else { false };
+    if request.turn_gen != TURN_GENERATION.load(Ordering::SeqCst) { return Ok(full_response); }
     // Event name prefix: bridge mode uses "bridge-" prefix, UI mode uses "chat-"
     let evp = |suffix: &str| -> String {
         match request.mode {
@@ -699,15 +716,18 @@ async fn run_hermes_turn(
             request.mode,
             request.session_id,
         );
-        let mut stream = match client
+        let stream_result = if use_runs {
+            crate::api::runs::chat_stream(app, &request.text, Some(&effective_hint),
+                request.context.as_deref(), &request.session_id).await
+        } else { client
             .chat_stream(
                 &request.text,
-                request.voice_hint.as_deref(),
+                Some(&effective_hint),
                 request.context.as_deref(),
                 Some(&request.session_id),
             )
-            .await
-        {
+            .await };
+        let mut stream = match stream_result {
             Ok(s) => s,
             Err(e) => {
                 if attempt < max_retries {
@@ -719,7 +739,18 @@ async fn run_hermes_turn(
         let mut received_data = false;
         let mut reasoning_buffer = String::new();
 
-        while let Some(chunk) = stream.next().await {
+        if request.turn_gen != TURN_GENERATION.load(Ordering::SeqCst) {
+            return Ok(full_response); // dropping the run stream requests backend stop
+        }
+
+        loop {
+            let chunk = tokio::select! {
+                chunk = stream.next() => match chunk { Some(chunk) => chunk, None => break },
+                _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                    if request.turn_gen != TURN_GENERATION.load(Ordering::SeqCst) { return Ok(full_response); }
+                    continue;
+                }
+            };
             if request.turn_gen != TURN_GENERATION.load(Ordering::SeqCst) {
                 eprintln!("[SSE] turn superseded (gen={}, current={}) — exiting loop",
                     request.turn_gen, TURN_GENERATION.load(Ordering::SeqCst));
@@ -807,7 +838,7 @@ async fn run_hermes_turn(
         break;
     }
 
-    let full_response = if std::env::var("ENABLE_LOCAL_COMMANDS").as_deref() == Ok("true") {
+    let full_response = if !desktop_tools && std::env::var("ENABLE_LOCAL_COMMANDS").as_deref() == Ok("true") {
         execute_commands(&full_response)
     } else {
         strip_cmd_tags(&full_response)
@@ -900,6 +931,11 @@ pub async fn send_message(
     let user_lang = user_language.unwrap_or_else(|| "zh".to_string());
     let fixed = fixed_lang.unwrap_or_default();
     let mut hint = build_voice_hint(&primary, &aux1, &aux2, &user_lang, &fixed);
+    if get_api_agent().is_none() && super::computer::is_local_gateway(&get_api_url()) {
+        hint.push_str(super::computer::COMPUTER_HINT);
+    } else {
+        hint.push_str("\nPocket Agent has no local desktop integration with this gateway. Gateway computer tools operate on the gateway/driver host, not automatically on this Mac. Do not claim to see or control this Mac.");
+    }
     if fixed.is_empty() {
         hint.push_str("
 
@@ -1041,9 +1077,14 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
 }
 
 #[tauri::command]
-pub fn discard_pending_turn() {
+pub async fn discard_pending_turn(app: AppHandle) -> Result<(), String> {
     TURN_GENERATION.fetch_add(1, Ordering::SeqCst);
     AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst);
+    let result = crate::api::runs::cancel_all().await;
+    if let Err(error) = &result {
+        let _ = app.emit("computer-control-error", format!("{} 后台任务可能仍在运行。", error));
+    }
+    result
 }
 
 /// Reset the hotkey state machine's press/release toggle. Called by the frontend

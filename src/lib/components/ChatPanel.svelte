@@ -1,5 +1,6 @@
 <script lang="ts">
   import { fly } from 'svelte/transition';
+  import { invoke } from '@tauri-apps/api/core';
   import { chatStore } from '../stores/chat';
   import { settingsStore } from '../stores/settings';
   import { tLang } from '../i18n';
@@ -8,6 +9,25 @@
   let { side = 'right', onSend, onCollapse }: { side?: 'left' | 'right'; onSend: (text: string) => void; onCollapse: () => void } = $props();
 
   let inputText = $state('');
+  let computerChecking = $state(false);
+  let computerMessage = $state('');
+
+  async function checkComputer(inspect = false) {
+    computerChecking = true;
+    computerMessage = '';
+    try {
+      const status = await invoke<{ available: boolean; message: string }>('get_computer_status');
+      computerMessage = status.message;
+      if (inspect && status.available) {
+        computerMessage = '';
+        onSend('请按需读取当前窗口，告诉我正在看什么。只查看，不点击或输入。如果当前窗口是 Pocket Agent，请先询问我要查看哪个应用。');
+      }
+    } catch (error) {
+      computerMessage = String(error);
+    } finally {
+      computerChecking = false;
+    }
+  }
   let contentEl: HTMLDivElement | undefined;
   let panelEl: HTMLDivElement | undefined;
 
@@ -122,6 +142,9 @@
   <!-- Content area -->
   <div class="content-area" bind:this={contentEl} class:error={isError}>
     <div class="message-content">
+      {#if computerMessage}
+        <p class="computer-status" role="status">{computerMessage}</p>
+      {/if}
       {#if $chatStore.isStreaming}
         <p class="message-text" class:error-text={isError}>
           {@html sanitizeHtml($chatStore.streamingContent)}<span class="cursor" aria-hidden="true">▋</span>
@@ -136,6 +159,10 @@
 
   <!-- Input area -->
   <div class="input-area">
+    <button class="computer-btn" onclick={() => checkComputer(true)} disabled={isBusy || computerChecking}
+      title="按需看当前窗口（也可直接语音提出请求）" aria-label="看当前窗口">▣</button>
+    <button class="computer-btn" onclick={() => checkComputer()} disabled={computerChecking}
+      title="检查电脑工具连接与权限说明，不读取屏幕" aria-label="检查电脑工具">ⓘ</button>
     <input
       type="text"
       placeholder={isBusy ? tLang($settingsStore.ui_lang).inputBusy : tLang($settingsStore.ui_lang).inputPlaceholder}
@@ -158,6 +185,15 @@
 </div>
 
 <style>
+  .computer-btn {
+    border: 0;
+    background: transparent;
+    color: rgba(160, 180, 255, 0.95);
+    padding: 3px;
+    cursor: pointer;
+  }
+  .computer-btn:disabled { opacity: 0.4; cursor: default; }
+  .computer-status { font-size: 11px; line-height: 1.5; color: #b6c6ff; margin: 0 0 5px; }
   /* ─── Panel ─── */
   .chat-panel {
     width: 280px;

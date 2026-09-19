@@ -157,6 +157,8 @@ pub fn run() {
             commands::config::delete_setting_asset,
             commands::config::save_window_position,
             commands::config::quit_app,
+            commands::computer::get_computer_status,
+            api::runs::respond_computer_approval,
             commands::history::open_chat_history,
             commands::history::save_chat_message,
 
