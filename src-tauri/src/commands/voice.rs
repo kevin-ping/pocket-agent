@@ -420,6 +420,7 @@ pub fn start_continuous_conversation(
     speech_rms_threshold: Option<f32>,
     single_shot: Option<bool>,
     barge_in_rms_threshold: Option<f32>,
+    wake_word_threshold: Option<f32>,
     barge_in_enabled: Option<bool>,
 ) -> Result<(), String> {
     crate::voice::conversation::start_conversation(
@@ -429,6 +430,7 @@ pub fn start_continuous_conversation(
         speech_rms_threshold,
         single_shot,
         barge_in_rms_threshold,
+        wake_word_threshold,
         barge_in_enabled,
     )
 }
@@ -451,8 +453,8 @@ pub fn notify_conversation_tts_started() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn notify_conversation_tts_done() -> Result<(), String> {
-    crate::voice::conversation::on_tts_done();
+pub fn notify_conversation_tts_done(generation: u64) -> Result<(), String> {
+    crate::voice::conversation::on_tts_done(generation);
     Ok(())
 }
 
@@ -629,4 +631,8 @@ pub fn remove_speaker(name: String) -> Result<(), String> {
 #[tauri::command]
 pub fn consume_wake_probe(_path: String) -> Result<(), String> {
     Ok(())
+}
+#[tauri::command]
+pub fn acknowledge_conversation_ready(id: u64, played: bool, ready_delay_ms: Option<u64>) {
+    crate::voice::conversation::acknowledge_ready(id, played, ready_delay_ms);
 }

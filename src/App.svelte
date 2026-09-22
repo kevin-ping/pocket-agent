@@ -100,11 +100,43 @@
   // ─── Continuous conversation mode ───
   let conversationActive = false;
   let bridgeFallbackTimer: ReturnType<typeof setTimeout> | null = null;
-  /// Timestamp of the last barge-in. The mic is already open when we return to
-  /// listening, so the prompt chime would be recorded as part of the user's
-  /// utterance; suppress it for a moment after an interrupt.
-  let lastBargeInAt = 0;
-  const BARGE_IN_PROMPT_MUTE_MS = 1000;
+  let conversationCueEpoch = 0;
+  let interruptedReply = false;
+
+  async function cueDurationMs(audio: HTMLAudioElement): Promise<number> {
+    if (Number.isFinite(audio.duration) && audio.duration > 0) {
+      return Math.ceil(audio.duration * 1000);
+    }
+    return await new Promise<number>((resolve) => {
+      const cleanup = () => {
+        clearTimeout(timeout);
+        audio.removeEventListener('loadedmetadata', loaded);
+      };
+      const loaded = () => {
+        cleanup();
+        resolve(Number.isFinite(audio.duration) && audio.duration > 0 ? Math.ceil(audio.duration * 1000) : 700);
+      };
+      const timeout = setTimeout(() => {
+        cleanup();
+        resolve(700);
+      }, 300);
+      audio.addEventListener('loadedmetadata', loaded, { once: true });
+    });
+  }
+
+  async function playReadyCue(onStarted: (durationMs: number) => Promise<void>): Promise<void> {
+    const audio = new Audio('user_input.mp3');
+    promptAudio?.pause();
+    promptAudio = audio;
+    const durationMs = await cueDurationMs(audio);
+    await audio.play();
+    await onStarted(Math.min(durationMs + 30, 5000));
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => { audio.pause(); reject(new Error('Cue timeout')); }, 5000);
+      audio.onended = () => { clearTimeout(timeout); resolve(); };
+      audio.onerror = () => { clearTimeout(timeout); reject(new Error('Cue playback failed')); };
+    });
+  }
 
   /// Start or stop a continuous conversation. Shared by fn-key-down and
   /// fn-key-up: the hotkey state machine alternates which of the two it emits,
@@ -115,6 +147,8 @@
     if (conversationActive) {
       invoke('stop_continuous_conversation').catch(console.error);
       conversationActive = false;
+      ++conversationCueEpoch;
+      promptAudio?.pause();
       chatStore.setVoiceStatus(null);
       islandMode = 'idle';
       spiritPhase = 0;
@@ -122,8 +156,8 @@
       return;
     }
     requestNewTurn(() => {
-      playPromptSound();
       conversationActive = true;
+      interruptedReply = false;
       islandMode = 'recording';
       spiritPhase = 0;
       firstStreamDelta = false;
@@ -135,6 +169,7 @@
         pauseToleranceMs: cfg.pause_tolerance_ms,
         speechRmsThreshold: cfg.speech_rms_threshold,
         bargeInRmsThreshold: cfg.barge_in_rms_threshold,
+        wakeWordThreshold: cfg.wake_word_threshold,
         bargeInEnabled: cfg.barge_in_enabled,
       })
         .catch((e) => {
@@ -464,6 +499,7 @@
         }
       }),
       listen('chat-audio-playing', () => {
+        if (interruptedReply) return;
         cancelPendingStatusSpeech();
         lastSpokenStatus = null;
         debugState('chat-audio-playing');
@@ -479,6 +515,7 @@
         }
       }),
       listen<{ delta: string }>('chat-stream', (e) => {
+        if (interruptedReply) return;
         cancelPendingStatusSpeech();
         if (!firstStreamDelta) debugState('chat-stream:first-delta', { deltaPreview: e.payload.delta.slice(0, 40) });
         if (!firstStreamDelta) {
@@ -491,6 +528,7 @@
         }
       }),
       listen('chat-stream-end', () => {
+        if (interruptedReply) return;
         cancelPendingStatusSpeech();
         lastSpokenStatus = null;
         debugState('chat-stream-end');
@@ -506,7 +544,8 @@
         }
         autoCloseBreakConfirm();
       }),
-      listen('chat-audio-done', () => {
+      listen<number>('chat-audio-done', (e) => {
+        if (interruptedReply) return;
         debugState('chat-audio-done');
         chatStore.endStream();
         chatStore.finishTypewriterNow();
@@ -514,7 +553,7 @@
         if (conversationActive) {
           // Hand control back to the conversation worker; it drives characterState via
           // conversation-state events. Skip the toIdle transition here.
-          invoke('notify_conversation_tts_done').catch(console.error);
+          invoke('notify_conversation_tts_done', { generation: e.payload }).catch(console.error);
           spiritPhase = 0;
         } else {
           characterState.transition('speaking', 'idle');
@@ -639,6 +678,7 @@
             pauseToleranceMs: cfg.pause_tolerance_ms,
             speechRmsThreshold: cfg.speech_rms_threshold,
             bargeInRmsThreshold: cfg.barge_in_rms_threshold,
+        wakeWordThreshold: cfg.wake_word_threshold,
             bargeInEnabled: cfg.barge_in_enabled,
             singleShot: true,
           }).catch((e) => {
@@ -717,15 +757,12 @@
         debugState('conversation-state', { state: s });
         if (!conversationActive) return;
         if (s === 'listening') {
-          if (Date.now() - lastBargeInAt >= BARGE_IN_PROMPT_MUTE_MS) {
-            playPromptSound();
-          }
           chatStore.setVoiceStatus(voiceListeningText());
           characterState.toListening();
           islandMode = 'recording';
           spiritPhase = 0;
         } else if (s === 'transcribing') {
-          playPromptSound();
+          interruptedReply = false;
           chatStore.setVoiceStatus(null);
           characterState.toThinking();
           islandMode = 'thinking';
@@ -741,6 +778,8 @@
       listen('conversation-ended', () => {
         debugState('conversation-ended');
         conversationActive = false;
+        ++conversationCueEpoch;
+        promptAudio?.pause();
         chatStore.setVoiceStatus(null);
         // In single-shot mode, the LLM pipeline is still running (thinking → TTS).
         // Don't clobber islandMode — chat-audio-done will clean up and re-arm wake.
@@ -770,14 +809,38 @@
       listen('wake-check-done', () => {
         if (islandMode === 'verifying_speaker') islandMode = 'waiting_for_wake';
       }),
+      listen<number>('conversation-ready-prompt', async (e) => {
+        if (!conversationActive) return;
+        const epoch = ++conversationCueEpoch;
+        try {
+          // Explicit remote stop completes (or visibly fails) before accepting a
+          // new command. Local generations/sink were already stopped in Rust.
+          if (interruptedReply) await invoke('discard_pending_turn');
+          if (!conversationActive || epoch !== conversationCueEpoch) return;
+          let acknowledged = false;
+          await playReadyCue(async (readyDelayMs) => {
+            if (!conversationActive || epoch !== conversationCueEpoch) return;
+            await invoke('acknowledge_conversation_ready', {
+              id: e.payload,
+              played: true,
+              readyDelayMs,
+            });
+            acknowledged = true;
+          });
+          if (!acknowledged || !conversationActive || epoch !== conversationCueEpoch) return;
+        } catch (error) {
+          console.error('[conversation] readiness failed', error);
+          await invoke('acknowledge_conversation_ready', { id: e.payload, played: false });
+        }
+      }),
       listen('conversation-barge-in', () => {
         debugState('conversation-barge-in');
-        lastBargeInAt = Date.now();
+        interruptedReply = true;
+        cancelPendingStatusSpeech();
         // TTS was cut; kill typewriter immediately so text stops mid-sentence.
         chatStore.abortTypewriter();
         chatStore.clearThinkingSteps();
-        chatStore.setVoiceStatus(voiceListeningText());
-        characterState.toListening();
+        chatStore.setVoiceStatus(null);
         spiritPhase = 0;
       }),
 

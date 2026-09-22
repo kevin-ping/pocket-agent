@@ -411,7 +411,6 @@
         {:else if active === 'interruption'}
           <section class="card">
             <Toggle label={text.allowInterruption} hint={text.hintAllowInterruption} value={local.barge_in_enabled} change={() => local && (local.barge_in_enabled = !local.barge_in_enabled)} />
-            <RangeField label={text.interruptSensitivity} hint={text.hintInterruptSensitivity} value={local.barge_in_rms_threshold} min={0.02} max={0.15} step={0.01} display={local.barge_in_rms_threshold.toFixed(2)} change={(v) => local && (local.barge_in_rms_threshold = v)} />
             <Toggle label={text.skipConfirmation} hint={text.hintSkipConfirmation} value={local.skip_interrupt_confirmation} change={() => local && (local.skip_interrupt_confirmation = !local.skip_interrupt_confirmation)} />
           </section>
         {:else if active === 'wake'}

@@ -560,6 +560,14 @@ struct WakeCheckResult {
     keyword_text: String,
 }
 
+/// Reuse enrolled keyword AND speaker verification during playback. Errors fail
+/// closed: generic speech, noise or an unavailable service cannot interrupt.
+/// Speaker verification reduces speaker echo false positives; it is not AEC.
+pub fn check_interrupt_wake(samples: &[i16], sr: u32, threshold: f32) -> Result<bool, String> {
+    let result = wake_http_check(samples, sr, 1, threshold)?;
+    Ok(result.speaker_match && result.keyword_match && !result.keyword_text.trim().is_empty())
+}
+
 /// Send audio buffer to Python /wake/check endpoint.
 fn wake_http_check(
     raw_samples: &[i16],
@@ -567,6 +575,10 @@ fn wake_http_check(
     device_ch: u16,
     threshold: f32,
 ) -> Result<WakeCheckResult, String> {
+    // The Python service uses a fixed wake-check temporary WAV. Serialize idle
+    // and conversation callers, including an old session's in-flight check.
+    static CHECK_LOCK: Mutex<()> = Mutex::new(());
+    let _check = CHECK_LOCK.lock().map_err(|_| "wake check lock poisoned")?;
     // Convert to mono f32
     let mono_f32: Vec<f32> = if device_ch > 1 {
         let ch = device_ch as usize;

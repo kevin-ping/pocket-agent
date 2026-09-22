@@ -144,24 +144,36 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                                 match rodio::Sink::try_new(&stream_handle) {
                                     Ok(sink) => {
                                         let sink = std::sync::Arc::new(sink);
-                                        *current_audio_sink().lock().unwrap() = Some(sink.clone());
                                         if let Ok(file) = std::fs::File::open(&prep.tts_file) {
                                             match rodio::Decoder::new(std::io::BufReader::new(file)) {
                                                 Ok(source) => {
-                                                    // Signal real audio start — frontend uses this
-                                                    // (not chat-speaking-start) to switch to speaking animation.
-                                                    // Skip for status announcements so the StatusPanel
-                                                    // isn't cleared mid-turn.
-                                                    if !prep.silent {
-                                                        let _ = prep.app.emit("chat-audio-playing", ());
+                                                    let mut installed = false;
+                                                    {
+                                                        // Serialize installation with stop_audio_queue: a decoded
+                                                        // old sentence must not start after the stop took the sink.
+                                                        let mut current = current_audio_sink().lock().unwrap();
+                                                        if prep.generation == audio_generation() {
+                                                            sink.append(source);
+                                                            *current = Some(sink.clone());
+                                                            installed = true;
+                                                        }
                                                     }
-                                                    sink.append(source);
-                                                    sink.sleep_until_end();
+                                                    if installed {
+                                                        // Signal real audio start only after this generation wins the
+                                                        // sink race. The frontend treats this as playback truth.
+                                                        if !prep.silent {
+                                                            let _ = prep.app.emit("chat-audio-playing", ());
+                                                        }
+                                                        sink.sleep_until_end();
+                                                    }
                                                 }
                                                 Err(e) => eprintln!("[AUDIO] decode: {}", e),
                                             }
                                         }
-                                        *current_audio_sink().lock().unwrap() = None;
+                                        let mut current = current_audio_sink().lock().unwrap();
+                                        if current.as_ref().map(|active| std::sync::Arc::ptr_eq(active, &sink)).unwrap_or(false) {
+                                            *current = None;
+                                        }
                                         drop(stream);
                                     }
                                     Err(e) => { eprintln!("[AUDIO] sink: {}", e); drop(stream); }
@@ -196,6 +208,8 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
 }
 
 /// Stop the pipeline and reset queue counter. Called on fn-key press and barge-in.
+pub fn audio_generation() -> u64 { AUDIO_GENERATION.load(Ordering::SeqCst) }
+
 pub fn stop_audio_queue() {
     eprintln!("[AUDIO] stop requested");
     AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst);
@@ -300,7 +314,7 @@ fn maybe_emit_audio_done(app: &AppHandle, generation: u64) {
         .is_ok()
     {
         eprintln!("[AUDIO] emitting chat-audio-done (gen={})", generation);
-        let _ = app.emit("chat-audio-done", ());
+        let _ = app.emit("chat-audio-done", generation);
     }
 }
 
@@ -431,6 +445,9 @@ struct HermesTurnRequest {
     /// Generation captured at turn start. The streaming loop breaks out cleanly
     /// when `TURN_GENERATION` advances past this value.
     turn_gen: u64,
+    /// Audio generation owned by this UI turn. Bridge turns do not submit audio
+    /// directly, so they leave this empty.
+    audio_gen: Option<u64>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -705,6 +722,7 @@ async fn run_hermes_turn(
     };
 
     for attempt in 0..=max_retries {
+        if request.turn_gen != TURN_GENERATION.load(Ordering::SeqCst) { return Ok(full_response); }
         if attempt > 0 {
             eprintln!("[SSE] retry {}/{}", attempt, max_retries);
             std::thread::sleep(std::time::Duration::from_secs(2));
@@ -830,8 +848,10 @@ async fn run_hermes_turn(
             // No more sentences will be submitted for this generation — chat-audio-done
             // can now fire once the already-submitted sentences finish playing (or
             // immediately below, if they already have).
-            SUBMISSION_DONE.store(true, Ordering::SeqCst);
-            maybe_emit_audio_done(app, AUDIO_GENERATION.load(Ordering::SeqCst));
+            if let Some(audio_gen) = request.audio_gen {
+                SUBMISSION_DONE.store(true, Ordering::SeqCst);
+                maybe_emit_audio_done(app, audio_gen);
+            }
         }
 
         eprintln!("[SSE] <<< stream complete [{}] ({} chars)", chrono::Local::now().format("%H:%M:%S%.3f"), full_response.len());
@@ -874,6 +894,7 @@ pub async fn dispatch_bridge_message(
         mode: HermesTurnMode::Bridge,
         on_sentence: None,
         turn_gen: my_turn_gen,
+        audio_gen: None,
     };
 
     match run_hermes_turn(&app, &client, &request).await {
@@ -1020,6 +1041,7 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
         mode: HermesTurnMode::Ui,
         on_sentence,
         turn_gen: my_turn_gen,
+        audio_gen: Some(speak_generation),
     };
 
     let full_response = match run_hermes_turn(&app, &client, &request).await {
@@ -1030,6 +1052,12 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
                 return Ok(());
             }
             app.emit("chat-stream-error", e.clone()).map_err(|emit_err| emit_err.to_string())?;
+            if tts_on {
+                SUBMISSION_DONE.store(true, Ordering::SeqCst);
+                maybe_emit_audio_done(&app, speak_generation);
+            } else {
+                let _ = app.emit("chat-audio-done", speak_generation);
+            }
             return Err(e);
         }
     };
@@ -1053,6 +1081,7 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
 
     if full_response.trim().is_empty() {
         let _ = app.emit("chat-stream-end", ());
+        if !tts_on { let _ = app.emit("chat-audio-done", speak_generation); }
         return Ok(());
     }
 
@@ -1070,7 +1099,7 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
         // No audio will ever play for this turn, so nothing else would emit
         // chat-audio-done — the continuous-conversation worker would sit in
         // Speaking until its 30s safety timeout.
-        let _ = app.emit("chat-audio-done", ());
+        let _ = app.emit("chat-audio-done", speak_generation);
     }
 
     Ok(())

@@ -29,6 +29,7 @@ import sys
 import tempfile
 import threading
 import time
+import warnings
 import wave
 from pathlib import Path
 from typing import Optional
@@ -47,6 +48,17 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*torchaudio\.sox_effects\.sox_effects\.apply_effects_file has been deprecated.*",
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r".*torchaudio\.load_with_torchcodec.*",
+    category=UserWarning,
+)
 
 # Workaround for libiomp5 double-load on macOS (faster_whisper/ctranslate2 vs numpy/MKL).
 # Must be set before importing faster_whisper.
@@ -124,17 +136,16 @@ def _extract_mfcc_sequence(samples: np.ndarray, sr: int = 16000) -> np.ndarray:
 
 
 # ── Whisper 幻觉输出过滤 (借鉴白龙马 whisper_server.py) ──
-_HALLUCINATION_FRAGMENTS = [
-    # 中文视频平台创作者习语（Whisper 对这类说话极易幻觉）
-    "字幕", "翻译", "感谢收看", "感谢观看", "谢谢收看", "谢谢观看",
-    "请订阅", "请关注", "点赞", "订阅", "转发", "打赏",
-    "作词", "作曲", "制作人", "出品", "版权",
-    "明镜", "栏目", "不吝",
+_HALLUCINATION_PHRASES = [
+    # 只匹配完整套话；“翻译”“字幕”等常用词不能证明识别是幻觉。
+    "感谢收看", "感谢观看", "谢谢收看", "谢谢观看",
+    "请订阅", "请关注", "请点赞订阅转发打赏支持明镜与点点栏目",
+    "请不吝点赞订阅转发打赏支持明镜与点点栏目",
     # initial_prompt 文本本身（Whisper 会把 prompt 幻觉为输出）
     "以下是普通话的句子", "以下是繁體中文的句子",
     # 英文常见幻觉
-    "subtitles by", "thank you for watching", "please subscribe",
-    "amara.org", "translated by", "music:", "♪", "♫", "♬", "🎵", "🎶",
+    "thank you for watching", "thanks for watching", "please subscribe",
+    "字幕由Amara.org社区提供", "subtitles by amara.org",
 ]
 
 _HALLU_RE_PUNCT = re.compile(r'^[\s\W]+$')
@@ -155,11 +166,13 @@ def _is_hallucination(text: str) -> bool:
     # 过短（单个汉字/字母/符号）
     if len(t) <= 1:
         return True
-    # 包含已知幻觉片段（不区分大小写）
-    tl = t.lower()
-    for frag in _HALLUCINATION_FRAGMENTS:
-        if frag.lower() in tl:
-            return True
+    # 只有整段由已知套话组成时才过滤，不能因正常请求引用套话而丢弃整句。
+    normalize = lambda s: re.sub(r'[\W_]+', '', s.lower())
+    known = {normalize(phrase) for phrase in _HALLUCINATION_PHRASES}
+    phrases = [normalize(part) for part in re.split(r'[,，。！!？?；;\n]+', t)]
+    phrases = [part for part in phrases if part]
+    if phrases and all(part in known for part in phrases):
+        return True
     # 单字符重复（如"啊啊啊啊"、"嗯嗯嗯嗯"）
     unique_chars = set(c for c in t if c.strip())
     if len(unique_chars) <= 2 and len(t) >= 5:

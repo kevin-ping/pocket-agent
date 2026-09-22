@@ -170,6 +170,7 @@ pub fn run() {
             commands::voice::stop_continuous_conversation,
             commands::voice::notify_conversation_tts_started,
             commands::voice::notify_conversation_tts_done,
+            commands::voice::acknowledge_conversation_ready,
             commands::voice::is_continuous_conversation_active,
             commands::voice::start_wake_word_listening,
             commands::voice::stop_wake_word_listening,
