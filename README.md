@@ -70,7 +70,6 @@ Press **Escape** during recording to cancel. Minimum recording: 1.5s. Maximum: 3
 - **TTS voice response** — edge-tts with automatic language detection (Chinese, English, Japanese, Korean + more)
 - **Session memory** — daily auto-rotating sessions with compressed context summaries
 - **Language tracking** — auto-detects user language per message, follows user's language seamlessly
-- **Local command tags** — `[CMD:...]` for local automation tasks (disabled by default, enable via `ENABLE_LOCAL_COMMANDS=true` in `.env`)
 - **OpenClaw support** — connect to OpenClaw gateway with multi-agent routing (openclaw/agent-a, openclaw/agent-b, etc.); server connection configured via `.env` only
 - **Multi-language voice** — configure primary + auxiliary TTS voices, auto-switch based on detected language
 - **Configurable hotkey** — capture any key via Settings, no restart required
@@ -135,16 +134,9 @@ Pocket Agent is a local desktop client. Please understand these boundaries:
 - **Microphone access** — audio is captured via CoreAudio and processed **entirely locally** by faster-whisper. No audio data leaves your machine for STT.
 - **Conversation persistence** — sessions are stored in the configured gateway (Hermes: `~/.hermes/sessions/`, OpenClaw: `~/.openclaw/agents/<agent>/sessions/`). These contain full conversation text. Consider disk encryption.
 
-### Local Command Execution
+### Desktop Interaction
 
-`[CMD:...]` command execution is **off by default**. Enable via `ENABLE_LOCAL_COMMANDS=true` in `.env`.
-
-When disabled:
-- The system prompt does not mention `[CMD:...]` — the LLM has no knowledge of this capability.
-- Enable via `ENABLE_LOCAL_COMMANDS=true` in `.env` (project root for dev, `~/.pocket-agent/.env` for packaged app).
-- Even if the LLM outputs `[CMD:...]` tags (e.g., through prompt injection), they are stripped and never executed.
-
-When enabled, commands run via `sh -c`. Only enable this if you trust your backend and runtime environment.
+Pocket Agent has **no local shell execution path**. Desktop work goes through the Hermes `computer_use` tool, which carries its own approval gates — see [docs/computer-interaction.md](docs/computer-interaction.md). Any `[CMD:...]`-style tags a backend emits (e.g. through prompt injection) are stripped from output and never executed.
 
 ### Security Philosophy
 
@@ -152,7 +144,7 @@ Pocket Agent is a **voice interface** — it provides a communication channel be
 
 The responsibility for safe operation is shared across three layers:
 
-1. **Pocket Agent (this app)** — provides the voice/text interface. We add guard rails where practical (e.g., `ENABLE_LOCAL_COMMANDS` default-off in `.env`) to prevent accidental misuse, but we do not attempt to fully sandbox the agent.
+1. **Pocket Agent (this app)** — provides the voice/text interface. We add guard rails where practical (e.g., no client-side shell execution) to prevent accidental misuse, but we do not attempt to fully sandbox the agent.
 2. **Agent Framework (Hermes)** — the backend that hosts the LLM. It decides what the agent can and cannot do: which tools are available, what APIs are accessible, what system prompts govern behavior. Security policies belong here.
 3. **User** — you decide what agent you connect to, what permissions you grant, and what data you share.
 
@@ -212,7 +204,7 @@ cp .env.example .env
 For development (`tauri dev`), edit `.env` in the project root.  
 For the **packaged app** (`.dmg`), create `~/.pocket-agent/.env` instead.
 
-All server connection settings (`API_SERVER`, `API_SERVER_KEY`, `API_AGENT`, `ENABLE_LOCAL_COMMANDS`) are configured **only** via `.env`:
+All server connection settings (`API_SERVER`, `API_SERVER_KEY`, `API_AGENT`) are configured **only** via `.env`:
 
 ```bash
 # Required: backend connection
@@ -221,7 +213,6 @@ API_SERVER_KEY=           # leave empty for no auth
 API_AGENT=my-agent         # agent name
 
 # Optional
-# ENABLE_LOCAL_COMMANDS=true
 # EDGE_TTS_BIN=/path/to/edge-tts
 # STT_PYTHON=/path/to/python3
 # STT_MODEL=base  # Whisper model: tiny | base | small

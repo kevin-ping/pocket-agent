@@ -60,33 +60,6 @@ pub fn build_voice_hint(primary_voice: &str, aux1_voice: &str, aux2_voice: &str,
     let primary_lang = voice_to_language(primary_voice)
         .unwrap_or("Chinese (中文)");
 
-    let local_cmd_section = if std::env::var("ENABLE_LOCAL_COMMANDS").as_deref() == Ok("true") {
-        r#"LOCAL COMMAND EXECUTION — MANDATORY:
-When the user asks to open, launch, or control anything on their Mac (apps, files, URLs, projects), you MUST embed a [CMD:...] tag. NEVER say you cannot do it — you CAN via shell commands.
-
-Triggers (中文 & English): "打开/启动/运行/开个/帮我开" "open/launch/start/go to" + any app, file, or URL name.
-
-Format: [CMD:shell_command]
-Common examples:
-- 打开浏览器/Chrome → [CMD:open -a "Google Chrome"]
-- 打开 Safari → [CMD:open -a Safari]
-- 打开项目 → [CMD:code /path/to/project]
-- 打开网页 → [CMD:open https://example.com]
-- 打开 Spotify → [CMD:open -a "Spotify"]
-- 打开终端 → [CMD:open -a Terminal]
-- 打开 Finder/文件夹 → [CMD:open /path/to/folder]
-- 清空废纸篽 → [CMD:osascript -e 'tell application "Finder" to empty trash']
-
-RULES:
-1. ALWAYS use [CMD:...] when the user asks to open/launch something. NEVER refuse or say you lack access.
-2. Write your natural spoken response AROUND the tag. Example: 好的，帮你打开了！[CMD:open -a "Google Chrome"]已经打开了哦。
-3. The command executes silently. Multiple [CMD:...] tags are allowed if the user asks for multiple things.
-4. Available apps: Chrome ("Google Chrome"), Safari, Spotify, Finder, Terminal, VS Code ("Visual Studio Code"), Notes, Calendar, Messages, Mail, System Settings, App Store, etc.
-5. Open a file/folder with default app: [CMD:open /path/to/file]. Open a project in VS Code: [CMD:code /path/to/project]."#
-    } else {
-        ""
-    };
-
     format!(r#"[SYSTEM INSTRUCTION - MANDATORY]
 You are speaking to the user through a text-to-speech voice. Your entire response will be CONVERTED TO SPEECH and read aloud — every word must be something a human can naturally say out loud.
 
@@ -102,12 +75,9 @@ You have TTS voices installed for these languages: {lang_list}.
 - Default response language: {primary_lang}. Use this unless the user writes to you in another installed language.
 - If the user writes in a language you do NOT have a voice for, respond in {primary_lang} and briefly explain you cannot speak that language.
 
-VIOLATION OF ANY RULE ABOVE will cause the voice output to sound broken. Always obey.
-
-{local_cmd_section}"#,
+VIOLATION OF ANY RULE ABOVE will cause the voice output to sound broken. Always obey."#,
         lang_list = lang_list,
         primary_lang = primary_lang,
-        local_cmd_section = local_cmd_section,
     )
 }
 
@@ -410,4 +380,18 @@ pub fn save_window_position(x: f64, y: f64) -> Result<(), String> {
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voice_hint_never_teaches_local_command_tags() {
+        // 桌面能力唯一入口是 Hermes computer_use，提示词不得再提 [CMD:] 通道
+        std::env::set_var("ENABLE_LOCAL_COMMANDS", "true");
+        let hint = build_voice_hint("zh-CN-XiaoxiaoNeural", "", "", "zh", "");
+        assert!(!hint.contains("[CMD:"));
+        assert!(!hint.contains("LOCAL COMMAND EXECUTION"));
+    }
 }

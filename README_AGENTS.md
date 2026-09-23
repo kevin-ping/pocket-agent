@@ -93,7 +93,6 @@ Then edit .env with the correct values for your setup.
 **Optional fields:**
 - `EDGE_TTS_BIN` — path to edge-tts binary (auto-detected from PATH if omitted)
 - `STT_PYTHON` — path to python3 with faster-whisper (auto-detected if omitted)
-- `ENABLE_LOCAL_COMMANDS` — set to `true` to enable [CMD:...] local command execution
 
 **Config file locations:**
 - Development (tauri dev): project root `.env`

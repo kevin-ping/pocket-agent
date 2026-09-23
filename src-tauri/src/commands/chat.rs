@@ -707,7 +707,7 @@ async fn run_hermes_turn(
             Ok(status) if status.available => true,
             status => {
                 let reason = match status { Ok(status) => status.message, Err(error) => error };
-                effective_hint.push_str(&format!("\nDesktop integration is unavailable: {}. Do not use computer_use or local commands this turn. If the user requests desktop work, explain this setup issue. Ordinary conversation can continue.", reason));
+                effective_hint.push_str(&format!("\nDesktop integration is unavailable: {}. Do not use computer_use this turn. If the user requests desktop work, explain this setup issue. Ordinary conversation can continue.", reason));
                 false
             }
         }
@@ -858,11 +858,7 @@ async fn run_hermes_turn(
         break;
     }
 
-    let full_response = if !desktop_tools && std::env::var("ENABLE_LOCAL_COMMANDS").as_deref() == Ok("true") {
-        execute_commands(&full_response)
-    } else {
-        strip_cmd_tags(&full_response)
-    };
+    let full_response = strip_cmd_tags(&full_response);
 
     Ok(full_response)
 }
@@ -1318,50 +1314,6 @@ fn strip_all_cmd_tags(text: &str) -> String {
     let s = blank_re.replace_all(&s, "\n\n").to_string();
     s.trim().to_string()
 }
-
-/// Extract [CMD:...] tags from text, execute them, return text with tags removed.
-///
-/// Commands are executed in detached threads to avoid blocking the async runtime.
-/// std::process::Command::output() waits for stdout/stderr pipes to close - GUI apps
-/// like Chrome inherit the pipe write-end and never close it, which blocks the tokio
-/// worker thread and freezes the UI (chat-stream-end never emits, PA stuck in SPEAKING).
-fn execute_commands(text: &str) -> String {
-    let re = regex::Regex::new(r#"\[CMD:([^\]]+)\]"#).unwrap();
-
-    for cap in re.captures_iter(text) {
-        let cmd_str = cap[1].to_string();
-        eprintln!("[LOCAL_CMD] dispatching: {}", cmd_str);
-
-        // Spawn a detached thread so .output() cannot block the async runtime.
-        if let Err(e) = std::thread::Builder::new()
-            .name("local-cmd".to_string())
-            .spawn(move || {
-                let result = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(&cmd_str)
-                    .output();
-
-                match result {
-                    Ok(output) => {
-                        if output.status.success() {
-                            eprintln!("[LOCAL_CMD] OK: {}", cmd_str);
-                        } else {
-                            eprintln!("[LOCAL_CMD] exit={}: {}", output.status, String::from_utf8_lossy(&output.stderr));
-                        }
-                    }
-                    Err(e) => eprintln!("[LOCAL_CMD] error: {}", e),
-                }
-            })
-        {
-            eprintln!("[LOCAL_CMD] thread spawn failed: {}", e);
-        }
-    }
-
-    let clean = re.replace_all(text, "").to_string();
-    let space_re = regex::Regex::new(r"  +").unwrap();
-    space_re.replace_all(&clean.trim(), " ").to_string()
-}
-
 
 #[cfg(test)]
 mod tests {
