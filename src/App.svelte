@@ -17,7 +17,7 @@
   import { chatStore } from './lib/stores/chat';
   import { settingsStore } from './lib/stores/settings';
   import { layoutStore } from './lib/stores/layout';
-  import { STATUS_PHRASES, langFromVoice, detectLang, convLabels, type LangKey } from './lib/i18n';
+  import { STATUS_PHRASES, langFromVoice, detectLang, convLabels, convLabelsLang, type LangKey } from './lib/i18n';
 
   const appWindow = getCurrentWindow();
 
@@ -262,14 +262,15 @@
     }
   }
 
-  // Grow window vertically to fit the status panel while expanded so 🤔 + 🔧 lines stay visible.
+  // Grow only up to the status panel's scroll cap; additional tool history scrolls inside it.
   const STATUS_BASE_H = 188;     // matches layout.ts CHAT_H
   const STATUS_LINE_H = 17;      // 10.5 px font * 1.45 line-height ≈ 15 + 2 px gap
   const STATUS_BLOCK_PAD = 18;   // 6+6 content padding + 6 .status-row margin-top
+  const STATUS_MAX_EXTRA_H = 94; // 88 px scroll area + 6 px row margin
   const STATUS_EXPANDED_W = 400; // 108 (AVATAR_W) + 12 (GAP) + 280 (CHAT_W)
   $: extraStatusH = $chatStore.thinkingSteps.length === 0
     ? 0
-    : STATUS_BLOCK_PAD + $chatStore.thinkingSteps.length * STATUS_LINE_H;
+    : Math.min(STATUS_MAX_EXTRA_H, STATUS_BLOCK_PAD + $chatStore.thinkingSteps.length * STATUS_LINE_H);
   $: if ($layoutStore.expanded && !$layoutStore.resizing) {
     const targetH = STATUS_BASE_H + extraStatusH;
     queueMicrotask(() => {
@@ -306,48 +307,67 @@
   let wakeArmInFlight = false;
 
   // stt-server starts on a background thread and is not ready at app mount
-  // (Whisper model load + token file write take ~1-3 s). The wake listener's
-  // first connect attempt loses this race and fails with either
-  // "ws auth token: ... No such file" or "ws connect: Connection refused".
-  // Retry on those transient errors so wake comes up automatically once the
-  // server is healthy, without forcing the user to toggle the switch.
+  // (venv check + Whisper model load + token file write). Until it answers on
+  // :8651 the KWS session cannot be opened, so the first attempts fail with
+  // "Voice service is not ready" or "Wake service: ... Connection refused".
+  // Retry so wake comes up automatically once the server is healthy, without
+  // forcing the user to toggle the switch.
   async function armWakeListenerIfEnabled() {
     const s = get(settingsStore);
     if (!s.wake_word_enabled) return;
     if (wakeArmInFlight) return;
     wakeArmInFlight = true;
+    const labels = convLabelsLang(s.ui_lang);
     try {
+      // A missing wake phrase is a settled fact, not a race: the KWS session
+      // would be rejected on every one of the retries below. Say so instead.
+      if (!s.wake_phrase.trim()) {
+        if (!conversationActive) chatStore.setVoiceStatus(labels.wakeNeedsPhrase);
+        return;
+      }
       const MAX_ATTEMPTS = 20;
+      let modelConfirmed = false;
       for (let i = 0; i < MAX_ATTEMPTS; i++) {
+        // "Can't check" and "checked, not ready" are different answers. Only
+        // the latter is a config gap; a throw means stt-server isn't up yet,
+        // which is exactly what the retry loop below exists for. Stop asking
+        // once answered — the check costs a 5 s-timeout request per attempt.
+        if (!modelConfirmed) {
+          try {
+            const model = await invoke<{ ready: boolean }>('wake_model_status');
+            if (!model.ready) {
+              if (!conversationActive) chatStore.setVoiceStatus(labels.wakeNeedsModel);
+              return;
+            }
+            modelConfirmed = true;
+          } catch { /* not ready to answer — let the start attempt drive the retry */ }
+        }
         try {
           await invoke('start_wake_word_listening', { threshold: s.wake_word_threshold, speakerName: s.last_enrolled_speaker || 'Me' });
-          if (!conversationActive && islandMode === 'idle') {
-            islandMode = 'waiting_for_wake';
+          if (!conversationActive) {
+            chatStore.setVoiceStatus(null);
+            if (islandMode === 'idle') islandMode = 'waiting_for_wake';
           }
           return;
         } catch (e) {
           const msg = String(e ?? '');
           // Idempotent ignore: "already active" races on conversation-ended.
-          if (msg.includes('already active')) return;
-          // Transient: stt-server not ready yet, or capture still held by
-          // previous owner (async release). Backoff 500 ms and retry.
-          if (
-            msg.includes('ws connect') ||
-            msg.includes('ws auth token') ||
-            msg.includes('read server token failed') ||
-            msg.includes('capture busy') ||
-            msg.includes('mic capture:')
-          ) {
-            if (i === MAX_ATTEMPTS - 1) {
-              console.warn('[wake] arm gave up after retries:', msg);
-              return;
-            }
-            await new Promise((r) => setTimeout(r, 500));
-            continue;
+          // The backend is listening, so the indicator must say so.
+          if (msg.includes('already active')) {
+            if (!conversationActive && islandMode === 'idle') islandMode = 'waiting_for_wake';
+            return;
           }
-          // Non-transient failure: surface once and stop.
-          console.warn('[wake] arm failed', e);
-          return;
+          // Everything else is retried. The two settled-config answers (no
+          // phrase / model not ready) already returned above, so a failure
+          // here is almost always stt-server still coming up or capture still
+          // held by the previous owner. Matching on error text is what rotted
+          // when the wake transport changed — retry by default instead.
+          if (i === MAX_ATTEMPTS - 1) {
+            console.warn('[wake] arm gave up after retries:', msg);
+            if (!conversationActive) chatStore.setVoiceStatus(labels.wakeStartFailed(msg));
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 500));
         }
       }
     } finally {
@@ -448,7 +468,7 @@
     return undefined;
   }
 
-  type StatusKind = { kind: 'thinking' } | { kind: 'querying'; name: string } | { kind: 'executing' } | { kind: 'running-command' };
+  type StatusKind = { kind: 'thinking' } | { kind: 'querying'; name: string } | { kind: 'executing' };
   function speakStatus(kind: StatusKind) {
     cancelPendingStatusSpeech();
     const s = get(settingsStore);
@@ -457,7 +477,6 @@
     const p = STATUS_PHRASES[lang] ?? STATUS_PHRASES.zh;
     const text = kind.kind === 'thinking' ? p.thinking
                : kind.kind === 'executing' ? p.executing
-               : kind.kind === 'running-command' ? p.runningCommand
                : p.querying(kind.name);
     if (!text || text === lastSpokenStatus) return;
     lastSpokenStatus = text;
@@ -473,11 +492,6 @@
   }
 
   async function setupListeners() {
-    chatStore.setOnCmdDetected(() => {
-      enterThinkingVisuals();
-      chatStore.addThinkingStep('🔧 运行命令');
-      speakStatus({ kind: 'running-command' });
-    });
     unlisten = await Promise.all([
       listen('chat-thinking-start', () => {
         enterThinkingVisuals();
@@ -799,8 +813,24 @@
       listen<{ score: number }>('wake-word-detected', (e) => {
         debugState('wake-word-detected', { score: e.payload.score });
       }),
+      // The indicator must follow the backend, not the last thing this window
+      // asked for: the settings window saves wake fields by having Rust stop
+      // and restart the listener on its own (commands/config.rs), and the
+      // worker can also die on its own. Both only reach us as these events.
+      listen('wake-listener-started', () => {
+        if (!conversationActive && islandMode === 'idle') islandMode = 'waiting_for_wake';
+      }),
+      listen('wake-listener-stopped', () => {
+        if (islandMode === 'waiting_for_wake' || islandMode === 'verifying_speaker') islandMode = 'idle';
+      }),
       listen<{ error: string }>('wake-listener-error', (e) => {
         console.warn('[wake] listener error:', e.payload.error);
+        // The worker is gone on this path and emits no 'stopped' — turn the
+        // light off here or it keeps breathing over a dead listener.
+        if (islandMode === 'waiting_for_wake' || islandMode === 'verifying_speaker') islandMode = 'idle';
+        if (!conversationActive) {
+          chatStore.setVoiceStatus(convLabelsLang(get(settingsStore).ui_lang).wakeStartFailed(e.payload.error));
+        }
       }),
       // Wake check in-progress: dot 3 turns red while /wake/check HTTP call is running
       listen('wake-checking', () => {
@@ -977,7 +1007,13 @@
     if (ready) {
       playStartSound();
     } else {
-      listen('app-ready', () => playStartSound()).catch(console.error);
+      listen('app-ready', () => {
+        playStartSound();
+        // stt-server is only now healthy. The arm at the end of onMount may
+        // have burned its retry budget before /kws/session could answer —
+        // first run installs the venv, which takes minutes.
+        armWakeListenerIfEnabled();
+      }).catch(console.error);
     }
     
     const settingsLoaded = await settingsStore.load();

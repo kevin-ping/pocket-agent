@@ -17,10 +17,46 @@
     $characterState === 'thinking' ||
     $chatStore.voiceStatus !== null
   );
+
+  let statusContentEl = $state<HTMLDivElement>();
+  let followLatest = $state(true);
+  let previousStepCount = 0;
+
+  function handleStatusScroll() {
+    if (!statusContentEl) return;
+    const distanceFromBottom = statusContentEl.scrollHeight - statusContentEl.scrollTop - statusContentEl.clientHeight;
+    followLatest = distanceFromBottom <= 8;
+  }
+
+  $effect(() => {
+    const steps = $chatStore.thinkingSteps;
+    const stepCount = steps.length;
+    const latestStep = steps.at(-1) ?? '';
+    const currentVoiceStatus = $chatStore.voiceStatus;
+
+    if (stepCount < previousStepCount) followLatest = true;
+    previousStepCount = stepCount;
+    if (!statusContentEl || !followLatest) return;
+
+    void latestStep;
+    void currentVoiceStatus;
+    requestAnimationFrame(() => {
+      if (statusContentEl && followLatest) {
+        statusContentEl.scrollTop = statusContentEl.scrollHeight;
+      }
+    });
+  });
 </script>
 
   <div class="status-panel" class:visible={hasContent}>
-    <div class="status-content">
+    <div
+      class="status-content"
+      bind:this={statusContentEl}
+      onscroll={handleStatusScroll}
+      role="log"
+      aria-live="polite"
+      aria-relevant="additions text"
+    >
       <div class="steps">
         {#if showSetup}
           {#if $chatStore.voiceSetupState === 'error'}
@@ -76,7 +112,16 @@
 
   .status-content {
     padding: 6px 10px;
+    box-sizing: border-box;
+    max-height: 88px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(160, 168, 255, 0.25) transparent;
   }
+  .status-content::-webkit-scrollbar       { width: 3px; }
+  .status-content::-webkit-scrollbar-track { background: transparent; }
+  .status-content::-webkit-scrollbar-thumb { background: rgba(160, 168, 255, 0.25); border-radius: 2px; }
 
   .steps {
     display: flex;

@@ -47,9 +47,17 @@ class HallucinationFilterTests(unittest.TestCase):
                 self.assertTrue(is_hallucination(text))
 
     def test_existing_noise_filters(self):
-        for text in ("", " ", "...", "♪♫", "啊啊啊啊啊", "00:12:30", "我会说,我会说,我会说,我会说"):
+        for text in ("", " ", "...", "♪♫", "啊啊啊啊啊", "嗯，嗯，嗯，嗯", "00:12:30", "我会说,我会说,我会说,我会说"):
             with self.subTest(text=text):
                 self.assertTrue(is_hallucination(text))
+
+    def test_repeated_wake_names(self):
+        for text in (
+            "吸引 吸引", "晓蕾 晓蕾", "晓蕾,晓蕾.", "晓蕾，晓蕾。",
+            "晓蕾晓蕾", "晓蕾   晓蕾", "小爱，小爱", "hey hey",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(is_hallucination(text))
 
 
 if __name__ == "__main__":

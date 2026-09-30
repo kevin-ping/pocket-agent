@@ -4,6 +4,8 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
 
+use crate::commands::computer::DesktopRoute;
+
 pub struct HermesClient {
     client: Client,
     base_url: String,
@@ -35,6 +37,57 @@ impl HermesClient {
             api_key,
             api_agent,
         }
+    }
+
+    /// Ask the model for a tool-free semantic routing decision before an API-server UI turn.
+    /// An exact token is required so malformed or expansive output fails closed.
+    pub async fn classify_desktop_route(&self, text: &str) -> Result<DesktopRoute, String> {
+        const ROUTER_PROMPT: &str = r#"Classify the user's current request by meaning. The current explicit instruction wins over earlier context.
+VISIBLE: they ask to open, inspect, or operate their visible local browser/app; also use this for searches or current external information unless they explicitly request background/results-only behavior.
+BACKGROUND: they explicitly want only the result, background research, or no browser/app interaction.
+CONVERSATION: ordinary conversation, brainstorming, or a knowledge explanation that needs no current retrieval or app action.
+Do not call any tool. Output exactly one token: VISIBLE, BACKGROUND, or CONVERSATION."#;
+        let model = if let Some(ref agent) = self.api_agent {
+            format!("openclaw/{}", agent)
+        } else {
+            "default".to_string()
+        };
+        let body = json!({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": ROUTER_PROMPT},
+                {"role": "user", "content": text}
+            ],
+            "stream": false,
+            "tools": [],
+            "tool_choice": "none"
+        });
+        let mut request = self
+            .client
+            .post(format!("{}/v1/chat/completions", self.base_url))
+            .timeout(std::time::Duration::from_secs(20))
+            .json(&body);
+        if let Some(ref key) = self.api_key {
+            request = request.header("Authorization", format!("Bearer {}", key));
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| "Hermes 语义路由请求失败。".to_string())?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Hermes 语义路由失败（HTTP {}）。",
+                response.status()
+            ));
+        }
+        let value: Value = response
+            .json()
+            .await
+            .map_err(|_| "Hermes 语义路由返回格式无效。".to_string())?;
+        let content = value["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or_default();
+        Ok(DesktopRoute::parse_classifier_output(content))
     }
 
     /// Initiate a streaming chat request, returning a stream of events

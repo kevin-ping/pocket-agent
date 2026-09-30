@@ -409,6 +409,9 @@ export interface ConversationLabels {
   speakerRejectedToast: string;
   waitingForWakeCaption: string;
   verifyingSpeakerCaption: string;
+  wakeNeedsPhrase: string;
+  wakeNeedsModel: string;
+  wakeStartFailed: (msg: string) => string;
 }
 
 function fmtSeconds(ms: number): string {
@@ -451,6 +454,9 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     speakerRejectedToast: '唤醒词不匹配',
     waitingForWakeCaption: '等待唤醒词…',
     verifyingSpeakerCaption: '验证唤醒词中…',
+    wakeNeedsPhrase: '⚠ 唤醒未启动：请在设置 → 唤醒词 中填写目标唤醒词',
+    wakeNeedsModel: '⚠ 唤醒未启动：请在设置 → 唤醒词 中下载离线唤醒模型',
+    wakeStartFailed: (m) => `⚠ 唤醒启动失败：${m}`,
   },
   en: {
     continuousMode: 'Continuous Conversation',
@@ -487,6 +493,9 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     speakerRejectedToast: 'Wake word not matched',
     waitingForWakeCaption: 'Waiting for wake word…',
     verifyingSpeakerCaption: 'Verifying wake word…',
+    wakeNeedsPhrase: '⚠ Wake word off: set a wake phrase in Settings → Wake word',
+    wakeNeedsModel: '⚠ Wake word off: download the offline wake model in Settings → Wake word',
+    wakeStartFailed: (m) => `⚠ Wake word failed to start: ${m}`,
   },
   ja: {
     continuousMode: '連続会話モード',
@@ -523,6 +532,9 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     speakerRejectedToast: 'ウェイクワード不一致',
     waitingForWakeCaption: 'ウェイクワード待機中…',
     verifyingSpeakerCaption: 'ウェイクワード照合中…',
+    wakeNeedsPhrase: '⚠ ウェイクワード停止中：設定 → ウェイクワード でウェイクワードを入力してください',
+    wakeNeedsModel: '⚠ ウェイクワード停止中：設定 → ウェイクワード でオフラインモデルをダウンロードしてください',
+    wakeStartFailed: (m) => `⚠ ウェイクワードの起動に失敗しました：${m}`,
   },
   ko: {
     continuousMode: '연속 대화 모드',
@@ -559,6 +571,9 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     speakerRejectedToast: '인식되지 않은 화자',
     waitingForWakeCaption: '웨이크 워드 대기 중…',
     verifyingSpeakerCaption: '화자 인증 중…',
+    wakeNeedsPhrase: '⚠ 웨이크 워드 중지됨: 설정 → 웨이크 워드에서 웨이크 워드를 입력하세요',
+    wakeNeedsModel: '⚠ 웨이크 워드 중지됨: 설정 → 웨이크 워드에서 오프라인 모델을 내려받으세요',
+    wakeStartFailed: (m) => `⚠ 웨이크 워드 시작 실패: ${m}`,
   },
   fr: {
     continuousMode: 'Conversation continue',
@@ -595,6 +610,9 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     speakerRejectedToast: 'Locuteur non reconnu',
     waitingForWakeCaption: 'En attente du mot de réveil…',
     verifyingSpeakerCaption: 'Vérification du locuteur…',
+    wakeNeedsPhrase: '⚠ Mot de réveil inactif : renseignez un mot de réveil dans Réglages → Mot de réveil',
+    wakeNeedsModel: '⚠ Mot de réveil inactif : téléchargez le modèle hors ligne dans Réglages → Mot de réveil',
+    wakeStartFailed: (m) => `⚠ Échec du démarrage du mot de réveil : ${m}`,
   },
   de: {
     continuousMode: 'Fortlaufendes Gespräch',
@@ -631,6 +649,9 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     speakerRejectedToast: 'Sprecher nicht erkannt',
     waitingForWakeCaption: 'Warte auf Aktivierungswort…',
     verifyingSpeakerCaption: 'Verifiziere Sprecher…',
+    wakeNeedsPhrase: '⚠ Aktivierungswort inaktiv: Aktivierungswort unter Einstellungen → Aktivierungswort eintragen',
+    wakeNeedsModel: '⚠ Aktivierungswort inaktiv: Offline-Modell unter Einstellungen → Aktivierungswort herunterladen',
+    wakeStartFailed: (m) => `⚠ Aktivierungswort konnte nicht gestartet werden: ${m}`,
   },
   es: {
     continuousMode: 'Conversación continua',
@@ -667,6 +688,9 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     speakerRejectedToast: 'Hablante no reconocido',
     waitingForWakeCaption: 'Esperando palabra de activación…',
     verifyingSpeakerCaption: 'Verificando hablante…',
+    wakeNeedsPhrase: '⚠ Palabra de activación inactiva: escribe una palabra de activación en Ajustes → Palabra de activación',
+    wakeNeedsModel: '⚠ Palabra de activación inactiva: descarga el modelo sin conexión en Ajustes → Palabra de activación',
+    wakeStartFailed: (m) => `⚠ Error al iniciar la palabra de activación: ${m}`,
   },
 };
 
@@ -675,14 +699,14 @@ export function convLabels(voice: string): ConversationLabels {
 }
 
 // ── Status TTS phrases (spoken; intentionally short and natural) ──
-export const STATUS_PHRASES: Record<LangKey, { thinking: string; querying: (n: string) => string; executing: string; runningCommand: string }> = {
-  zh: { thinking: '正在思考',  querying: (n) => `查询 ${n}`,            executing: '正在执行操作',    runningCommand: '运行命令' },
-  en: { thinking: 'Thinking', querying: (n) => `Calling ${n}`,         executing: 'Working on it',  runningCommand: 'Running command' },
-  ja: { thinking: '考え中',    querying: (n) => `${n} を呼び出し中`,   executing: '実行中',          runningCommand: 'コマンド実行中' },
-  ko: { thinking: '생각 중',   querying: (n) => `${n} 호출 중`,         executing: '실행 중',         runningCommand: '명령 실행 중' },
-  fr: { thinking: 'Réflexion', querying: (n) => `Appel de ${n}`,        executing: 'En cours',       runningCommand: 'Exécution de la commande' },
-  de: { thinking: 'Denke nach', querying: (n) => `${n} wird aufgerufen`, executing: 'In Arbeit',     runningCommand: 'Befehl wird ausgeführt' },
-  es: { thinking: 'Pensando',  querying: (n) => `Llamando a ${n}`,      executing: 'Procesando',     runningCommand: 'Ejecutando comando' },
+export const STATUS_PHRASES: Record<LangKey, { thinking: string; querying: (n: string) => string; executing: string }> = {
+  zh: { thinking: '正在思考',  querying: (n) => `查询 ${n}`,            executing: '正在执行操作' },
+  en: { thinking: 'Thinking', querying: (n) => `Calling ${n}`,         executing: 'Working on it' },
+  ja: { thinking: '考え中',    querying: (n) => `${n} を呼び出し中`,   executing: '実行中' },
+  ko: { thinking: '생각 중',   querying: (n) => `${n} 호출 중`,         executing: '실행 중' },
+  fr: { thinking: 'Réflexion', querying: (n) => `Appel de ${n}`,        executing: 'En cours' },
+  de: { thinking: 'Denke nach', querying: (n) => `${n} wird aufgerufen`, executing: 'In Arbeit' },
+  es: { thinking: 'Pensando',  querying: (n) => `Llamando a ${n}`,      executing: 'Procesando' },
 };
 
 /** Detect dominant language of a short text via Unicode ranges. */

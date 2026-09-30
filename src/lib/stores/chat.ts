@@ -78,7 +78,6 @@ let trailingNewlines = 0;
 // Tokens may straddle delta boundaries, so we buffer chars that might be opener prefixes.
 let inCmd = false;
 let cmdHold = '';
-let onCmdDetected: (() => void) | null = null;
 // hold refs to store functions so timer callbacks can use them
 let storeUpdate: any;
 let storeFinalize: (() => void) | null = null;
@@ -100,7 +99,6 @@ function filterCmd(delta: string): string {
     if (cmdHold === '[CMD:' || cmdHold === '[LOCAL_CMD') {
       cmdHold = '';
       inCmd = true;
-      onCmdDetected?.();
       continue;
     }
     if (!'[CMD:'.startsWith(cmdHold) && !'[LOCAL_CMD'.startsWith(cmdHold)) {
@@ -215,10 +213,6 @@ function createChatStore() {
       trailingNewlines = 0;
       resetCmdState();
       update((s) => ({ ...s, streamingContent: '', isStreaming: true, error: null, thinkingSteps: [] }));
-    },
-
-    setOnCmdDetected: (cb: (() => void) | null) => {
-      onCmdDetected = cb;
     },
 
     /** Add an intermediate step shown during LLM thinking/tool-calling phase */

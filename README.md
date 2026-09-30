@@ -10,7 +10,7 @@ Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust*
 
 ## On-demand computer interaction
 
-Install Hermes and Pocket Agent on each Mac, then enable the Hermes API computer tool and grant CuaDriver permissions. Text and voice requests can inspect a window, perform an authorized action, and read it again to check the result. The main model may be text-only; Hermes can use auxiliary vision when pixels are needed. See the [Mac installation and troubleshooting guide](docs/computer-interaction.md). The chat panel includes **▣** to inspect and **ⓘ** to check setup; no continuous screen monitoring is enabled.
+Install Hermes and Pocket Agent on each Mac, then enable the Hermes API computer tool and grant CuaDriver permissions. A separate semantic routing pass classifies each current request: search, lookup, and app-operation requests use the visible local browser or app by default, while an explicit request for results only or background research keeps the desktop untouched. Ordinary conversation and knowledge explanations do not open apps. Visible routes reject Hermes' internal headless-browser and command tools instead of treating them as local interaction. Text and voice requests can inspect a window, perform an authorized action, and read it again to check the result. The main model may be text-only; Hermes can use auxiliary vision when pixels are needed. See the [Mac installation and troubleshooting guide](docs/computer-interaction.md). The chat panel includes **▣** to inspect and **ⓘ** to check setup; no continuous screen monitoring is enabled.
 
 ## How It Works
 
@@ -43,11 +43,12 @@ Install Hermes and Pocket Agent on each Mac, then enable the Hermes API computer
    WAV audio     HTTP/SSE
         |             |
         v             v
-  +----------+   +--------------+
-  | Whisper  |   | Hermes /     |
-  | (local)  |   | OpenClaw     |
-  +----------+   | :8642/:18789 |
-                 +--------------+
+  +------------------+   +--------------+
+  | Voice service    |   | Hermes /     |
+  | :8651 (local)    |   | OpenClaw     |
+  | Whisper + VAD    |   | :8642/:18789 |
+  | + speaker + KWS  |   +--------------+
+  +------------------+
 ```
 
 ### Voice Pipeline
@@ -60,6 +61,38 @@ Install Hermes and Pocket Agent on each Mac, then enable the Hermes API computer
 6. **TTS playback** — edge-tts generates audio, rodio plays it via system speakers
 
 Press **Escape** during recording to cancel. Minimum recording: 1.5s. Maximum: 30s (auto-cutoff).
+
+### Resident Voice Service
+
+Steps 4 and onward do not spawn a fresh Python process per utterance. Pocket Agent starts a
+**resident voice service on `127.0.0.1:8651`** (`src-tauri/resources/stt-server.py`, FastAPI)
+that keeps Whisper, Silero VAD, the speaker model and the KWS model loaded:
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /transcribe` | Whisper transcription (VAD short-circuits silent audio to avoid hallucination) |
+| `POST /vad`, `POST /vad/check` | Silero VAD — speech present? used by the barge-in confirmation gate |
+| `POST /speaker/embed`, `/speaker/enroll`, `/speaker/train` | voiceprint enrollment and matching |
+| `GET /kws/status`, `POST /kws/install`, `/kws/session`, `/kws/audio/{sid}`, `/kws/check` | sherpa-onnx keyword spotting for the wake word |
+| `GET /health` | liveness |
+
+If the HTTP path fails, transcription falls back to a one-shot subprocess, so dictation keeps
+working (slower, and without the VAD short-circuit).
+
+`/speaker/*` and `/kws/*` are protected: they require a bearer token written to
+`~/.pocket-agent/server.token` at service startup **and** an `Origin` from the Tauri webview,
+so a page in your browser cannot drive them.
+
+### Hands-Free Path
+
+With the wake word enabled there is a second entry point that needs no keypress:
+
+```
+always-on mic → sherpa-onnx KWS (wake phrase)
+              → [optional] speaker verification (owner-only)
+              → conversation turn loop (silence timeout ends each turn)
+              → barge-in: sustained RMS + Silero VAD confirmation interrupts TTS
+```
 
 ---
 
@@ -74,6 +107,12 @@ Press **Escape** during recording to cancel. Minimum recording: 1.5s. Maximum: 3
 - **Multi-language voice** — configure primary + auxiliary TTS voices, auto-switch based on detected language
 - **Configurable hotkey** — capture any key via Settings, no restart required
 - **Local + SSH hotkey parity** — fn/globe and modifier hotkeys behave consistently whether PA is launched locally or from an SSH session
+- **Wake word (hands-free)** — always-on sherpa-onnx keyword spotting, optionally gated by speaker verification so only your voice triggers it
+- **Continuous conversation** — turn loop with silence-based turn ending; no keypress per utterance
+- **Barge-in** — talk over the assistant to interrupt it; a Silero VAD confirmation gate rejects non-speech noise
+- **Resident voice service** — Whisper / VAD / speaker / KWS models stay loaded on `:8651`, with a subprocess fallback if it is unreachable
+- **On-demand desktop interaction** — semantic routing decides per request whether to act in your visible browser/app via Hermes `computer_use`, retrieve in the background, or just talk
+- **Settings center** — SQLite-backed settings UI in its own window
 - **Interruptible TTS** — pressing the hotkey while PA is speaking stops current audio immediately before recording starts
 - **TTS toggle** — disable voice output for text-only mode
 - **Compact widget** — 220x360px always-on-top window, dark sci-fi aesthetic
@@ -242,7 +281,7 @@ If Accessibility was denied initially, re-enable it and restart the app. If loca
 
 Open **Settings** from the tray menu.
 
-- **Server connection** — API server URL, auth key, agent name, and local commands are configured via `.env` only (see `.env.example`)
+- **Server connection** — API server URL, auth key, and agent name are configured via `.env` only (see `.env.example`)
 - **Avatar image** — optional custom character avatar
 - **Record Key** — capture any key as your push-to-talk hotkey (default: `fn`). Changes take effect immediately.
 - **TTS voices** — primary, auxiliary 1, auxiliary 2 (grouped by language)
@@ -253,16 +292,26 @@ Open **Settings** from the tray menu.
 
 ### Wake-Word Configuration
 
-Pocket Agent supports voice-activated wake words using **speaker embedding + Whisper keyword matching**. The system learns your voice and a custom phrase during enrollment.
+Pocket Agent supports hands-free activation with a **sherpa-onnx keyword spotter (KWS)** running inside the resident voice service, optionally gated by **speaker verification** so only your voice triggers it.
 
-Key `.env` settings:
+Configured in **Settings → Voice** (not via `.env`):
 
-- **`WAKE_STT_MODEL`** (default: `base`) — Whisper model for wake-word transcription (`tiny` / `base` / `small`)
-- **`WAKE_LANGUAGE`** (default: auto-detect) — **Must match your wake phrase language.** If your phrase is English (e.g. "hey mimiku"), set to `en`. If Chinese, set to `zh`. A mismatch causes Whisper to mis-transcribe or drop words. Mixed-language phrases: try omitting to use auto-detection.
+- **Wake word enabled** — turns the always-on KWS listener on or off
+- **Wake phrase** — the keyword the spotter listens for
+- **KWS threshold** (`wake_kws_threshold`) — keyword match confidence; raise it if the phrase fires on similar-sounding speech
+- **Owner only** (`wake_owner_only`) — when on, a keyword hit must also pass speaker verification against your enrolled voiceprint
+- **Speaker threshold** (`wake_word_threshold`) — how close the voice must match the enrolled voiceprint
 
-- **Audio format** — WAV (lossless) or MP3 (compact)
+Voiceprint enrollment and the KWS model download are driven from the same settings page; they call the resident voice service's `/speaker/*` and `/kws/*` endpoints.
 
-Settings persist via Tauri store.
+### Continuous Conversation
+
+After a wake word (or hotkey), Pocket Agent can stay in a conversation turn loop instead of requiring a press per utterance:
+
+- **Silence timeout** (`silence_timeout_secs`) — how long a pause ends your turn
+- **Barge-in** (`barge_in_enabled`, `barge_in_rms_threshold`) — speak over the assistant to interrupt it. A sustained RMS level arms the interrupt, and a **Silero VAD** second opinion confirms it is speech and not a door slam or keyboard noise. Interrupting a conversation turn additionally requires the wake word, so background talk does not cut the assistant off.
+
+Settings persist in a local **SQLite** database under `~/.pocket-agent/` (see `src-tauri/src/commands/settings_repository.rs`).
 
 ---
 
@@ -312,45 +361,56 @@ The old behavior queued a Stop command onto the audio thread, but the playback t
 ```
 pocket-agent/
 ├── src/                          # Svelte 5 frontend
-│   ├── App.svelte                # Main container + event orchestration
-│   ├── main.ts                   # Entry point
+│   ├── App.svelte                # Main widget container + event orchestration
+│   ├── SettingsApp.svelte        # Settings center (separate window)
+│   ├── main.ts / settings.ts     # Entry points (widget / settings window)
 │   └── lib/
 │       ├── components/
-│       │   ├── AvatarIcon.svelte  # Character avatar + expand button
-│       │   ├── ChatPanel.svelte   # Chat input + message display
-│       │   ├── ContextMenu.svelte # Right-click context menu
-│       │   ├── DialogBox.svelte   # Dialog bubble with typewriter effect
-│       │   ├── DynamicIsland.svelte # Recording indicator
-│       │   ├── Icon.svelte       # SVG inline icon component (Lucide style)
-│       │   ├── RecordingCapsule.svelte # Active recording timer
-│       │   ├── StatusPanel.svelte  # Thinking steps & status display
-│       │   └── SettingsPanel.svelte # Settings (General / Voice)
-│       ├── stores/
-│       │   ├── chat.ts           # Chat message store
-│       │   ├── character.ts      # Character animation state
-│       │   ├── layout.ts         # Window layout constants
-│       │   └── settings.ts       # Persistent settings store
-│       └── i18n.ts               # Language detection utilities
+│       │   ├── AvatarIcon.svelte      # Character avatar + expand button
+│       │   ├── Character.svelte       # Character animation
+│       │   ├── ChatPanel.svelte       # Chat input + message display
+│       │   ├── ComputerApproval.svelte # Approval prompt for computer_use actions
+│       │   ├── BreakConfirmModal.svelte
+│       │   ├── ContextMenu.svelte / CustomSelect.svelte / Icon.svelte
+│       │   ├── DialogBox.svelte       # Dialog bubble with typewriter effect
+│       │   ├── DynamicIsland.svelte   # Recording indicator
+│       │   ├── StatusPanel.svelte     # Thinking steps & status display
+│       │   └── settings/              # Settings page sections
+│       ├── stores/                    # chat / character / layout / settings
+│       └── i18n.ts, settingsI18n.ts   # Language detection + settings i18n
 ├── src-tauri/                    # Rust backend
-│   ├── Cargo.toml                # Rust dependencies
+│   ├── Cargo.toml                # Rust dependencies (incl. rusqlite)
 │   ├── tauri.conf.json           # Tauri window + tray config
 │   ├── resources/
-│   │   └── stt-helper            # Python STT script (faster-whisper)
+│   │   ├── stt-server.py         # Resident voice service :8651 (FastAPI)
+│   │   ├── wake_kws.py           # sherpa-onnx keyword spotting
+│   │   ├── stt-helper            # One-shot Whisper subprocess (fallback path)
+│   │   └── requirements-stt.txt  # Python deps for the voice venv
 │   └── src/
 │       ├── main.rs               # App entry
 │       ├── lib.rs                # State, tray menu, plugin setup
 │       ├── api/
-│       │   └── client.rs         # Hermes SSE client
+│       │   ├── client.rs         # Gateway SSE client
+│       │   ├── runs.rs           # Hermes /v1/runs (tool events, approvals, stop)
+│       │   └── server.rs         # Local HTTP API :8650 (/push, /bridge/send, /health)
 │       ├── commands/
 │       │   ├── chat.rs           # send_message: SSE → TTS → emit
-│       │   ├── config.rs         # Settings persistence + voice hints
-│       │   └── voice.rs          # Recording lifecycle commands
+│       │   ├── computer.rs       # Desktop route policy + COMPUTER_HINT prompt
+│       │   ├── config.rs         # Config model + voice hints
+│       │   ├── history.rs        # Chat history
+│       │   ├── settings_repository.rs # SQLite-backed settings persistence
+│       │   └── voice.rs          # Recording / wake / conversation commands
 │       └── voice/
 │           ├── hotkey.rs         # Global hotkey capture (CGEventTap)
 │           ├── record.rs         # Audio recording (cpal) + pre-warm
-│           └── stt.rs            # Whisper transcription wrapper
-├── assets/
-│   └── media/                    # Demo videos + screenshots
+│           ├── stt.rs            # Transcription: HTTP → subprocess fallback
+│           ├── sherpa_wake.rs    # Wake-word (KWS) listener lifecycle
+│           ├── wake_window.rs    # Wake audio windowing / VAD submission
+│           ├── conversation.rs   # Continuous conversation state machine + barge-in
+│           └── venv.rs           # Managed Python venv (~/.pocket-agent/venv)
+├── docs/                         # computer-interaction.md, API_MANUAL.md
+├── scripts/                      # dev + voice test scripts
+├── assets/media/                 # Demo videos + screenshots
 ├── .env.example                  # Environment template
 └── README.md
 ```
@@ -360,8 +420,8 @@ pocket-agent/
 ## Development
 
 ```bash
-# Frontend type check
-npx svelte-check
+# Rust tests (the repo's real gate — includes prompt/policy regression tests)
+cd src-tauri && cargo test
 
 # Rust compilation check
 cd src-tauri && cargo check
@@ -369,6 +429,12 @@ cd src-tauri && cargo check
 # Production build
 npm run tauri build
 ```
+
+> **Note on frontend type checking:** this repo has no type-check gate. `npm run build` is
+> plain `vite build`, which transpiles TypeScript with esbuild and does **not** validate types,
+> and `svelte-check` is not installed — so `.svelte` files are not type-checked by any command
+> here. `npx tsc --noEmit -p tsconfig.json` covers the `.ts` files only. Treat `cargo test` as
+> the authoritative automated check.
 
 ---
 ---

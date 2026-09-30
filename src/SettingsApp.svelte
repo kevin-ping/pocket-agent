@@ -10,6 +10,7 @@
   import {
     SETTINGS_LANGS,
     settingsText,
+    wakeSettingsText,
     type SettingsLang,
   } from './lib/settingsI18n';
 
@@ -54,7 +55,7 @@
   ] as const;
 
   let active = $state<Section>('general');
-  let local = $state<AppSettings | null>(bootstrap?.config ?? null);
+  let local = $state<AppSettings | null>(bootstrap?.config ? { ...SETTINGS_DEFAULTS, ...bootstrap.config } : null);
   let baseline = $state(bootstrap?.config ? JSON.stringify(bootstrap.config) : '');
   let loading = $state(!bootstrap);
   let saving = $state(false);
@@ -76,6 +77,43 @@
   let previewingField = $state<'primary' | 'aux1' | 'aux2' | null>(null);
   let fileInput = $state<HTMLInputElement>(undefined!);
   let gifInput = $state<HTMLInputElement>(undefined!);
+
+  let modelReady = $state(false);
+  let modelLoading = $state(false);
+  let wakeTestResult = $state('');
+  let wakeText = $derived(wakeSettingsText(local?.ui_lang ?? 'en'));
+  async function refreshWakeModel() {
+    if (!isTauri) return;
+    try { modelReady = (await invoke<{ready: boolean}>('wake_model_status')).ready; }
+    catch (e) { error = `${text.actionError}: ${String(e)}`; }
+  }
+  async function downloadWakeModel() {
+    modelLoading = true; error = '';
+    try { modelReady = (await invoke<{ready: boolean}>('install_wake_model')).ready; }
+    catch (e) { error = `${text.actionError}: ${String(e)}`; }
+    finally { modelLoading = false; }
+  }
+  async function testWakePhrase() {
+    if (!local || enrolling) return;
+    if (!local.wake_phrase.trim()) { error = wakeText.required; return; }
+    enrolling = true; wakeTestResult = ''; error = ''; enrollCountdown = 4;
+    try {
+      await invoke('stop_wake_word_listening');
+      await invoke('start_enroll_recording');
+      for (let i = 4; i > 0; i--) { enrollCountdown = i; await new Promise(r => setTimeout(r, 1000)); }
+      const audioPath = await invoke<string>('stop_enroll_recording');
+      const result = await invoke<{keyword_match: boolean; speaker_match: boolean}>('test_wake_word', {audioPath, config: local});
+      wakeTestResult = !result.keyword_match ? wakeText.notDetected : !result.speaker_match ? wakeText.rejected : local.wake_owner_only ? wakeText.passed : wakeText.keywordOnly;
+    } catch (e) { error = `${text.actionError}: ${String(e)}`; }
+    finally { enrolling = false; enrollCountdown = 0; await resumeSavedWake(); }
+  }
+  async function resumeSavedWake() {
+    try {
+      const current = await invoke<AppSettings>('get_config');
+      if (current.wake_word_enabled) await invoke('start_wake_word_listening', {threshold: current.wake_word_threshold, speakerName: current.last_enrolled_speaker});
+    } catch (e) { error = `${text.actionError}: ${String(e)}`; }
+  }
+  void refreshWakeModel();
 
   let text = $derived(settingsText(local?.ui_lang ?? 'en'));
   let dirty = $derived((!!local && JSON.stringify(local) !== baseline) || pendingWakeDeletes.length > 0);
@@ -139,6 +177,8 @@
 
   async function save() {
     if (!local || saving) return;
+    if (local.wake_word_enabled && !local.wake_phrase.trim()) { error = wakeText.required; return; }
+    if (local.wake_word_enabled && !modelReady) { error = wakeText.notReady; return; }
     saving = true; error = ''; notice = '';
     try {
       const avatarImage = local.avatar_image;
@@ -189,7 +229,7 @@
   async function persistImmediate(partial: Partial<AppSettings>) {
     if (!local) throw new Error(text.loadError);
     const result = await invoke<SaveResponse>('save_settings_page_config', {
-      config: { ...local, ...partial },
+      config: { ...JSON.parse(baseline || JSON.stringify(local)), ...partial },
     });
     if (local) local = { ...local, ...partial };
     const base = JSON.parse(baseline || JSON.stringify(local)) as AppSettings;
@@ -286,46 +326,30 @@
     showNameDialog = true;
   }
 
-  async function beginEnrollment(training = false) {
+  async function beginEnrollment() {
     if (!/^[A-Za-z0-9_-]{1,32}$/.test(enrollName)) {
       error = text.validationName; return;
     }
-    showNameDialog = false; enrolling = true; enrollCountdown = 3; error = ''; notice = '';
+    showNameDialog = false; enrolling = true; enrollCountdown = 5; error = ''; notice = '';
     try {
       await invoke('stop_wake_word_listening').catch(() => {});
       await invoke('start_enroll_recording');
       const timer = setInterval(() => enrollCountdown--, 1000);
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      await new Promise(resolve => setTimeout(resolve, 5000));
       clearInterval(timer);
       const wavPath = await invoke<string>('stop_enroll_recording');
-      if (training) {
-        await invoke('train_speaker', { name: enrollName, audioPath: wavPath });
-      } else {
-        await invoke('enroll_speaker', { name: enrollName, audioPath: wavPath });
-      }
+      await invoke('enroll_speaker', { name: enrollName, audioPath: wavPath });
       await persistImmediate({ last_enrolled_speaker: enrollName });
       await refreshVariantCount();
-      notice = training ? text.trainSuccess : text.enrollSuccess;
+      notice = wakeText.voiceSaved;
     } catch (e) {
       error = `${text.actionError}: ${String(e)}`;
     } finally {
       enrolling = false; enrollCountdown = 0;
-      invoke<AppSettings>('get_config').then((current) => {
-        if (current.wake_word_enabled) {
-          return invoke('start_wake_word_listening', {
-            threshold: current.wake_word_threshold,
-            speakerName: current.last_enrolled_speaker || 'Me',
-          });
-        }
-      }).catch(() => {});
+      await resumeSavedWake();
     }
   }
 
-  async function train() {
-    if (!local?.last_enrolled_speaker) return requestEnrollment();
-    enrollName = local.last_enrolled_speaker;
-    await beginEnrollment(true);
-  }
 </script>
 
 <svelte:head><title>Pocket Agent Settings</title></svelte:head>
@@ -416,39 +440,39 @@
         {:else if active === 'wake'}
           <section class="card">
             <Toggle label={text.wakeEnabled} hint={text.hintWakeEnabled} value={local.wake_word_enabled} change={() => local && (local.wake_word_enabled = !local.wake_word_enabled)} />
-            <RangeField label={text.wakeSensitivity} hint={text.hintWakeSensitivity} value={local.wake_word_threshold} min={0.30} max={0.90} step={0.05} display={`${Math.round(local.wake_word_threshold * 100)}${text.percent}`} change={(v) => local && (local.wake_word_threshold = v)} />
+            <Field label={wakeText.phrase}>
+              <input type="text" aria-label={wakeText.phrase} maxlength="48" placeholder="桃子桃子 / star start" bind:value={local.wake_phrase} disabled={enrolling} />
+            </Field>
+            <p class="wake-help">{wakeText.phraseHint}</p>
             <div class="sample">
-              <div><strong>{text.sample}</strong><p>{local.last_enrolled_speaker || text.noSample}{variantCount ? ` · ${variantCount} ${text.variants}` : ''}</p></div>
-              <div class="actions">
-                {#if local.last_enrolled_speaker}<button class="ghost" onclick={() => requestEnrollment(true)}>{text.rename}</button>{/if}
-                <button class="secondary" onclick={() => requestEnrollment()} disabled={enrolling}>{enrolling ? `${text.recording} ${enrollCountdown}` : text.recordSample}</button>
-                {#if local.last_enrolled_speaker}<button class="secondary" onclick={train} disabled={enrolling}>{text.trainSample}</button>{/if}
-              </div>
+              <div><strong>{wakeText.model}</strong><p>{modelReady ? wakeText.ready : wakeText.missing}</p></div>
+              {#if !modelReady}<button class="secondary" onclick={downloadWakeModel} disabled={modelLoading}>{modelLoading ? wakeText.downloading : wakeText.download}</button>{/if}
             </div>
-            {#if local.last_enrolled_speaker}
-              <div class="wake-words">
-                <span class="wake-label">{text.wakeWordsLabel}</span>
-                {#if wakeWords.length > 0}
-                  <div class="wake-tags">
-                    {#each wakeWords as word}
-                      <span class="wake-tag" class:pending-delete={pendingWakeDeletes.includes(word)}>
-                        {word}
-                        <button class="wake-del" aria-label={text.remove} onclick={() => toggleWakeDelete(word)}>×</button>
-                      </span>
-                    {/each}
-                  </div>
-                {:else}
-                  <p class="wake-empty">{text.wakeWordsEmpty}</p>
-                {/if}
+            <RangeField label={wakeText.kws} hint={wakeText.thresholdHint} value={local.wake_kws_threshold} min={0.05} max={0.90} step={0.05} display={`${Math.round(local.wake_kws_threshold * 100)}%`} change={(v) => local && (local.wake_kws_threshold = v)} />
+            <Toggle label={wakeText.owner} hint={wakeText.ownerHint} value={local.wake_owner_only} change={() => local && (local.wake_owner_only = !local.wake_owner_only)} />
+            {#if local.wake_owner_only}
+              <RangeField label={wakeText.strictness} hint={wakeText.thresholdHint} value={local.wake_word_threshold} min={0.30} max={0.90} step={0.05} display={`${Math.round(local.wake_word_threshold * 100)}%`} change={(v) => local && (local.wake_word_threshold = v)} />
+              <div class="sample">
+                <div><strong>{wakeText.voice}</strong><p>{local.last_enrolled_speaker || text.noSample}</p></div>
+                <button class="secondary" onclick={() => requestEnrollment()} disabled={enrolling}>{enrolling ? `${text.recording} ${enrollCountdown}` : wakeText.record}</button>
               </div>
+              <p class="wake-help">{wakeText.voiceHint}</p>
+            {/if}
+            <div class="sample">
+              <button class="secondary" onclick={testWakePhrase} disabled={enrolling || !modelReady || !local.wake_phrase.trim()}>{enrolling ? `${wakeText.testing} · ${enrollCountdown}` : wakeText.test}</button>
+            </div>
+            <p class="wake-help" role="status" aria-live="polite">{wakeTestResult}</p>
+            {#if wakeWords.length > 0 && !local.wake_phrase}
+              <p class="wake-help">{wakeText.migration}</p>
+              <div class="wake-tags">{#each wakeWords as word}<button type="button" class="wake-tag" onclick={() => local && (local.wake_phrase = word)}>{word}</button>{/each}</div>
             {/if}
           </section>
         {/if}
       </div>
       <footer>
-        <div class="message"><span class:error>{error || notice}</span></div>
+        <div class="message" role="status" aria-live="polite"><span class:error>{error || notice}</span></div>
         <button class="ghost" onclick={cancel}>{text.cancel}</button>
-        <button class="primary" onclick={save} disabled={!dirty || saving}>{saving ? text.saving : text.save}</button>
+        <button class="primary" onclick={save} disabled={!dirty || saving || enrolling || modelLoading}>{saving ? text.saving : text.save}</button>
       </footer>
     {:else}
       <div class="center error-state">
@@ -462,7 +486,7 @@
 {#if showNameDialog}
   <div class="backdrop">
     <div class="modal">
-      <h3>{text.sample}</h3><p>{text.enrollHint}</p>
+      <h3>{text.sample}</h3><p>{wakeText.voiceHint}</p>
       <label>{text.speakerName}<input bind:value={enrollName} maxlength="32" /></label>
       <div class="modal-actions"><button class="ghost" onclick={() => showNameDialog = false}>{text.cancel}</button><button class="primary" onclick={() => beginEnrollment(false)}>{text.startRecording}</button></div>
     </div>
@@ -470,6 +494,7 @@
 {/if}
 
 <style>
+  .wake-help { color: var(--muted, #64748b); font-size: 13px; line-height: 1.6; margin: 8px 16px 16px; }
   :global {
   :global(*){box-sizing:border-box} :global(html,body,#app){margin:0;width:100%;height:100%;overflow:hidden}
   :global(body){font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f5f9;color:#1e2235;-webkit-font-smoothing:antialiased}
@@ -479,11 +504,12 @@
   h1,h2,h3,p{margin:0}.brand h1{font-size:14px;color:#1e2235}.brand p,header p{font-size:10px;color:#6a7185;margin-top:3px}nav{display:flex;flex-direction:column;gap:3px}nav button{border:0;background:transparent;color:#5a6178;padding:8px 10px;border-radius:8px;text-align:left;cursor:pointer;display:flex;gap:10px;align-items:center;font-size:12px}nav button span{width:18px;text-align:center;color:#8890a8;font-size:13px}nav button:hover{background:#0000000a;color:#2a2f42}nav button.active{background:#788cff18;color:#3a4566;box-shadow:inset 0 0 0 1px #8294ff30}nav button.active span{color:#7080ff}.immediate{margin-top:auto;padding:10px;font-size:9px;line-height:1.5;color:#939aab}
   main{min-width:0;min-height:0;height:100%;display:grid;grid-template-rows:58px minmax(0,1fr) 52px;overflow:hidden}header{padding:14px 28px;border-bottom:1px solid #e2e5ed;display:flex;align-items:center}header h2{font-size:17px;color:#1e2235}.content{min-height:0;padding:18px 28px;overflow:auto;overscroll-behavior:contain}.card{max-width:680px;border:1px solid #e2e5ed;border-radius:12px;background:#ffffff;overflow:hidden;box-shadow:0 3px 14px #0000000a}
   .field{min-height:46px;padding:9px 16px;display:flex;align-items:center;justify-content:space-between;gap:20px;border-bottom:1px solid #e8eaf0}.field:last-child{border-bottom:0}.field-label{font-size:12px;color:#2a2f42}.field small{display:block;color:#7a8298;margin-top:3px;font-size:10px;font-weight:500}.field-hint{display:block;color:#9aa3b8;margin-top:3px;font-size:10px;font-style:normal;line-height:1.4}.control{min-width:220px;display:flex;justify-content:flex-end}
-  select,.modal input{width:220px;border:1px solid #d4d8e0;background:#ffffff;color:#1e2235;border-radius:7px;padding:6px 10px;outline:none;font-size:12px}select:focus,input:focus{border-color:#7589f4}input[type=range]{width:220px;accent-color:#7589f4}.toggle{width:38px;height:22px;padding:2px;border:0;border-radius:18px;background:#d4d8e0;cursor:pointer;transition:.15s}.toggle span{display:block;width:18px;height:18px;border-radius:50%;background:#ffffff;transition:.15s;box-shadow:0 1px 3px #00000030}.toggle.on{background:#7589f4}.toggle.on span{transform:translateX(16px);background:white}
-  button.primary,button.secondary,button.ghost{border-radius:7px;padding:6px 12px;cursor:pointer;border:1px solid transparent;color:#1e2235;font-size:12px}button.primary{background:#7589f4;color:#fff}button.primary:hover{background:#6478e8}button.primary:disabled{opacity:.4;cursor:default}button.secondary{background:#f0f2f8;border-color:#d4d8e0;color:#1e2235}button.secondary:hover{background:#e8eaf2}button.ghost{background:transparent;border-color:#d4d8e0;color:#5a6178}button.ghost:hover{background:#0000000a}.danger{color:#e53e5c!important}.working{color:#c99700!important}
+  select,input[type=text],.modal input{width:220px;border:1px solid #d4d8e0;background:#ffffff;color:#1e2235;border-radius:7px;padding:6px 10px;outline:none;font-size:12px}select:focus,input:focus{border-color:#7589f4}input[type=range]{width:220px;accent-color:#7589f4}.toggle{width:38px;height:22px;padding:2px;border:0;border-radius:18px;background:#d4d8e0;cursor:pointer;transition:.15s}.toggle span{display:block;width:18px;height:18px;border-radius:50%;background:#ffffff;transition:.15s;box-shadow:0 1px 3px #00000030}.toggle.on{background:#7589f4}.toggle.on span{transform:translateX(16px);background:white}
+  button.primary,button.secondary,button.ghost{border-radius:7px;padding:6px 12px;cursor:pointer;border:1px solid transparent;color:#1e2235;font-size:12px}button.primary{background:#7589f4;color:#fff}button.primary:hover{background:#6478e8}button.primary:disabled{opacity:.4;cursor:default}button.secondary{background:#f0f2f8;border-color:#d4d8e0;color:#1e2235}button.secondary:disabled{opacity:.5;cursor:default}button:focus-visible{outline:2px solid #6478e8;outline-offset:3px}button.secondary:hover{background:#e8eaf2}button.ghost{background:transparent;border-color:#d4d8e0;color:#5a6178}button.ghost:hover{background:#0000000a}.danger{color:#e53e5c!important}.working{color:#c99700!important}
   footer{min-height:52px;border-top:1px solid #e2e5ed;padding:10px 28px;display:flex;gap:8px;align-items:center;justify-content:flex-end;background:#ffffff;position:relative;z-index:2}.message{margin-right:auto;color:#1a9d63;font-size:11px}.message .error{color:#e53e5c}
   .voice-field{border-bottom:1px solid #e8eaf0}.voice-field .field{border:0;padding-bottom:5px}.voice-control{display:flex;align-items:center;gap:6px}.voice-control select{width:165px}.preview-button{width:84px;min-width:84px;max-width:84px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid #d4d8e0;background:#f0f2f8;color:#1e2235;border-radius:7px;padding:6px 6px;cursor:pointer;font-size:11px}.preview-button:hover{background:#e8eaf2}.preview-button:disabled{opacity:.45;cursor:default}.check{display:flex;justify-content:flex-end;align-items:center;gap:6px;padding:0 16px 9px;color:#7a8298;font-size:10px}.check input{accent-color:#7589f4}.asset-grid{display:grid;grid-template-columns:1fr 1fr;gap:0}.asset{padding:18px;text-align:center}.asset+ .asset{border-left:1px solid #e2e5ed}.preview{width:84px;height:84px;margin:0 auto 12px;border-radius:18px;background:linear-gradient(145deg,#f0f2f8,#e8eaf2);border:1px solid #d4d8e0;display:grid;place-items:center;overflow:hidden;color:#7589f4;font-weight:800}.preview img{width:100%;height:100%;object-fit:cover}.asset h3{font-size:13px;color:#1e2235}.asset p{height:32px;margin:5px 0 10px;color:#7a8298;font-size:10px;line-height:1.5}.asset button+button{margin-left:6px}
-  .wake-words{padding:12px 16px;border-top:1px solid #e8eaf0}.wake-label{display:block;font-size:12px;font-weight:600;color:#1e2235;margin-bottom:8px}.wake-tags{display:flex;flex-wrap:wrap;gap:6px}.wake-tag{display:inline-flex;align-items:center;gap:4px;background:#eef1f7;border:1px solid #dde2ec;color:#3a4156;font-size:11px;font-weight:500;padding:4px 6px 4px 10px;border-radius:14px}
+  .wake-words{padding:12px 16px;border-top:1px solid #e8eaf0}.wake-label{display:block;font-size:12px;font-weight:600;color:#1e2235;margin-bottom:8px}.wake-tags{display:flex;flex-wrap:wrap;gap:6px;padding:0 16px 16px}.wake-tag{display:inline-flex;align-items:center;gap:4px;background:#eef1f7;border:1px solid #dde2ec;color:#3a4156;font-family:inherit;font-size:11px;font-weight:500;padding:4px 10px;border-radius:14px;cursor:pointer}
+.wake-tag:hover{background:#e2e7f1;border-color:#c8d0e0}
 .wake-tag.pending-delete{opacity:.5;text-decoration:line-through}
 .wake-del{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;padding:0;border:none;background:transparent;color:#8a91a6;font-size:14px;line-height:1;border-radius:8px;cursor:pointer;text-decoration:none}
 .wake-del:hover{background:#dce0ea;color:#c0392b}

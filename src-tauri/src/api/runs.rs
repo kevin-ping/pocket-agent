@@ -1,5 +1,6 @@
 //! Hermes run transport: explicit approvals and cancellation for desktop turns.
 use super::client::StreamEvent;
+use crate::commands::computer::{tool_allowed_for_route, DesktopRoute};
 use crate::commands::config::{get_api_key, get_api_url};
 use eventsource_stream::Eventsource;
 use futures_util::{stream::BoxStream, StreamExt};
@@ -110,6 +111,7 @@ pub async fn chat_stream(
     hint: Option<&str>,
     context: Option<&str>,
     session: &str,
+    route: DesktopRoute,
 ) -> Result<BoxStream<'static, Result<StreamEvent, String>>, String> {
     let run = Run {
         url: get_api_url().trim_end_matches('/').into(),
@@ -163,7 +165,7 @@ pub async fn chat_stream(
                 ));
             }
             let mut events = response.bytes_stream().eventsource();
-            let mut received_text = false;
+            let mut reply = RunReply::new(route);
             loop {
                 let next = tokio::select! {
                     _ = tx.closed() => return Ok(()),
@@ -177,10 +179,9 @@ pub async fn chat_stream(
                     .map_err(|_| "电脑任务事件格式无效。".to_string())?;
                 match value["event"].as_str().unwrap_or("") {
                     "message.delta" => {
-                        if let Some(delta) = value["delta"].as_str().filter(|s| !s.is_empty()) {
-                            received_text = true;
+                        if let Some(delta) = reply.delta(value["delta"].as_str().unwrap_or("")) {
                             if tx
-                                .send(Ok(StreamEvent::Content(delta.into())))
+                                .send(Ok(StreamEvent::Content(delta)))
                                 .await
                                 .is_err()
                             {
@@ -190,6 +191,17 @@ pub async fn chat_stream(
                     }
                     "tool.started" => {
                         let name = value["tool"].as_str().unwrap_or("computer_use").to_string();
+                        if !tool_allowed_for_route(route, &name) {
+                            let stopped = control(&run, &id, "stop", json!({})).await.is_ok();
+                            terminal = stopped;
+                            let _ = tx
+                                .send(Err(format!(
+                                    "Hermes 为当前 {:?} 路由选择了不允许的工具 {}，Pocket Agent 已停止该任务且不会把它当作成功。",
+                                    route, name
+                                )))
+                                .await;
+                            return Ok(());
+                        }
                         if tx
                             .send(Ok(StreamEvent::ToolCallStart {
                                 id: format!("{}-{}", id, value["timestamp"]),
@@ -228,16 +240,8 @@ pub async fn chat_stream(
                     }
                     "run.completed" => {
                         terminal = true;
-                        if value["completed"] == false || value["partial"] == true {
-                            return Err("Hermes 任务只完成了一部分，请检查实际结果。".into());
-                        }
-                        if !received_text {
-                            if let Some(output) = value["output"].as_str().filter(|s| !s.is_empty())
-                            {
-                                let _ = tx.send(Ok(StreamEvent::Content(output.into()))).await;
-                            } else {
-                                return Err("Hermes 任务结束，但未提供可核实的回复。".into());
-                            }
+                        if let Some(output) = reply.complete(&value)? {
+                            let _ = tx.send(Ok(StreamEvent::Content(output))).await;
                         }
                         return Ok(());
                     }
@@ -278,9 +282,133 @@ fn valid_run_id(id: &str) -> bool {
         && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Desktop narration never enters the Content stream (UI, speech and history).
+/// Progress/approval events are handled independently and remain live.
+struct RunReply {
+    route: DesktopRoute,
+    received_text: bool,
+}
+
+impl RunReply {
+    fn new(route: DesktopRoute) -> Self {
+        Self { route, received_text: false }
+    }
+
+    fn delta(&mut self, text: &str) -> Option<String> {
+        if self.route == DesktopRoute::Visible || text.is_empty() {
+            return None;
+        }
+        self.received_text = true;
+        Some(text.into())
+    }
+
+    fn complete(&self, event: &Value) -> Result<Option<String>, String> {
+        // Never flush a success-looking partial answer on failure or cancellation.
+        if event["event"] != "run.completed" {
+            return Err("电脑任务未完整结束。".into());
+        }
+        if event["completed"] == false || event["partial"] == true {
+            return Err("Hermes 任务只完成了一部分，请检查实际结果。".into());
+        }
+        let output = event["output"].as_str().unwrap_or("");
+        if self.route == DesktopRoute::Visible {
+            return desktop_final_reply(output).map(Some);
+        }
+        if self.received_text {
+            Ok(None)
+        } else if output.is_empty() {
+            Err("Hermes 任务结束，但未提供可核实的回复。".into())
+        } else {
+            Ok(Some(output.into()))
+        }
+    }
+}
+
+/// Whole final messages are available before playback, so even split or orphaned
+/// model reasoning delimiters can be removed without leaking an earlier chunk.
+fn desktop_final_reply(text: &str) -> Result<String, String> {
+    static TAGS: OnceLock<regex::Regex> = OnceLock::new();
+    let tags = TAGS.get_or_init(|| regex::Regex::new(r"(?i)<(/?)(?:mm:)?think\s*>").unwrap());
+    let mut result = String::new();
+    let mut cursor = 0;
+    let mut depth: usize = 0;
+    for captures in tags.captures_iter(text) {
+        let tag = captures.get(0).unwrap();
+        if depth == 0 {
+            result.push_str(&text[cursor..tag.start()]);
+        }
+        if &captures[1] == "/" {
+            if depth == 0 {
+                // Some providers omit the opening tag, as observed in PA history.
+                result.clear();
+            } else {
+                depth -= 1;
+            }
+        } else {
+            depth += 1;
+        }
+        cursor = tag.end();
+    }
+    if depth == 0 {
+        result.push_str(&text[cursor..]);
+    }
+    let result = result.trim().to_string();
+    if result.is_empty() {
+        Err("电脑任务结束，但未返回可核实的结果说明。".into())
+    } else {
+        Ok(result)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn desktop_turn_only_emits_the_terminal_answer() {
+        let mut reply = RunReply::new(DesktopRoute::Visible);
+        // These represent model deltas before and between real tool calls.
+        for delta in ["我准备先打开浏览器。", "内部推理</mm:", "think>", "已经完成。"] {
+            assert_eq!(reply.delta(delta), None);
+        }
+        let completed = json!({"event": "run.completed", "completed": true,
+            "partial": false, "output": "<think>检查工具结果</think>无法把窗口带到前台。"});
+        assert_eq!(reply.complete(&completed).unwrap(), Some("无法把窗口带到前台。".into()));
+        // No terminal answer: never fall back to earlier success-looking deltas.
+        assert!(reply.complete(&json!({"event":"run.completed", "output":""})).is_err());
+    }
+
+    #[test]
+    fn failed_or_partial_desktop_turn_never_flushes_success_text() {
+        let reply = RunReply::new(DesktopRoute::Visible);
+        for event in ["run.failed", "run.cancelled", "run.interrupted"] {
+            assert!(reply.complete(&json!({"event":event, "output":"已完成。"})).is_err());
+        }
+        for flags in [(false, false), (true, true)] {
+            assert!(reply.complete(&json!({"event":"run.completed", "completed":flags.0,
+                "partial":flags.1, "output":"已完成。"})).is_err());
+        }
+    }
+
+    #[test]
+    fn other_routes_preserve_streaming_and_nonstreaming_fallback() {
+        for route in [DesktopRoute::Conversation, DesktopRoute::Background, DesktopRoute::Uncertain] {
+            let mut reply = RunReply::new(route);
+            let event = json!({"event":"run.completed", "output":"回答。"});
+            assert_eq!(reply.complete(&event).unwrap(), Some("回答。".into()));
+            assert_eq!(reply.delta(""), None);
+            assert_eq!(reply.delta("回答。"), Some("回答。".into()));
+            assert_eq!(reply.complete(&event).unwrap(), None);
+        }
+    }
+    #[test]
+    fn desktop_reply_removes_reasoning_before_any_playback() {
+        assert_eq!(desktop_final_reply("<think>计划\n再检查</think>浏览器已显示。").unwrap(), "浏览器已显示。");
+        assert_eq!(desktop_final_reply("内部推理</mm:think>无法把窗口带到前台。").unwrap(), "无法把窗口带到前台。");
+        assert_eq!(desktop_final_reply("<MM:THINK>推理<think>嵌套</think></MM:THINK>需要本次授权。").unwrap(), "需要本次授权。");
+        assert!(desktop_final_reply("<think>未完成的内部推理").is_err());
+        assert!(desktop_final_reply("  ").is_err());
+        assert_eq!(desktop_final_reply("无法打开窗口，请先恢复浏览器。").unwrap(), "无法打开窗口，请先恢复浏览器。");
+    }
     #[test]
     fn rejects_run_ids_that_can_escape_control_path() {
         assert!(valid_run_id("run_123abc"));

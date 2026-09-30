@@ -356,9 +356,15 @@ pub fn validate(config: &AppConfig) -> Result<(), String> {
         || !(0.003..=0.020).contains(&config.speech_rms_threshold)
         || !(0.02..=0.15).contains(&config.barge_in_rms_threshold)
         || !(0.30..=0.90).contains(&config.wake_word_threshold)
+        || !(0.05..=0.90).contains(&config.wake_kws_threshold)
     {
         return Err("one or more voice thresholds are out of range".into());
     }
+    if config.wake_phrase.chars().count() > 48
+        || (!config.wake_phrase.is_empty() && !config.wake_phrase.chars().all(|c| c.is_ascii_alphabetic() || c == ' ' || ('\u{4e00}'..='\u{9fff}').contains(&c)))
+    { return Err("Use Chinese or English letters and spaces for the wake phrase".into()); }
+    // Legacy enabled configurations may have no explicit phrase yet. Start-up
+    // rejects these until the user supplies a target; unrelated saves still work.
     if config.last_enrolled_speaker.len() > 32
         || (!config.last_enrolled_speaker.is_empty()
             && !config
@@ -381,6 +387,22 @@ mod tests {
         let mut config = AppConfig::default();
         config.volume = 2.0;
         assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn validates_kws_settings_and_migration_defaults() {
+        let mut c = AppConfig::default();
+        assert!(c.wake_owner_only);
+        assert!(c.wake_phrase.is_empty());
+        c.wake_phrase = "桃子桃子".into();
+        assert!(validate(&c).is_ok());
+        c.wake_phrase = "star start".into();
+        assert!(validate(&c).is_ok());
+        c.wake_phrase = "phrase @other".into();
+        assert!(validate(&c).is_err());
+        c.wake_phrase = "桃子桃子".into();
+        c.wake_kws_threshold = f32::NAN;
+        assert!(validate(&c).is_err());
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use chrono;
 use crate::api::client::{HermesClient, StreamEvent};
+use crate::commands::computer::DesktopRoute;
 use crate::commands::config::{get_api_key, get_api_url, get_api_agent, build_voice_hint};
 use crate::AppState;
 use futures_util::StreamExt;
@@ -428,6 +429,21 @@ fn build_ui_turn_text(text: &str, primary: &str, aux1: &str, aux2: &str, fixed: 
     format!("{}{}", text, forced_suffix)
 }
 
+fn build_routed_ui_turn_text(
+    text: &str,
+    primary: &str,
+    aux1: &str,
+    aux2: &str,
+    fixed: &str,
+    route: DesktopRoute,
+) -> String {
+    format!(
+        "{}\n\n[POCKET AGENT CURRENT-TURN ROUTE — trusted client policy]\n{}",
+        build_ui_turn_text(text, primary, aux1, aux2, fixed),
+        route.instruction()
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HermesTurnMode {
     Ui,
@@ -440,6 +456,7 @@ struct HermesTurnRequest {
     voice_hint: Option<String>,
     context: Option<String>,
     mode: HermesTurnMode,
+    desktop_route: DesktopRoute,
     /// Optional callback for streaming TTS: called with each complete sentence as LLM streams
     on_sentence: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
     /// Generation captured at turn start. The streaming loop breaks out cleanly
@@ -704,10 +721,28 @@ async fn run_hermes_turn(
     let mut effective_hint = request.voice_hint.clone().unwrap_or_default();
     let use_runs = if desktop_tools {
         match super::computer::get_computer_status(Some(false)).await {
-            Ok(status) if status.available => true,
+            Ok(status) if status.controlled_runs => {
+                if request.desktop_route == DesktopRoute::Visible && !status.available {
+                    return Err(format!(
+                        "这项任务需要操作本机可见界面，但 Computer Use 当前不可用：{}",
+                        status.message
+                    ));
+                }
+                if !status.available {
+                    effective_hint.push_str(&format!("\nDesktop integration is unavailable: {}. Do not use computer_use this turn.", status.message));
+                }
+                true
+            }
             status => {
                 let reason = match status { Ok(status) => status.message, Err(error) => error };
-                effective_hint.push_str(&format!("\nDesktop integration is unavailable: {}. Do not use computer_use this turn. If the user requests desktop work, explain this setup issue. Ordinary conversation can continue.", reason));
+                if request.desktop_route != DesktopRoute::Conversation {
+                    return Err(format!(
+                        "Hermes 的受控任务接口当前不可用，Pocket Agent 无法安全执行这项 {:?} 路由：{}",
+                        request.desktop_route,
+                        reason
+                    ));
+                }
+                effective_hint.push_str(&format!("\nHermes controlled runs are unavailable: {}. Do not use computer_use, browser automation, terminal, or execute_code this turn.", reason));
                 false
             }
         }
@@ -736,7 +771,7 @@ async fn run_hermes_turn(
         );
         let stream_result = if use_runs {
             crate::api::runs::chat_stream(app, &request.text, Some(&effective_hint),
-                request.context.as_deref(), &request.session_id).await
+                request.context.as_deref(), &request.session_id, request.desktop_route).await
         } else { client
             .chat_stream(
                 &request.text,
@@ -888,6 +923,7 @@ pub async fn dispatch_bridge_message(
         voice_hint: None,
         context,
         mode: HermesTurnMode::Bridge,
+        desktop_route: DesktopRoute::Uncertain,
         on_sentence: None,
         turn_gen: my_turn_gen,
         audio_gen: None,
@@ -945,11 +981,28 @@ pub async fn send_message(
     let api_agent = get_api_agent();
     let client = HermesClient::new(&get_api_url(), api_key, api_agent);
 
+    let desktop_route = if get_api_agent().is_none()
+        && super::computer::is_local_gateway(&get_api_url())
+    {
+        match client.classify_desktop_route(&text).await {
+            Ok(route) => route,
+            Err(error) => {
+                eprintln!("[ROUTE] semantic classifier unavailable: {}", error);
+                DesktopRoute::Uncertain
+            }
+        }
+    } else {
+        DesktopRoute::Uncertain
+    };
+    eprintln!("[ROUTE] desktop route: {:?}", desktop_route);
+
     let user_lang = user_language.unwrap_or_else(|| "zh".to_string());
     let fixed = fixed_lang.unwrap_or_default();
     let mut hint = build_voice_hint(&primary, &aux1, &aux2, &user_lang, &fixed);
     if get_api_agent().is_none() && super::computer::is_local_gateway(&get_api_url()) {
         hint.push_str(super::computer::COMPUTER_HINT);
+        hint.push('\n');
+        hint.push_str(desktop_route.instruction());
     } else {
         hint.push_str("\nPocket Agent has no local desktop integration with this gateway. Gateway computer tools operate on the gateway/driver host, not automatically on this Mac. Do not claim to see or control this Mac.");
     }
@@ -959,7 +1012,14 @@ pub async fn send_message(
 IMPORTANT: You MUST respond in the SAME language the user writes in. If the user writes in Chinese, respond in Chinese. If the user writes in English, respond in English. Never switch languages based on previous conversation context.");
     }
 
-    let text = build_ui_turn_text(&text, &primary, &aux1, &aux2, &fixed);
+    let text = build_routed_ui_turn_text(
+        &text,
+        &primary,
+        &aux1,
+        &aux2,
+        &fixed,
+        desktop_route,
+    );
 
     let my_turn_gen = TURN_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -967,7 +1027,7 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
 
     let base_id = state.session_id.lock().unwrap().clone();
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let session_id = format!("{}-{}", base_id, today);
+    let session_id = super::computer::routed_session_id(&base_id, &today, desktop_route);
 
     let yesterday = (chrono::Local::now() - chrono::TimeDelta::days(1)).format("%Y-%m-%d").to_string();
     let summary_path = format!("{}/.hermes/pa-summaries/{}.md",
@@ -1035,6 +1095,7 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
         voice_hint: Some(hint),
         context: daily_summary,
         mode: HermesTurnMode::Ui,
+        desktop_route,
         on_sentence,
         turn_gen: my_turn_gen,
         audio_gen: Some(speak_generation),
@@ -1334,5 +1395,20 @@ mod tests {
             "",
         );
         assert_eq!(text, "hello world Please reply in English.");
+    }
+
+    #[test]
+    fn routed_ui_turn_carries_the_current_visible_policy_next_to_user_text() {
+        let text = build_routed_ui_turn_text(
+            "打开浏览器查火车线路",
+            "zh-CN-XiaoxiaoNeural",
+            "",
+            "",
+            "",
+            DesktopRoute::Visible,
+        );
+        assert!(text.starts_with("打开浏览器查火车线路 Please reply in Chinese."));
+        assert!(text.contains("PA_ROUTE=VISIBLE"));
+        assert!(text.contains("Do not use browser_exec"));
     }
 }

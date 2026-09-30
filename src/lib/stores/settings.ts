@@ -28,6 +28,9 @@ export interface AppSettings {
   skip_interrupt_confirmation: boolean;
   wake_word_enabled: boolean;
   wake_word_threshold: number;
+  wake_phrase: string;
+  wake_kws_threshold: number;
+  wake_owner_only: boolean;
   speaker_verification_enabled: boolean;
   last_enrolled_speaker: string;
 }
@@ -59,6 +62,9 @@ export const SETTINGS_DEFAULTS: AppSettings = {
   skip_interrupt_confirmation: true,
   wake_word_enabled: false,
   wake_word_threshold: 0.5,
+  wake_phrase: "",
+  wake_kws_threshold: 0.25,
+  wake_owner_only: true,
   speaker_verification_enabled: false,
   last_enrolled_speaker: '',
 };

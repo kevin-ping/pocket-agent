@@ -30,3 +30,7 @@ pypinyin>=0.51
 
 # Speaker embedding: fbank feature extraction for 3D-Speaker model.
 kaldi-native-fbank>=1.0
+
+# Offline Chinese/English keyword spotting and pronunciation conversion.
+sherpa-onnx==1.12.26
+sentencepiece>=0.2,<0.3

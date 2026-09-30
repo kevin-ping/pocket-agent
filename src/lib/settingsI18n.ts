@@ -6,7 +6,7 @@ const en = {
   avatar: 'Avatar', voice: 'Voice', conversation: 'Conversation',
   interruption: 'Interruption', wake: 'Wake word', uiLanguage: 'Interface language',
   recordKey: 'Recording hotkey', capture: 'Capture key', capturing: 'Press any key…',
-  immediateHint: 'Hotkey and wake-word training actions are saved immediately.',
+  immediateHint: 'Hotkey and voice enrollment actions are saved immediately.',
   doubleClick: 'Double-click to record', staticAvatar: 'Static avatar',
   animatedAvatar: 'Animated avatar', chooseImage: 'Choose image', remove: 'Remove',
   imageHint: 'JPG, PNG, WebP or GIF, up to 10 MB', voiceOutput: 'Voice output',
@@ -46,7 +46,7 @@ export type SettingsStrings = typeof en;
 const zh: SettingsStrings = {
   title:'设置',subtitle:'自定义 Pocket Agent',general:'常规',avatar:'角色',voice:'语音',conversation:'对话',
   interruption:'打断',wake:'唤醒词',uiLanguage:'界面语言',recordKey:'录音快捷键',capture:'捕获按键',
-  capturing:'请按任意键…',immediateHint:'快捷键和唤醒词训练操作会立即保存。',doubleClick:'双击录音',
+  capturing:'请按任意键…',immediateHint:'快捷键和声纹登记会立即保存；唤醒词设置请点击保存更改。',doubleClick:'双击录音',
   staticAvatar:'静态头像',animatedAvatar:'动画头像',chooseImage:'选择图片',remove:'移除',
   imageHint:'支持 JPG、PNG、WebP、GIF，最大 10 MB',voiceOutput:'语音输出',primaryVoice:'主语音',
   auxiliary1:'辅助语音 1',auxiliary2:'辅助语音 2',lockLanguage:'固定使用此语音回复',
@@ -242,3 +242,27 @@ export const SETTINGS_TRANSLATIONS: Record<SettingsLang, SettingsStrings> = {
 export function settingsText(lang: string): SettingsStrings {
   return SETTINGS_TRANSLATIONS[(SETTINGS_LANGS as readonly string[]).includes(lang) ? lang as SettingsLang : 'en'];
 }
+
+const wakeEn = {
+  phrase: 'Wake phrase', phraseHint: 'Enter Chinese or English words, for example 桃子桃子 or star start. No keyword training is needed.',
+  owner: 'Only my voice', ownerHint: 'Verify your enrolled voice after detecting the phrase. When off, anyone can wake the assistant.',
+  strictness: 'Voice match strictness', kws: 'Wake phrase strictness', thresholdHint: 'Lower is easier to trigger; higher reduces false triggers.',
+  model: 'Offline wake model', ready: 'Ready · runs locally', missing: 'Model not ready', download: 'Download model (about 32 MB)', downloading: 'Downloading and verifying…',
+  voice: 'Enrolled voice', record: 'Record / replace my voice', voiceHint: 'Speak naturally for 5 seconds. Say a short sentence and your wake phrase.',
+  test: 'Test wake phrase', testing: 'Say the wake phrase now', passed: 'Wake phrase and voice check passed.', keywordOnly: 'Wake phrase detected. Voice verification is off.', rejected: 'Wake phrase detected, but your voice was not verified.', notDetected: 'Wake phrase not detected. Try again or adjust the phrase threshold.',
+  migration: 'Old transcription samples are kept for reference only. Click one to use it as your wake phrase, or type a new one above.',
+  required: 'Enter a wake phrase first.', notReady: 'Download the model before testing or enabling wake.',
+  voiceSaved: 'Voice enrolled. The wake phrase is configured separately.',
+};
+const wakeZh: typeof wakeEn = {
+  phrase: '目标唤醒词', phraseHint: '输入中文或英文，例如 桃子桃子 或 star start。无需训练关键词。',
+  owner: '仅本人唤醒', ownerHint: '检测到唤醒词后验证你的声纹。关闭后，其他人也可以唤醒。',
+  strictness: '声纹严格度', kws: '唤醒词严格度', thresholdHint: '数值低更容易触发；数值高更严格，可减少误触发。',
+  model: '离线唤醒模型', ready: '已就绪 · 本地运行', missing: '模型未就绪', download: '下载模型（约 32 MB）', downloading: '正在下载并校验…',
+  voice: '已登记声纹', record: '录制 / 更新我的声纹', voiceHint: '自然说话 5 秒，可说一句短句和你的唤醒词。',
+  test: '测试唤醒', testing: '请说出目标唤醒词', passed: '唤醒词命中，声纹验证通过。', keywordOnly: '唤醒词命中；当前未开启声纹验证。', rejected: '唤醒词命中，但声纹验证未通过。', notDetected: '未检测到唤醒词。请重试或调整唤醒词严格度。',
+  migration: '旧转写样本仅保留作参考，不再用于唤醒。点击任一即可填入上方的目标唤醒词，也可自行填写。',
+  required: '请先填写目标唤醒词。', notReady: '请先下载模型，再测试或启用唤醒。',
+  voiceSaved: '声纹已登记。唤醒词需单独设置。',
+};
+export function wakeSettingsText(lang: string) { return lang === 'zh' ? wakeZh : wakeEn; }

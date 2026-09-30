@@ -464,8 +464,9 @@ pub fn is_continuous_conversation_active() -> bool {
 }
 
 #[tauri::command]
-pub fn start_wake_word_listening(app: AppHandle, threshold: Option<f32>, speaker_name: Option<String>) -> Result<(), String> {
-    crate::voice::sherpa_wake::start_wake_listener(app, threshold.unwrap_or(0.65), speaker_name)
+pub async fn start_wake_word_listening(app: AppHandle, threshold: Option<f32>, speaker_name: Option<String>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || crate::voice::sherpa_wake::start_wake_listener(app, threshold.unwrap_or(0.65), speaker_name))
+        .await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -635,4 +636,22 @@ pub fn consume_wake_probe(_path: String) -> Result<(), String> {
 #[tauri::command]
 pub fn acknowledge_conversation_ready(id: u64, played: bool, ready_delay_ms: Option<u64>) {
     crate::voice::conversation::acknowledge_ready(id, played, ready_delay_ms);
+}
+
+#[tauri::command]
+pub async fn wake_model_status() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(|| crate::voice::sherpa_wake::kws_model_action(false))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn install_wake_model() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(|| crate::voice::sherpa_wake::kws_model_action(true))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn test_wake_word(audio_path: String, config: crate::commands::config::AppConfig) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || crate::voice::sherpa_wake::test_wake_audio(&audio_path, &config))
+        .await.map_err(|e| e.to_string())?
 }

@@ -66,7 +66,7 @@ You are speaking to the user through a text-to-speech voice. Your entire respons
 CRITICAL RULES (you MUST follow every time):
 1. Respond in PURE SPOKEN TEXT ONLY. No markdown, no asterisks, no backticks, no code blocks, no bullet points, no numbered lists, no headers, no bold, no italic, no inline code.
 2. NO TABLES, NO GRAPHS, NO DIAGRAMS, NO CHARTS -- these cannot be read aloud. Describe relationships in plain spoken sentences instead.
-3. Keep your response CONCISE: 1-3 short sentences. Long text sounds terrible in TTS.
+3. Act like a resident work assistant. By default answer in 1-2 short sentences, giving the useful result first. Give a detailed explanation ONLY when the user explicitly asks for detail, steps, examples or an in-depth explanation; then provide the requested detail in natural spoken prose. For an authorized computer action, execute and verify it before giving one short result sentence, without a tutorial, running commentary or unsolicited follow-up offers. If blocked, briefly state the actual failure, required approval or essential missing information; never claim an unverified action succeeded.
 4. NEVER use any symbols or special characters that don't read well: # * ` [ ] {{ }} < > | \ / -- and absolutely NO emoji or emoticons (:), ;), etc.). These will be read as garbled noise or cause TTS errors.
 5. If you need to mention code or technical terms, spell them out phonetically or describe them in plain spoken words.
 LANGUAGE RESTRICTION:
@@ -138,6 +138,12 @@ pub struct AppConfig {
     #[serde(default = "default_wake_word_threshold")]
     pub wake_word_threshold: f32,
     #[serde(default)]
+    pub wake_phrase: String,
+    #[serde(default = "default_kws_threshold")]
+    pub wake_kws_threshold: f32,
+    #[serde(default = "default_true")]
+    pub wake_owner_only: bool,
+    #[serde(default)]
     pub speaker_verification_enabled: bool,
     #[serde(default)]
     pub last_enrolled_speaker: String,
@@ -159,6 +165,8 @@ fn default_true() -> bool {
 fn default_ui_lang() -> String {
     "en".to_string()
 }
+
+fn default_kws_threshold() -> f32 { 0.25 }
 
 fn default_wake_word_threshold() -> f32 {
     0.5
@@ -193,6 +201,9 @@ impl Default for AppConfig {
             skip_interrupt_confirmation: true,
             wake_word_enabled: false,
             wake_word_threshold: default_wake_word_threshold(),
+            wake_phrase: String::new(),
+            wake_kws_threshold: default_kws_threshold(),
+            wake_owner_only: true,
             speaker_verification_enabled: false,
             last_enrolled_speaker: String::new(),
         }
@@ -231,6 +242,9 @@ pub(crate) fn load_legacy_config(app: &AppHandle) -> AppConfig {
         skip_interrupt_confirmation: store.get("skip_interrupt_confirmation").and_then(|v| v.as_bool()).unwrap_or(default.skip_interrupt_confirmation),
         wake_word_enabled: store.get("wake_word_enabled").and_then(|v| v.as_bool()).unwrap_or(default.wake_word_enabled),
         wake_word_threshold: store.get("wake_word_threshold").and_then(|v| v.as_f64()).map(|f| f as f32).unwrap_or(default.wake_word_threshold),
+        wake_phrase: String::new(),
+        wake_kws_threshold: default_kws_threshold(),
+        wake_owner_only: true,
         speaker_verification_enabled: store.get("speaker_verification_enabled").and_then(|v| v.as_bool()).unwrap_or(default.speaker_verification_enabled),
         last_enrolled_speaker: store.get("last_enrolled_speaker").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
     }
@@ -274,6 +288,13 @@ pub async fn save_settings_page_config(
 
 #[tauri::command]
 pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<SaveConfigResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || save_config_blocking(app, config))
+        .await.map_err(|e| format!("settings apply task failed: {e}"))?
+}
+
+fn save_config_blocking(app: AppHandle, config: AppConfig) -> Result<SaveConfigResponse, String> {
+    static APPLY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = APPLY_LOCK.lock().map_err(|_| "settings apply lock poisoned")?;
     let old = settings_repository::load()?;
     let saved = settings_repository::save(&config)?;
 
@@ -286,13 +307,16 @@ pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<SaveConfig
         }
         let wake_changed = old.wake_word_enabled != saved.config.wake_word_enabled
             || (old.wake_word_threshold - saved.config.wake_word_threshold).abs() > f32::EPSILON
-            || old.last_enrolled_speaker != saved.config.last_enrolled_speaker;
+            || old.last_enrolled_speaker != saved.config.last_enrolled_speaker
+            || old.wake_phrase != saved.config.wake_phrase
+            || old.wake_kws_threshold != saved.config.wake_kws_threshold
+            || old.wake_owner_only != saved.config.wake_owner_only;
         if wake_changed {
             crate::commands::voice::stop_wake_word_listening()?;
             if saved.config.wake_word_enabled {
-                crate::commands::voice::start_wake_word_listening(
+                crate::voice::sherpa_wake::start_wake_listener(
                     app.clone(),
-                    Some(saved.config.wake_word_threshold),
+                    saved.config.wake_word_threshold,
                     Some(saved.config.last_enrolled_speaker.clone()),
                 )?;
             }
@@ -306,9 +330,9 @@ pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<SaveConfig
         crate::voice::hotkey::set_double_click_mode(old.double_click_to_record);
         let _ = crate::commands::voice::stop_wake_word_listening();
         if old.wake_word_enabled {
-            let _ = crate::commands::voice::start_wake_word_listening(
+            let _ = crate::voice::sherpa_wake::start_wake_listener(
                 app.clone(),
-                Some(old.wake_word_threshold),
+                old.wake_word_threshold,
                 Some(old.last_enrolled_speaker.clone()),
             );
         }
@@ -385,6 +409,15 @@ pub fn quit_app(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_assistant_is_brief_by_default_but_can_explain_on_request() {
+        let hint = build_voice_hint("zh-CN-XiaoxiaoNeural", "", "", "zh", "");
+        assert!(hint.contains("By default answer in 1-2 short sentences"));
+        assert!(hint.contains("ONLY when the user explicitly asks for detail"));
+        assert!(hint.contains("execute and verify it before giving one short result sentence"));
+        assert!(hint.contains("never claim an unverified action succeeded"));
+    }
 
     #[test]
     fn voice_hint_never_teaches_local_command_tags() {

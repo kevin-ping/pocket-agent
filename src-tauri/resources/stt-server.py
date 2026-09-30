@@ -82,9 +82,6 @@ except ImportError:
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # SEC-003
 
-# Fixed-path temp file for high-frequency wake/check endpoint.
-# Safe because wake/check is serial (~2s interval), no concurrent callers.
-WAKE_CHECK_TMP = os.path.join(tempfile.gettempdir(), "pocket-agent-wake-check.wav")
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")  # SEC-001
 
 POCKET_AGENT_HOME = Path.home() / ".pocket-agent"
@@ -113,27 +110,12 @@ ALLOWED_ORIGINS = {
 class State:
     whisper: Optional[WhisperModel] = None
     whisper_name: str = ""
-    whisper_wake: Optional[WhisperModel] = None
-    whisper_wake_name: str = ""
-    wake_lang: str = ""
     whisper_prompt: str = "以下是普通话的句子。"
     use_traditional: bool = False
     vad = None
 
-# Wake-phrase keyword matching via Whisper transcription.
-# Enrollment transcribes the wake phrase with Whisper and saves the keyword text.
-# At runtime, probe audio is transcribed and fuzzy-matched against the enrolled text.
+# Voice identity is independent from the configured KWS target phrase.
 VOICEPRINTS_DIR = POCKET_AGENT_HOME / "voiceprints"
-
-def _wake_template_path(speaker: str) -> Path:
-    return VOICEPRINTS_DIR / f"{speaker}.wake.npy"
-
-def _extract_mfcc_sequence(samples: np.ndarray, sr: int = 16000) -> np.ndarray:
-    """Placeholder — wake phrase matching now uses Whisper transcription.
-    Kept for backward compatibility with enrollment save path.
-    """
-    return np.array([], dtype=np.float32).reshape(0, 0)
-
 
 # ── Whisper 幻觉输出过滤 (借鉴白龙马 whisper_server.py) ──
 _HALLUCINATION_PHRASES = [
@@ -174,8 +156,10 @@ def _is_hallucination(text: str) -> bool:
     if phrases and all(part in known for part in phrases):
         return True
     # 单字符重复（如"啊啊啊啊"、"嗯嗯嗯嗯"）
-    unique_chars = set(c for c in t if c.strip())
-    if len(unique_chars) <= 2 and len(t) >= 5:
+    # Count actual characters, not separators. Two-character names repeated
+    # twice (e.g. “晓蕾 晓蕾”) are legitimate wake phrases, not noise.
+    compact = normalize(t)
+    if len(set(compact)) == 1 and len(compact) >= 4:
         return True
     # 全部是数字或省略号组合（时间戳幻觉）
     if _HALLU_RE_TIMESTAMP.match(t):
@@ -185,35 +169,6 @@ def _is_hallucination(text: str) -> bool:
     if len(segs) >= 4 and len(set(segs)) <= 2:
         return True
     return False
-
-
-def _transcribe_for_wake(tmp_wav_path: str) -> str:
-    """Transcribe audio for wake-word keyword matching using Whisper.
-
-    Uses the dedicated wake model (WAKE_STT_MODEL) if available, falls back
-    to the main STT model. Forces WAKE_LANGUAGE if set to avoid mis-detection.
-
-    Returns lowercased transcription text. Returns empty string on failure
-    or if the result is detected as a Whisper hallucination.
-    """
-    model = state.whisper_wake if state.whisper_wake is not None else state.whisper
-    if model is None:
-        return ""
-    try:
-        kwargs = dict(beam_size=3, initial_prompt=state.whisper_prompt)
-        if state.wake_lang:
-            kwargs["language"] = state.wake_lang
-        segments, info = model.transcribe(tmp_wav_path, **kwargs)
-        text = " ".join(seg.text.strip() for seg in segments).strip().lower()
-        text = _t2s(text)
-        if _is_hallucination(text):
-            print(f"[stt-server] wake hallucination filtered: {text!r}",
-                  file=sys.stderr, flush=True)
-            return ""
-        return text
-    except Exception as e:
-        print(f"[stt-server] wake whisper error: {e}", file=sys.stderr, flush=True)
-        return ""
 
 
 # Compact T2S: only covers pairs Whisper commonly flips for short
@@ -247,95 +202,6 @@ def _t2s(text: str) -> str:
     if getattr(state, "use_traditional", False):
         return text
     return ''.join(_SIMP_TRAD_PAIRS.get(ch, ch) for ch in text)
-
-
-def _clean_wake_text(text: str) -> str:
-    """Strip punctuation, spaces, normalize case, and unify CJK simplification."""
-    import re
-    # Remove all punctuation and whitespace, keep only word characters (includes CJK)
-    cleaned = re.sub(r'[^\w]', '', text.lower()).strip()
-    # Unify traditional → simplified so Whisper's random 繁/简 output
-    # doesn't fragment keyword matching (e.g. 同學 → 同学)
-    cleaned = _t2s(cleaned)
-    return cleaned
-
-
-def _keyword_match(transcription: str, wake_variants: list[str]) -> bool:
-    """Check if transcription matches any enrolled wake keyword variant.
-    
-    Both sides are cleaned with _clean_wake_text (strip punctuation, whitespace, lowercase).
-    Then checks: exact match, substring containment, or character-level fuzzy similarity >= 80%.
-    """
-    probe = _clean_wake_text(transcription)
-    if not probe:
-        return False
-
-    for wake_text in wake_variants:
-        # wake_text is already cleaned by _clean_wake_text, but normalize again for safety
-        variant = _clean_wake_text(wake_text)
-        if not variant:
-            continue
-        # Exact match
-        if probe == variant:
-            return True
-        # Substring: variant is contained in probe (Whisper adds filler)
-        if variant in probe:
-            return True
-        # Probe is contained in variant (Whisper truncated)
-        # But probe must cover at least 60% of variant to avoid tiny substrings matching
-        if probe in variant and len(probe) >= len(variant) * 0.6:
-            return True
-        # Character-level fuzzy: overlap ratio
-        if len(variant) >= 3 and len(probe) >= 3:
-            # Count matching characters in order (simplified LCS ratio)
-            shorter, longer = (variant, probe) if len(variant) <= len(probe) else (probe, variant)
-            matched = 0
-            j = 0
-            for c in longer:
-                if j < len(shorter) and c == shorter[j]:
-                    matched += 1
-                    j += 1
-            ratio = matched / len(shorter)
-            if ratio >= 0.8:
-                return True
-    return False
-
-
-MAX_WAKE_VARIANTS = 10
-
-
-def _load_wake_variants(speaker: str) -> list[str]:
-    """Load wake keyword variants from JSON array file."""
-    p = _wake_text_path(speaker)
-    if not p.exists():
-        return []
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            return [s for s in data if isinstance(s, str) and s.strip()]
-    except (json.JSONDecodeError, ValueError):
-        pass
-    return []
-
-
-def _append_wake_variant(speaker: str, text: str) -> int:
-    """Append a wake keyword variant. Returns total count after append."""
-    variants = _load_wake_variants(speaker)
-    cleaned = _clean_wake_text(text)
-    # Deduplicate: skip if cleaned version already exists
-    if cleaned in variants:
-        return len(variants)
-    variants.append(cleaned)
-    if len(variants) > MAX_WAKE_VARIANTS:
-        variants = variants[-MAX_WAKE_VARIANTS:]
-    p = _wake_text_path(speaker)
-    p.write_text(json.dumps(variants, ensure_ascii=False, indent=2), encoding="utf-8")
-    return len(variants)
-
-
-def _wake_text_path(speaker: str) -> Path:
-    return VOICEPRINTS_DIR / f"{speaker}.wake.txt"
-
 
 
 state = State()
@@ -415,7 +281,7 @@ async def auth_and_origin_guard(request: Request, call_next):
     Origin pins the request to a Tauri webview the user actually launched.
     """
     path = request.url.path
-    if path in PROTECTED_PATHS:
+    if path in PROTECTED_PATHS or path.startswith("/kws/"):
         origin = request.headers.get("origin")
         # Origin may be absent on direct curl/Postman calls; we still require
         # one for protected paths so a CSRF-style cross-origin POST cannot
@@ -776,13 +642,9 @@ def _load_enrolled_voiceprints():
 
 @app.post("/speaker/enroll")
 async def speaker_enroll(file: UploadFile = File(...), name: str = Form("Me")):
-    """Enroll a speaker: extract embedding + wake audio fingerprint.
+    """Enroll voice identity independently of the configured wake phrase.
     
-    Saves both:
-      - {name}.bin   — 192-dim speaker embedding (for voice identification)
-      - {name}.wake.txt — wake keyword variants (one per line)
-    
-    Returns: {"ok": true, "speaker_id": str, "dim": int, "duration_s": float, "wake_text": str}
+    Saves {name}.bin (speaker embedding). Existing legacy keywords are untouched.
     """
     import base64
 
@@ -811,19 +673,7 @@ async def speaker_enroll(file: UploadFile = File(...), name: str = Form("Me")):
         emb_path = VOICEPRINTS_DIR / f"{name}.bin"
         emb_path.write_bytes(emb_bytes)
 
-        # Transcribe enrollment audio — always resets (deletes old variants).
-        # Training mode uses a separate endpoint.
-        _wake_text_path(name).unlink(missing_ok=True)
-        wake_text = _transcribe_for_wake(tmp_path)
-        if wake_text:
-            variants = [_clean_wake_text(wake_text)]
-            wake_txt_path = _wake_text_path(name)
-            wake_txt_path.write_text(json.dumps(variants, ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f"[stt-server] wake keyword reset: \"{wake_text}\" (1 variant)",
-                  file=sys.stderr, flush=True)
-        else:
-            print(f"[stt-server] WARNING: could not transcribe enrollment audio for wake keyword",
-                  file=sys.stderr, flush=True)
+        # Enrollment stores voice identity only; KWS keywords are explicit settings.
 
         print(f"[stt-server] enrolled '{name}' (dim={len(embedding)}, dur={duration_s:.1f}s)",
               file=sys.stderr, flush=True)
@@ -848,166 +698,94 @@ async def speaker_enroll(file: UploadFile = File(...), name: str = Form("Me")):
 
 
 @app.post("/speaker/train")
-async def speaker_train(file: UploadFile = File(...), name: str = Form("Me")):
-    """Training mode: transcribe audio and APPEND as a new wake keyword variant.
-    
-    Unlike /speaker/enroll which resets the variant list, this endpoint only
-    appends a new variant to the existing list.
-    
-    Returns: {"ok": true, "speaker_id": str, "wake_text": str, "variant_count": int}
-    """
-    blob = await file.read()
-    _wav_magic_or_415(blob)
+async def speaker_train():
+    raise HTTPException(status_code=410, detail="Set an explicit wake phrase and use KWS testing; transcription training is retired.")
 
-    if not NAME_RE.match(name):
-        raise HTTPException(status_code=400, detail="name must match [A-Za-z0-9_-]{1,32}")
 
-    tmp_path = None
+# KWS uses unique temporary files only when extracting an owner embedding.
+from wake_kws import WakeKws
+from starlette.concurrency import run_in_threadpool
+
+
+def _kws_verify(samples, speaker):
+    ref_path = VOICEPRINTS_DIR / f"{speaker}.bin"
+    if not NAME_RE.fullmatch(speaker) or not ref_path.is_file() or len(samples) < 8000:
+        return 0.0
+    ref = np.frombuffer(ref_path.read_bytes(), dtype=np.float32)
+    with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+        with wave.open(f.name, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+            w.writeframes((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
+        embedding = _extract_embedding_from_wav(f.name)
+    if ref.shape != embedding.shape:
+        return 0.0
+    norm = float(np.linalg.norm(ref) * np.linalg.norm(embedding))
+    return float(np.dot(ref, embedding) / norm) if norm > 0 else 0.0
+
+
+kws = WakeKws(MODELS_DIR, VOICEPRINTS_DIR, _kws_verify)
+
+
+async def _kws_call(fn, *args):
     try:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            f.write(blob)
-            tmp_path = f.name
-
-        wake_text = _transcribe_for_wake(tmp_path)
-        variant_count = 0
-        if wake_text:
-            variant_count = _append_wake_variant(name, wake_text)
-            print(f'[stt-server] wake train appended: "{wake_text}" ({variant_count} variants total)',
-                  file=sys.stderr, flush=True)
-        else:
-            print("[stt-server] WARNING: could not transcribe training audio",
-                  file=sys.stderr, flush=True)
-
-        return {
-            "ok": True,
-            "speaker_id": name,
-            "wake_text": wake_text,
-            "variant_count": variant_count,
-        }
+        return await run_in_threadpool(fn, *args)
+    except (ValueError, KeyError, AssertionError) as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": str(e)})
+        raise HTTPException(status_code=503, detail=f"Wake detector unavailable: {e}")
+
+
+@app.get("/kws/status")
+def kws_status():
+    return kws.status()
+
+
+@app.post("/kws/install")
+async def kws_install():
+    return await _kws_call(kws.install)
+
+
+@app.post("/kws/session")
+async def kws_session(request: Request):
+    config = await request.json()
+    return {"session": await _kws_call(kws.create, config)}
+
+
+@app.delete("/kws/session/{sid}")
+def kws_close(sid: str):
+    kws.close(sid)
+    return {"ok": True}
+
+
+@app.post("/kws/audio/{sid}")
+async def kws_audio(sid: str, request: Request, sequence: int = 0):
+    blob = await request.body()
+    if not blob or len(blob) % 2 or len(blob) > 32000:
+        raise HTTPException(status_code=422, detail="Expected at most one second of PCM16 mono at 16 kHz")
+    samples = np.frombuffer(blob, dtype="<i2").astype(np.float32) / 32768.0
+    return await _kws_call(kws.feed, sid, samples, sequence)
+
+
+@app.post("/kws/check")
+async def kws_check(file: UploadFile = File(...), config: str = Form(...)):
+    blob = await file.read()
+    samples, sr = _read_wav_bytes(blob)
+    if sr != 16000 or len(samples) > 160000:
+        raise HTTPException(status_code=422, detail="Expected up to 10 seconds at 16 kHz")
+    try:
+        parsed = json.loads(config)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid wake configuration")
+    sid = await _kws_call(kws.create, parsed)
+    try:
+        return await _kws_call(kws.feed, sid, samples, 0, True)
     finally:
-        if tmp_path:
-            try: os.unlink(tmp_path)
-            except OSError: pass
+        kws.close(sid)
+
 
 @app.post("/wake/check")
-async def wake_check(request: Request, file: UploadFile = File(...)):
-    """Check audio chunk for wake word: VAD + speaker matching.
-
-    Input: WAV audio (mono, any sample rate — will be resampled to 16kHz).
-    Output: {"speech_detected": bool, "speaker_match": bool, "score": float, "speaker": str|null}
-    """
-    blob = await file.read()
-
-    try:
-        # Fixed-path overwrite: serial endpoint, no concurrent risk.
-        with open(WAKE_CHECK_TMP, "wb") as f:
-            f.write(blob)
-        tmp_path = WAKE_CHECK_TMP
-
-        # VAD check — use stricter threshold (0.7) for wake to reject birds/noise.
-        # Regular /vad endpoint keeps default (0.5) for transcription accuracy.
-        if state.vad is None:
-            return {"speech_detected": False, "speaker_match": False, "score": 0.0, "speaker": None}
-
-        wav_audio = read_audio(tmp_path, sampling_rate=16000)
-        if wav_audio is None or wav_audio.numel() == 0:
-            return {"speech_detected": False, "speaker_match": False, "score": 0.0, "speaker": None}
-
-        segments = get_speech_timestamps(wav_audio, state.vad,
-                                         threshold=0.5,
-                                         return_seconds=True)
-        if not segments:
-            return {"speech_detected": False, "speaker_match": False, "score": 0.0, "speaker": None}
-
-        # Compute total speech duration
-        total_speech = sum(s["end"] - s["start"] for s in segments)
-        print(f"[stt-server] wake/check: speech={total_speech:.1f}s segments={len(segments)}", file=sys.stderr, flush=True)
-        if total_speech < 0.2:
-            return {"speech_detected": True, "speaker_match": False, "score": 0.0, "speaker": None}
-
-        # Load voiceprints
-        voiceprints = _load_enrolled_voiceprints()
-        if not voiceprints:
-            return {"speech_detected": True, "speaker_match": False, "score": 0.0, "speaker": None}
-
-        # Extract embedding from FULL audio (not VAD-trimmed).
-        # VAD trimming causes embedding mismatch because enroll uses full audio.
-        # VAD is only used above to confirm speech is present.
-        try:
-            embedding = _extract_embedding_from_wav(tmp_path)
-        except Exception as e:
-            print(f"[stt-server] wake embedding error: {e}", file=sys.stderr, flush=True)
-            return {"speech_detected": True, "speaker_match": False, "score": 0.0, "speaker": None}
-
-        # Compare with all enrolled voiceprints
-        best_name = None
-        best_score = 0.0
-        for name, ref_emb in voiceprints.items():
-            if len(embedding) != len(ref_emb):
-                continue
-            dot = float(np.dot(embedding, ref_emb))
-            norm_a = float(np.linalg.norm(embedding))
-            norm_b = float(np.linalg.norm(ref_emb))
-            if norm_a > 0 and norm_b > 0:
-                score = dot / (norm_a * norm_b)
-            else:
-                score = 0.0
-            if score > best_score:
-                best_score = score
-                best_name = name
-
-        # Threshold from Rust client (query param), fallback 0.65
-        threshold = float(request.query_params.get("threshold", "0.65"))
-        matched = best_score >= threshold and best_name is not None
-
-        # Wake-phrase keyword matching via Whisper transcription (only when speaker matches).
-        keyword_match = False
-        wake_text_matched = ""
-        probe_text = ""
-        if matched and best_name:
-            try:
-                probe_text = _transcribe_for_wake(tmp_path)
-                print("[stt-server] wake/check transcription:", repr(probe_text), f"speaker_score={best_score:.3f}", file=sys.stderr, flush=True)
-            except Exception as e:
-                print(f"[stt-server] wake transcription error: {e}", file=sys.stderr, flush=True)
-
-            wake_txt_path = _wake_text_path(best_name)
-            if wake_txt_path.exists():
-                try:
-                    variants = _load_wake_variants(best_name)
-                    if variants:
-                        keyword_match = _keyword_match(probe_text, variants)
-                        wake_text_matched = probe_text
-                        print(f"[stt-server] wake keyword: variants={len(variants)} probe=\"{probe_text}\" match={keyword_match}",
-                              file=sys.stderr, flush=True)
-                except Exception as e:
-                    print(f"[stt-server] wake keyword error: {e}", file=sys.stderr, flush=True)
-            else:
-                # No wake keyword enrolled — speaker match alone is sufficient
-                keyword_match = True
-
-        if matched and keyword_match:
-            print(f"[stt-server] wake MATCH: {best_name} speaker={best_score:.3f} keyword=\"{wake_text_matched}\"",
-                  file=sys.stderr, flush=True)
-
-        return {
-            "speech_detected": True,
-            "speaker_match": matched,
-            "keyword_match": keyword_match,
-            "keyword_text": wake_text_matched,
-            "score": round(best_score, 4),
-            "speaker": best_name if matched else None,
-        }
-    except Exception as e:
-        import traceback
-        print(f"[stt-server] wake check error: {e}", file=sys.stderr, flush=True)
-        traceback.print_exc(file=sys.stderr)
-        return {"speech_detected": False, "speaker_match": False, "score": 0.0, "speaker": None}
-    finally:
-        pass  # Fixed-path file reused on next call — no cleanup needed.
-
+async def retired_wake_check():
+    raise HTTPException(status_code=410, detail="Use configured KWS detection")
 
 # --- Startup Self-Check -------------------------------------------------------
 
@@ -1137,27 +915,7 @@ def main():
                       file=sys.stderr, flush=True)
                 state.vad = None
 
-    # Load dedicated wake Whisper model (WAKE_STT_MODEL env, default: base)
-    wake_model_name = os.environ.get("WAKE_STT_MODEL", "base")
-    if wake_model_name != args.model:
-        print(f"[stt-server] loading wake Whisper '{wake_model_name}'...",
-              file=sys.stderr, flush=True)
-        t2 = time.time()
-        state.whisper_wake = WhisperModel(
-            wake_model_name, device=args.device, compute_type=args.compute_type
-        )
-        state.whisper_wake_name = wake_model_name
-        print(f"[stt-server] wake Whisper loaded in {time.time()-t2:.1f}s",
-              file=sys.stderr, flush=True)
-    else:
-        # Same model — reuse main instance
-        state.whisper_wake = state.whisper
-        state.whisper_wake_name = args.model
-        print(f"[stt-server] wake Whisper reusing main model ({args.model})",
-              file=sys.stderr, flush=True)
-
-    # Load wake language override
-    state.wake_lang = os.environ.get("WAKE_LANGUAGE", "")
+    # Wake detection uses sherpa-onnx KWS; Whisper is only for normal dictation.
     # Build Whisper initial_prompt from --lang-prompt flag.
     # "trad" → traditional Chinese, "ja" → Japanese, empty → simplified Chinese.
     _lp = args.lang_prompt.strip()
@@ -1169,8 +927,6 @@ def main():
         state.use_traditional = False
     print(f"[stt-server] whisper initial_prompt: {state.whisper_prompt!r}",
           file=sys.stderr, flush=True)
-    if state.wake_lang:
-        print(f"[stt-server] wake language forced: {state.wake_lang}", file=sys.stderr, flush=True)
 
     # Pre-load speaker model at startup (instead of lazy on first request)
     _get_speaker_session()
