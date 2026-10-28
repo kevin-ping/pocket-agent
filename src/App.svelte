@@ -70,7 +70,7 @@
   }
 
   // ─── Context menu ───
-  let islandMode: "idle" | "recording" | "thinking" | "waiting_for_wake" | "verifying_speaker" = "idle";
+  let islandMode: "idle" | "recording" | "thinking" | "speaking" | "waiting_for_wake" | "verifying_speaker" = "idle";
   let spiritPhase = 0;
   let audioLevel = 0;
   let audioLevelTimer: ReturnType<typeof setInterval> | null = null;
@@ -517,7 +517,7 @@
         cancelPendingStatusSpeech();
         lastSpokenStatus = null;
         debugState('chat-audio-playing');
-        islandMode = 'idle';
+        islandMode = 'speaking';
         characterState.toSpeaking();
         chatStore.finishThinkingPhase();
         spiritPhase = 3;
