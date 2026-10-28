@@ -2,10 +2,32 @@
   import { characterState, type CharacterState } from '../stores/character';
   import Icon from './Icon.svelte';
   import { createEventDispatcher } from 'svelte';
+  import MeshFace, { MESH_SUPPORTED } from './MeshFace.svelte';
 
   export let avatarImage: string | null = null;
   export let spiritPhase = 0;
   export let mediaSkins: Partial<Record<CharacterState, string>> = {};
+  /** Reply emotion from chat-speaking-start / api-push; null when no reply is active. */
+  export let emotion: string | null = null;
+  /** True only while a TTS sentence is actually audible; pauses during inter-sentence gaps and text-only replies. */
+  export let mouthActive = true;
+  /** Set on conversation-barge-in: audio was cut, so the mouth stops before characterState leaves speaking. */
+  export let interrupted = false;
+  export let meshEnabled = true;
+  export let meshScale = 1;
+  export let meshOffsetX = 0;
+  export let meshOffsetY = 0;
+  export let meshExpressions: Record<string, string>;
+  export let meshEmotions: Record<string, string>;
+  /** Custom `.mavatar` data URI, or null for the bundled avatar. */
+  export let meshCustom: string | null = null;
+
+  let meshStatus: 'loading' | 'ready' | 'failed' = 'loading';
+  // A new file or re-enabling gets a fresh attempt even after an earlier failure.
+  $: resetMeshStatus(meshEnabled, meshCustom);
+  function resetMeshStatus(enabled: boolean, _custom: string | null) {
+    meshStatus = MESH_SUPPORTED && enabled ? 'loading' : 'failed';
+  }
 
   const dispatch = createEventDispatcher<{ expand: void; contextmenu: MouseEvent }>();
 
@@ -24,6 +46,8 @@
   $: effectiveSkin = mediaSkins[state] ? 'media' : (avatarImage ? 'image' : 'css');
   $: mediaSrc = mediaSkins[state] ?? avatarImage ?? '';
 
+  $: meshReady = meshStatus === 'ready';
+
   function handleExpand(e: MouseEvent) { e.stopPropagation(); dispatch('expand'); }
   function handleContextMenu(e: MouseEvent) {
     e.preventDefault();
@@ -34,6 +58,7 @@
 <!-- svelte-ignore a11y-no-static-element-interactions -->
 <div
   class="avatar-wrap state-{state}"
+  class:mesh-on={meshReady}
   style:--grad1={colors.grad1}
   style:--grad2={colors.grad2}
   style:--glow={colors.glow}
@@ -106,7 +131,13 @@
 
     <!-- Main circle -->
     <div class="avatar-circle">
-      {#if effectiveSkin === 'media' || effectiveSkin === 'image'}
+      {#if meshStatus !== 'failed'}
+        <MeshFace {state} {emotion} {interrupted} mouth={mouthActive} scale={meshScale} offsetX={meshOffsetX} offsetY={meshOffsetY}
+          expressions={meshExpressions} emotions={meshEmotions} customSource={meshCustom} bind:status={meshStatus} />
+      {/if}
+      {#if meshReady}
+        <!-- mesh avatar covers the circle; fallback skins render only while loading or after failure -->
+      {:else if effectiveSkin === 'media' || effectiveSkin === 'image'}
         {#if mediaSrc.startsWith('data:video') || mediaSrc.endsWith('.mp4') || mediaSrc.endsWith('.webm')}
           <!-- svelte-ignore a11y-media-has-caption -->
           <video class="avatar-media" src={mediaSrc} autoplay loop muted playsinline></video>
@@ -379,6 +410,9 @@
     border-radius: 50%;
     display: block;
   }
+
+  /* The avatar breathes on its own; drop the circle's breathe so they don't stack */
+  .avatar-wrap.mesh-on .avatar-circle { animation: none; }
 
   /* ─── CSS face ─── */
   .css-face {

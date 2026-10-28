@@ -1,7 +1,16 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { SETTINGS_DEFAULTS, type AppSettings } from './lib/stores/settings';
+  import {
+    SETTINGS_DEFAULTS,
+    MESH_AVATAR_STATES,
+    MESH_AVATAR_EXPRESSIONS,
+    PA_EMOTIONS,
+    MESH_AVATAR_EMOTIONS,
+    type AppSettings,
+  } from './lib/stores/settings';
+  import type { CharacterState } from './lib/stores/character';
+  import MeshFace from './lib/components/MeshFace.svelte';
   import Field from './lib/components/settings/Field.svelte';
   import Toggle from './lib/components/settings/Toggle.svelte';
   import RangeField from './lib/components/settings/RangeField.svelte';
@@ -11,6 +20,7 @@
     SETTINGS_LANGS,
     settingsText,
     wakeSettingsText,
+    meshSettingsText,
     type SettingsLang,
   } from './lib/settingsI18n';
 
@@ -65,6 +75,12 @@
     : '');
   let avatarImageChanged = false;
   let avatarGifChanged = false;
+  // The custom .mavatar is an asset, not part of AppConfig.
+  let meshAvatar = $state<string | null>(null);
+  let meshAvatarChanged = $state(false);
+  let meshPreviewState = $state<CharacterState>('idle');
+  let meshPreviewStatus = $state<'loading' | 'ready' | 'failed'>('loading');
+  let meshInput = $state<HTMLInputElement>(undefined!);
   let capturing = $state(false);
   let captureTimer = $state<ReturnType<typeof setInterval> | null>(null);
   let enrollName = $state('Me');
@@ -82,6 +98,7 @@
   let modelLoading = $state(false);
   let wakeTestResult = $state('');
   let wakeText = $derived(wakeSettingsText(local?.ui_lang ?? 'en'));
+  let meshText = $derived(meshSettingsText(local?.ui_lang ?? 'en'));
   async function refreshWakeModel() {
     if (!isTauri) return;
     try { modelReady = (await invoke<{ready: boolean}>('wake_model_status')).ready; }
@@ -116,7 +133,7 @@
   void refreshWakeModel();
 
   let text = $derived(settingsText(local?.ui_lang ?? 'en'));
-  let dirty = $derived((!!local && JSON.stringify(local) !== baseline) || pendingWakeDeletes.length > 0);
+  let dirty = $derived((!!local && JSON.stringify(local) !== baseline) || pendingWakeDeletes.length > 0 || meshAvatarChanged);
   let sections = $derived([
     { id: 'general' as Section, icon: '⌘', label: text.general },
     { id: 'avatar' as Section, icon: '◉', label: text.avatar },
@@ -138,6 +155,7 @@
       ]);
       local = config;
       baseline = JSON.stringify(config);
+      await loadAssets();
       await refreshVariantCount();
     } catch (e) {
       error = `${settingsText('en').loadError}: ${String(e)}`;
@@ -149,11 +167,13 @@
   async function loadAssets() {
     if (!isTauri || !local) return;
     try {
-      const [avatarImage, avatarGif] = await Promise.all([
+      const [avatarImage, avatarGif, meshFile] = await Promise.all([
         invoke<string | null>('get_setting_asset', { key: 'avatar_image' }),
         invoke<string | null>('get_setting_asset', { key: 'avatar_gif' }),
+        invoke<string | null>('get_setting_asset', { key: 'mesh_avatar' }),
       ]);
       if (!local) return;
+      if (!meshAvatarChanged) meshAvatar = meshFile;
       const base = JSON.parse(baseline || JSON.stringify(local)) as AppSettings;
       if (!avatarImageChanged) {
         local = { ...local, avatar_image: avatarImage };
@@ -191,6 +211,11 @@
       if (avatarGifChanged) {
         if (avatarGif) await invoke('save_setting_asset', { key: 'avatar_gif', dataUri: avatarGif });
         else await invoke('delete_setting_asset', { key: 'avatar_gif' });
+      }
+      if (meshAvatarChanged) {
+        if (meshAvatar) await invoke('save_setting_asset', { key: 'mesh_avatar', dataUri: meshAvatar });
+        else await invoke('delete_setting_asset', { key: 'mesh_avatar' });
+        meshAvatarChanged = false;
       }
       local = { ...result.config, avatar_image: avatarImage, avatar_gif: avatarGif };
       avatarImageChanged = false;
@@ -306,6 +331,37 @@
     reader.readAsDataURL(file);
   }
 
+  async function readMeshAvatar(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file || !local) return;
+    // Same rule as save_asset: a .mavatar is a zip archive (PK\x03\x04), up to 10 MB.
+    const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+    const isZip = head.length === 4 && head[0] === 0x50 && head[1] === 0x4b && head[2] === 3 && head[3] === 4;
+    if (file.size > 10 * 1024 * 1024 || !file.name.toLowerCase().endsWith('.mavatar') || !isZip) {
+      error = `${text.actionError}: ${meshText.fileError}`; return;
+    }
+    error = '';
+    meshPreviewStatus = 'loading';
+    const reader = new FileReader();
+    reader.onload = () => {
+      // Browsers give .mavatar an empty or guessed MIME; storage only accepts octet-stream for this key.
+      const uri = String(reader.result);
+      meshAvatar = `data:application/octet-stream;base64,${uri.slice(uri.indexOf(',') + 1)}`;
+      meshAvatarChanged = true;
+    };
+    reader.onerror = () => error = text.actionError;
+    reader.readAsDataURL(file);
+  }
+
+  function resetMeshView() {
+    if (!local) return;
+    local.mesh_avatar_scale = 1;
+    local.mesh_avatar_offset_x = 0;
+    local.mesh_avatar_offset_y = 0;
+  }
+
   async function refreshVariantCount() {
     if (!local?.last_enrolled_speaker) { variantCount = 0; wakeWords = []; return; }
     try {
@@ -391,6 +447,56 @@
             <Toggle label={text.doubleClick} value={local.double_click_to_record} change={() => local && (local.double_click_to_record = !local.double_click_to_record)} />
           </section>
         {:else if active === 'avatar'}
+          <section class="card mesh-card">
+            <Toggle label={meshText.enabled} hint={meshText.enabledHint} value={local.mesh_avatar_enabled} change={() => local && (local.mesh_avatar_enabled = !local.mesh_avatar_enabled)} />
+            <fieldset class="mesh-body" disabled={!local.mesh_avatar_enabled}>
+              <div class="mesh-preview">
+                <div class="mesh-circle">
+                  {#if meshPreviewStatus !== 'failed'}
+                    <MeshFace state={meshPreviewState} scale={local.mesh_avatar_scale}
+                      offsetX={local.mesh_avatar_offset_x} offsetY={local.mesh_avatar_offset_y}
+                      expressions={local.mesh_avatar_expressions} emotions={local.mesh_avatar_emotions}
+                      customSource={meshAvatar} bind:status={meshPreviewStatus} />
+                  {:else}<span>PA</span>{/if}
+                </div>
+                <div class="mesh-states" role="group" aria-label={meshText.preview}>
+                  {#each MESH_AVATAR_STATES as s}
+                    <button type="button" class="secondary" class:selected={meshPreviewState === s} aria-pressed={meshPreviewState === s} onclick={() => meshPreviewState = s}>{meshText.states[s]}</button>
+                  {/each}
+                </div>
+              </div>
+              <RangeField label={meshText.scale} value={local.mesh_avatar_scale} min={0.5} max={2} step={0.05} display={`${Math.round(local.mesh_avatar_scale * 100)}${text.percent}`} change={(v) => local && (local.mesh_avatar_scale = v)} />
+              <RangeField label={meshText.offsetX} value={local.mesh_avatar_offset_x} min={-40} max={40} step={1} display={`${local.mesh_avatar_offset_x} px`} change={(v) => local && (local.mesh_avatar_offset_x = v)} />
+              <RangeField label={meshText.offsetY} value={local.mesh_avatar_offset_y} min={-40} max={40} step={1} display={`${local.mesh_avatar_offset_y} px`} change={(v) => local && (local.mesh_avatar_offset_y = v)} />
+              <div class="mesh-reset"><button class="ghost" onclick={resetMeshView}>{meshText.resetView}</button></div>
+              <div class="sample">
+                <div><strong>{meshText.file}</strong><p>{meshAvatar ? meshText.custom : meshText.builtin} · {meshText.fileHint}</p></div>
+                <div class="actions">
+                  <button class="secondary" onclick={() => meshInput?.click()}>{meshText.choose}</button>
+                  {#if meshAvatar}<button class="ghost danger" onclick={() => { meshAvatar = null; meshAvatarChanged = true; meshPreviewStatus = 'loading'; }}>{meshText.restore}</button>{/if}
+                </div>
+                <input bind:this={meshInput} hidden type="file" accept=".mavatar" onchange={readMeshAvatar} />
+              </div>
+              <p class="mesh-heading">{meshText.expressions}</p>
+              {#each MESH_AVATAR_STATES as s}
+                <Field label={meshText.states[s]}>
+                  <select bind:value={local.mesh_avatar_expressions[s]}>
+                    {#each MESH_AVATAR_EXPRESSIONS as x}<option value={x}>{x}</option>{/each}
+                  </select>
+                </Field>
+              {/each}
+              <details class="mesh-advanced">
+                <summary>{meshText.advanced} · {meshText.emotions}</summary>
+                {#each PA_EMOTIONS as emotion}
+                  <Field label={emotion}>
+                    <select bind:value={local.mesh_avatar_emotions[emotion]}>
+                      {#each MESH_AVATAR_EMOTIONS as x}<option value={x}>{x}</option>{/each}
+                    </select>
+                  </Field>
+                {/each}
+              </details>
+            </fieldset>
+          </section>
           <section class="card asset-grid">
             <AssetCard title={text.staticAvatar} src={local.avatar_image} hint={text.imageHint}
               choose={() => chooseAsset('avatar_image')} remove={() => {
@@ -494,6 +600,13 @@
 {/if}
 
 <style>
+  .mesh-card{margin-bottom:14px}.mesh-body{border:0;margin:0;padding:0;min-width:0}.mesh-body:disabled{opacity:.45}
+  .mesh-preview{display:flex;align-items:center;gap:18px;padding:16px;border-bottom:1px solid #e8eaf0}
+  .mesh-circle{position:relative;width:76px;height:76px;flex-shrink:0;border-radius:50%;overflow:hidden;display:grid;place-items:center;background:radial-gradient(circle at 38% 35%,#6b8cff 0%,#3d5af1 100%);color:#fff;font-weight:800}
+  .mesh-states{display:flex;flex-wrap:wrap;gap:6px}.mesh-states button.selected{background:#788cff22;border-color:#7589f4;color:#3a4566}
+  .mesh-reset{display:flex;justify-content:flex-end;padding:8px 16px;border-bottom:1px solid #e8eaf0}
+  .mesh-heading{padding:12px 16px 4px;font-size:11px;font-weight:600;color:#5a6178;border-top:1px solid #e8eaf0}
+  .mesh-advanced{border-top:1px solid #e8eaf0}.mesh-advanced summary{padding:12px 16px;font-size:11px;font-weight:600;color:#5a6178;cursor:pointer}
   .wake-help { color: var(--muted, #64748b); font-size: 13px; line-height: 1.6; margin: 8px 16px 16px; }
   :global {
   :global(*){box-sizing:border-box} :global(html,body,#app){margin:0;width:100%;height:100%;overflow:hidden}

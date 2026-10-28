@@ -33,7 +33,21 @@ export interface AppSettings {
   wake_owner_only: boolean;
   speaker_verification_enabled: boolean;
   last_enrolled_speaker: string;
+  mesh_avatar_enabled: boolean;
+  mesh_avatar_scale: number;
+  mesh_avatar_offset_x: number;
+  mesh_avatar_offset_y: number;
+  /** Character state → mesh expression (see MESH_AVATAR_EXPRESSIONS). */
+  mesh_avatar_expressions: Record<string, string>;
+  /** PA reply emotion → mesh emotion (see MESH_AVATAR_EMOTIONS). */
+  mesh_avatar_emotions: Record<string, string>;
 }
+
+// Same whitelists as settings_repository::validate.
+export const MESH_AVATAR_STATES = ['idle', 'listening', 'thinking', 'speaking'] as const;
+export const MESH_AVATAR_EXPRESSIONS = ['neutral', 'smile', 'shy', 'surprise', 'halfLidded', 'angry', 'sad', 'wink'] as const;
+export const PA_EMOTIONS = ['cheerful', 'excited', 'friendly', 'sad', 'angry', 'calm', 'whisper', 'serious'] as const;
+export const MESH_AVATAR_EMOTIONS = ['happy', 'sad', 'angry', 'surprised', 'relaxed', 'neutral'] as const;
 
 export const SETTINGS_DEFAULTS: AppSettings = {
   volume: 0.8,
@@ -67,6 +81,15 @@ export const SETTINGS_DEFAULTS: AppSettings = {
   wake_owner_only: true,
   speaker_verification_enabled: false,
   last_enrolled_speaker: '',
+  mesh_avatar_enabled: true,
+  mesh_avatar_scale: 1,
+  mesh_avatar_offset_x: 0,
+  mesh_avatar_offset_y: 0,
+  mesh_avatar_expressions: { idle: 'neutral', listening: 'surprise', thinking: 'halfLidded', speaking: 'neutral' },
+  mesh_avatar_emotions: {
+    cheerful: 'happy', excited: 'happy', friendly: 'happy', sad: 'sad',
+    angry: 'angry', calm: 'relaxed', whisper: 'relaxed', serious: 'neutral',
+  },
 };
 
 function createSettingsStore() {

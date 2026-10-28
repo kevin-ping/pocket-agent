@@ -266,3 +266,67 @@ const wakeZh: typeof wakeEn = {
   voiceSaved: '声纹已登记。唤醒词需单独设置。',
 };
 export function wakeSettingsText(lang: string) { return lang === 'zh' ? wakeZh : wakeEn; }
+
+const meshEn = {
+  enabled: 'Animated avatar (mesh)', enabledHint: 'When on, it replaces the static and animated avatars below.',
+  preview: 'Preview', states: { idle: 'Idle', listening: 'Listening', thinking: 'Thinking', speaking: 'Speaking' },
+  scale: 'Zoom', offsetX: 'Horizontal offset', offsetY: 'Vertical offset', resetView: 'Reset framing',
+  file: 'Avatar file', builtin: 'Built-in xingyin', custom: 'Custom file', choose: 'Choose .mavatar', restore: 'Restore built-in',
+  fileHint: '.mavatar file, up to 10 MB. Read locally only.', fileError: 'Choose a .mavatar file up to 10 MB.',
+  expressions: 'Expression for each state', emotions: 'Reply emotion mapping', advanced: 'Advanced',
+};
+type MeshStrings = typeof meshEn;
+const MESH_TRANSLATIONS: Record<SettingsLang, MeshStrings> = {
+  en: meshEn,
+  zh: {
+    enabled: '动画头像（mesh）', enabledHint: '开启后覆盖下面的静态 / 动画头像。',
+    preview: '预览', states: { idle: '待机', listening: '聆听', thinking: '思考', speaking: '说话' },
+    scale: '缩放', offsetX: '水平偏移', offsetY: '垂直偏移', resetView: '重置画面',
+    file: '头像文件', builtin: '内置 xingyin', custom: '自定义文件', choose: '选择 .mavatar', restore: '恢复内置',
+    fileHint: '.mavatar 文件，最大 10 MB，只在本地读取。', fileError: '请选择不超过 10 MB 的 .mavatar 文件。',
+    expressions: '各状态的表情', emotions: '回复情绪对应', advanced: '高级',
+  },
+  ja: {
+    enabled: 'アニメーションアバター（mesh）', enabledHint: 'オンにすると、下の静止画 / アニメーションアバターより優先されます。',
+    preview: 'プレビュー', states: { idle: '待機', listening: '聞き取り中', thinking: '考え中', speaking: '発話中' },
+    scale: '拡大率', offsetX: '水平オフセット', offsetY: '垂直オフセット', resetView: '表示をリセット',
+    file: 'アバターファイル', builtin: '内蔵 xingyin', custom: 'カスタムファイル', choose: '.mavatar を選択', restore: '内蔵に戻す',
+    fileHint: '.mavatar ファイル、最大 10 MB。ローカルでのみ読み込みます。', fileError: '10 MB 以下の .mavatar ファイルを選択してください。',
+    expressions: '状態ごとの表情', emotions: '返答の感情の対応', advanced: '詳細',
+  },
+  ko: {
+    enabled: '애니메이션 아바타(mesh)', enabledHint: '켜면 아래의 정적 / 애니메이션 아바타 대신 표시됩니다.',
+    preview: '미리보기', states: { idle: '대기', listening: '듣는 중', thinking: '생각 중', speaking: '말하는 중' },
+    scale: '확대/축소', offsetX: '가로 위치', offsetY: '세로 위치', resetView: '화면 초기화',
+    file: '아바타 파일', builtin: '내장 xingyin', custom: '사용자 파일', choose: '.mavatar 선택', restore: '내장으로 복원',
+    fileHint: '.mavatar 파일, 최대 10 MB. 로컬에서만 읽습니다.', fileError: '10 MB 이하의 .mavatar 파일을 선택하세요.',
+    expressions: '상태별 표정', emotions: '응답 감정 매핑', advanced: '고급',
+  },
+  fr: {
+    enabled: 'Avatar animé (mesh)', enabledHint: 'Activé, il remplace les avatars statique et animé ci-dessous.',
+    preview: 'Aperçu', states: { idle: 'Repos', listening: 'Écoute', thinking: 'Réflexion', speaking: 'Parole' },
+    scale: 'Zoom', offsetX: 'Décalage horizontal', offsetY: 'Décalage vertical', resetView: 'Réinitialiser le cadrage',
+    file: "Fichier d'avatar", builtin: 'xingyin intégré', custom: 'Fichier personnalisé', choose: 'Choisir un .mavatar', restore: "Revenir à l'intégré",
+    fileHint: 'Fichier .mavatar, 10 Mo maximum. Lu uniquement en local.', fileError: 'Choisissez un fichier .mavatar de 10 Mo maximum.',
+    expressions: 'Expression par état', emotions: 'Correspondance des émotions', advanced: 'Avancé',
+  },
+  de: {
+    enabled: 'Animierter Avatar (mesh)', enabledHint: 'Wenn aktiv, ersetzt er den statischen und animierten Avatar unten.',
+    preview: 'Vorschau', states: { idle: 'Bereit', listening: 'Zuhören', thinking: 'Denken', speaking: 'Sprechen' },
+    scale: 'Zoom', offsetX: 'Horizontaler Versatz', offsetY: 'Vertikaler Versatz', resetView: 'Ausschnitt zurücksetzen',
+    file: 'Avatar-Datei', builtin: 'Integrierter xingyin', custom: 'Eigene Datei', choose: '.mavatar wählen', restore: 'Integrierten wiederherstellen',
+    fileHint: '.mavatar-Datei, bis 10 MB. Wird nur lokal gelesen.', fileError: 'Wähle eine .mavatar-Datei bis 10 MB.',
+    expressions: 'Gesichtsausdruck je Zustand', emotions: 'Zuordnung der Antwort-Emotionen', advanced: 'Erweitert',
+  },
+  es: {
+    enabled: 'Avatar animado (mesh)', enabledHint: 'Al activarlo, sustituye a los avatares estático y animado de abajo.',
+    preview: 'Vista previa', states: { idle: 'Reposo', listening: 'Escuchando', thinking: 'Pensando', speaking: 'Hablando' },
+    scale: 'Zoom', offsetX: 'Desplazamiento horizontal', offsetY: 'Desplazamiento vertical', resetView: 'Restablecer encuadre',
+    file: 'Archivo de avatar', builtin: 'xingyin integrado', custom: 'Archivo personalizado', choose: 'Elegir .mavatar', restore: 'Restaurar integrado',
+    fileHint: 'Archivo .mavatar, hasta 10 MB. Solo se lee localmente.', fileError: 'Elige un archivo .mavatar de hasta 10 MB.',
+    expressions: 'Expresión por estado', emotions: 'Correspondencia de emociones', advanced: 'Avanzado',
+  },
+};
+export function meshSettingsText(lang: string): MeshStrings {
+  return MESH_TRANSLATIONS[(SETTINGS_LANGS as readonly string[]).includes(lang) ? lang as SettingsLang : 'en'];
+}

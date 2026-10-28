@@ -115,6 +115,7 @@ always-on mic → sherpa-onnx KWS (wake phrase)
 - **Settings center** — SQLite-backed settings UI in its own window
 - **Interruptible TTS** — pressing the hotkey while PA is speaking stops current audio immediately before recording starts
 - **TTS toggle** — disable voice output for text-only mode
+- **Animated mesh avatar** — the widget circle shows a 2D mesh avatar (xingyin) that blinks and idles, reacts to listening / thinking / speaking, and follows the reply emotion; falls back to the image or CSS avatar if it can't load (see [docs/mesh-avatar.md](docs/mesh-avatar.md))
 - **Compact widget** — 220x360px always-on-top window, dark sci-fi aesthetic
 - **macOS native** — global hotkey via CGEventTap, CoreAudio recording, menu bar tray
 
@@ -137,6 +138,7 @@ See [docs/API_MANUAL.md](docs/API_MANUAL.md) for full API details.
 **Frontend (Svelte 5)**
 - Svelte 5 with runes (`$state`, `$derived`, `$effect`, `$props()`) + TypeScript
 - Vite 6
+- [mesh-avatar-element](https://github.com/shinshin86/mesh-avatar-studio) (WebGL2) for the animated avatar
 
 **Desktop (Tauri 2 / Rust)**
 - Tokio + reqwest + eventsource-stream
@@ -171,6 +173,7 @@ Pocket Agent is a local desktop client. Please understand these boundaries:
 - **API key handling** — `API_SERVER_KEY` is stored in `.env` (plaintext on disk). Never commit `.env` to version control.
 - **Global input monitoring** — the hotkey listener uses macOS Accessibility APIs (CGEventTap). This grants system-level input monitoring capability. Only run builds you trust.
 - **Microphone access** — audio is captured via CoreAudio and processed **entirely locally** by faster-whisper. No audio data leaves your machine for STT.
+- **Avatar** — the mesh avatar is bundled with the app and loaded from the app's own origin; it makes no network requests. A custom `.mavatar` is picked from a local file and stored in the settings database (zip header and 10 MB limit checked).
 - **Conversation persistence** — sessions are stored in the configured gateway (Hermes: `~/.hermes/sessions/`, OpenClaw: `~/.openclaw/agents/<agent>/sessions/`). These contain full conversation text. Consider disk encryption.
 
 ### Desktop Interaction
@@ -258,6 +261,8 @@ API_AGENT=my-agent         # agent name
 # STT_MODEL=base  # Whisper model: tiny | base | small
 ```
 
+> **Hermes gateway mode:** point `API_SERVER` at a standalone gateway for your profile (e.g. `hermes -p <profile> gateway install`), with that profile's `API_SERVER_KEY`. Hermes multiplex mode (`gateway.multiplex_profiles: true`) is not supported: under `/p/<profile>/`, `/v1/runs` resolves the model with the default profile's config and fails, so every turn ends immediately. If a turn ends right after `[SSE] >>> sending to LLM`, look for `[SSE] turn failed:` in the Pocket Agent log and check `hermes gateway list` / `lsof -iTCP:8642`.
+
 3. **Run in development mode:**
 
 ```bash
@@ -283,13 +288,29 @@ If Accessibility was denied initially, re-enable it and restart the app. If loca
 Open **Settings** from the tray menu.
 
 - **Server connection** — API server URL, auth key, and agent name are configured via `.env` only (see `.env.example`)
-- **Avatar image** — optional custom character avatar
+- **Mesh avatar** — on/off, zoom and offset with a live preview, a custom `.mavatar` file, and the state → expression / reply emotion mappings — see below.
+- **Avatar image** — optional custom character avatar. Only shown when the mesh avatar is off or unavailable.
 - **Record Key** — capture any key as your push-to-talk hotkey (default: `fn`). Changes take effect immediately.
 - **TTS voices** — primary, auxiliary 1, auxiliary 2 (grouped by language)
 - **Fixed language mode** — force LLM to always respond in a specific language
 - **Voice Output** — enable/disable TTS playback. When off, responses are text-only.
 
 - **Wake-word detection** — hands-free activation via speaker recognition + keyword matching (see below)
+
+### Mesh Avatar
+
+The avatar circle shows the bundled mesh avatar `public/avatars/xingyin.mavatar` by default. In **Settings → Avatar** you can turn it off, zoom (50–200%) and offset it (±40 px) with a live preview, upload your own `.mavatar` (or restore the built-in one), and change the expressions and emotion mapping below. While it is on and loads successfully, it covers the **Avatar image** and per-state media skins. Those show when it is turned off or fails to load (bad file or no WebGL2).
+
+Defaults (configurable):
+
+| State | Avatar |
+|---|---|
+| idle | breathing, blinking, light sway |
+| listening | wide-eyed (`surprise`) |
+| thinking | half-lidded |
+| speaking | mouth moves with a simulated level (not synced to the real audio) |
+
+The reply emotion is mapped too (defaults: cheerful/excited/friendly → happy, sad → sad, angry → angry, calm/whisper → relaxed, serious → neutral; unknown values → neutral) and cleared when audio ends. Details: [docs/mesh-avatar.md](docs/mesh-avatar.md).
 
 ### Wake-Word Configuration
 
@@ -367,7 +388,8 @@ pocket-agent/
 │   ├── main.ts / settings.ts     # Entry points (widget / settings window)
 │   └── lib/
 │       ├── components/
-│       │   ├── AvatarIcon.svelte      # Character avatar + expand button
+│       │   ├── AvatarIcon.svelte      # Avatar circle (mesh or image/CSS fallback) + expand button
+│       │   ├── MeshFace.svelte        # <mesh-avatar> wrapper shared with the settings preview
 │       │   ├── Character.svelte       # Character animation
 │       │   ├── ChatPanel.svelte       # Chat input + message display
 │       │   ├── ComputerApproval.svelte # Approval prompt for computer_use actions
@@ -409,7 +431,8 @@ pocket-agent/
 │           ├── wake_window.rs    # Wake audio windowing / VAD submission
 │           ├── conversation.rs   # Continuous conversation state machine + barge-in
 │           └── venv.rs           # Managed Python venv (~/.pocket-agent/venv)
-├── docs/                         # computer-interaction.md, API_MANUAL.md
+├── public/avatars/               # Bundled mesh avatar (xingyin.mavatar)
+├── docs/                         # computer-interaction.md, mesh-avatar.md, API_MANUAL.md
 ├── scripts/                      # dev + voice test scripts
 ├── assets/media/                 # Demo videos + screenshots
 ├── .env.example                  # Environment template
@@ -443,6 +466,10 @@ npm run tauri build
 ## License
 
 MIT
+
+### Third-Party Libraries
+
+- Mesh avatar runtime: [mesh-avatar-element / mesh-avatar](https://github.com/shinshin86/mesh-avatar-studio) (MIT)
 
 ### Third-Party Audio
 

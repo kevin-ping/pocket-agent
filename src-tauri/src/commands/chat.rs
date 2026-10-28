@@ -163,9 +163,12 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                                                         // Signal real audio start only after this generation wins the
                                                         // sink race. The frontend treats this as playback truth.
                                                         if !prep.silent {
-                                                            let _ = prep.app.emit("chat-audio-playing", ());
+                                                            let _ = prep.app.emit("chat-audio-playing", true);
                                                         }
                                                         sink.sleep_until_end();
+                                                        // Per-sentence end lets the frontend close the mouth during
+                                                        // the inter-sentence TTS generation gap instead of flapping.
+                                                        let _ = prep.app.emit("chat-audio-sentence-end", ());
                                                     }
                                                 }
                                                 Err(e) => eprintln!("[AUDIO] decode: {}", e),
@@ -690,7 +693,9 @@ fn emit_text_without_tts(app: &AppHandle, full_response: &str, emotion: &str) {
         total_chars: cleaned.chars().count(),
         has_audio: false,
     });
-    let _ = app.emit("chat-audio-playing", ());
+    // Payload false = text-only fallback: keep the speaking expression and typewriter,
+    // but the frontend will not animate the mouth (nothing is audible).
+    let _ = app.emit("chat-audio-playing", false);
     for ch in cleaned.chars() {
         let _ = app.emit("chat-stream", ChatStreamPayload { delta: ch.to_string() });
     }
@@ -928,6 +933,7 @@ pub async fn dispatch_bridge_message(
             if my_turn_gen != TURN_GENERATION.load(Ordering::SeqCst) {
                 return Ok(());
             }
+            eprintln!("[SSE] turn failed: {}", e);
             let _ = app.emit("bridge-turn-error", e.clone());
             Err(e)
         }
@@ -1056,6 +1062,7 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
             if my_turn_gen != TURN_GENERATION.load(Ordering::SeqCst) {
                 return Ok(());
             }
+            eprintln!("[SSE] turn failed: {}", e);
             app.emit("chat-stream-error", e.clone()).map_err(|emit_err| emit_err.to_string())?;
             if tts_on {
                 SUBMISSION_DONE.store(true, Ordering::SeqCst);

@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Local;
@@ -11,12 +11,25 @@ use super::config::{load_legacy_config, AppConfig};
 
 const SCHEMA_VERSION: &str = "1";
 const MAX_ASSET_BYTES: usize = 10 * 1024 * 1024;
-const ALLOWED_ASSET_MIMES: &[&str] = &[
+const ALLOWED_IMAGE_MIMES: &[&str] = &[
     "image/jpeg",
     "image/png",
     "image/webp",
     "image/gif",
 ];
+// `.mavatar` files are zip archives. Only the mesh avatar key may store this
+// MIME, and image keys may never store it.
+const MESH_AVATAR_KEY: &str = "mesh_avatar";
+const MESH_AVATAR_MIME: &str = "application/octet-stream";
+const ZIP_MAGIC: &[u8] = b"PK\x03\x04";
+const MESH_STATES: &[&str] = &["idle", "listening", "thinking", "speaking"];
+const MESH_EXPRESSIONS: &[&str] = &[
+    "neutral", "smile", "shy", "surprise", "halfLidded", "angry", "sad", "wink",
+];
+const PA_EMOTIONS: &[&str] = &[
+    "cheerful", "excited", "friendly", "sad", "angry", "calm", "whisper", "serious",
+];
+const MESH_EMOTIONS: &[&str] = &["happy", "sad", "angry", "surprised", "relaxed", "neutral"];
 
 #[derive(Debug, Serialize)]
 pub struct SaveConfigResponse {
@@ -166,7 +179,7 @@ pub fn get_asset(key: &str) -> Result<Option<String>, String> {
 
 pub fn save_asset(key: &str, data_uri: &str) -> Result<u64, String> {
     ensure_asset_key(key)?;
-    let (mime, data) = decode_data_uri(data_uri)?;
+    let (mime, data) = decode_data_uri(key, data_uri)?;
     let conn = open()?;
     conn.execute(
         "INSERT OR REPLACE INTO assets(key,mime_type,data,updated_at) VALUES(?1,?2,?3,?4)",
@@ -249,7 +262,7 @@ fn write_optional_asset(
 ) -> Result<(), String> {
     match value.and_then(Value::as_str) {
         Some(data_uri) if !data_uri.is_empty() => {
-            let (mime, data) = decode_data_uri(data_uri)?;
+            let (mime, data) = decode_data_uri(key, data_uri)?;
             tx.execute(
                 "INSERT OR REPLACE INTO assets(key,mime_type,data,updated_at) VALUES(?1,?2,?3,?4)",
                 params![key, mime, data, now],
@@ -264,7 +277,7 @@ fn write_optional_asset(
     Ok(())
 }
 
-fn decode_data_uri(value: &str) -> Result<(String, Vec<u8>), String> {
+fn decode_data_uri(key: &str, value: &str) -> Result<(String, Vec<u8>), String> {
     let (header, encoded) = value
         .split_once(',')
         .ok_or_else(|| "asset must be a data URI".to_string())?;
@@ -272,14 +285,26 @@ fn decode_data_uri(value: &str) -> Result<(String, Vec<u8>), String> {
         .strip_prefix("data:")
         .and_then(|h| h.strip_suffix(";base64"))
         .ok_or_else(|| "asset must be base64 encoded".to_string())?;
-    if !ALLOWED_ASSET_MIMES.contains(&mime) {
+    let mime_allowed = if key == MESH_AVATAR_KEY {
+        mime == MESH_AVATAR_MIME
+    } else {
+        ALLOWED_IMAGE_MIMES.contains(&mime)
+    };
+    if !mime_allowed {
         return Err(format!("unsupported asset type: {mime}"));
+    }
+    // Reject oversized payloads before decoding them into memory.
+    if encoded.len() / 4 * 3 > MAX_ASSET_BYTES + 2 {
+        return Err("asset exceeds the 10 MB limit".to_string());
     }
     let data = STANDARD
         .decode(encoded)
         .map_err(|e| format!("invalid asset data: {e}"))?;
     if data.len() > MAX_ASSET_BYTES {
         return Err("asset exceeds the 10 MB limit".to_string());
+    }
+    if key == MESH_AVATAR_KEY && !data.starts_with(ZIP_MAGIC) {
+        return Err("mesh avatar must be a .mavatar (zip) file".to_string());
     }
     Ok((mime.to_string(), data))
 }
@@ -296,7 +321,7 @@ fn read_asset(conn: &Connection, key: &str) -> Result<Option<String>, String> {
 }
 
 fn ensure_asset_key(key: &str) -> Result<(), String> {
-    if matches!(key, "avatar_image" | "avatar_gif") {
+    if matches!(key, "avatar_image" | "avatar_gif" | MESH_AVATAR_KEY) {
         Ok(())
     } else {
         Err("unknown settings asset".to_string())
@@ -374,7 +399,27 @@ pub fn validate(config: &AppConfig) -> Result<(), String> {
     {
         return Err("invalid enrolled speaker name".into());
     }
+    if !(0.5..=2.0).contains(&config.mesh_avatar_scale)
+        || !(-40..=40).contains(&config.mesh_avatar_offset_x)
+        || !(-40..=40).contains(&config.mesh_avatar_offset_y)
+    {
+        return Err("mesh avatar scale or offset is out of range".into());
+    }
+    if !is_complete_mapping(&config.mesh_avatar_expressions, MESH_STATES, MESH_EXPRESSIONS) {
+        return Err("invalid mesh avatar expression mapping".into());
+    }
+    if !is_complete_mapping(&config.mesh_avatar_emotions, PA_EMOTIONS, MESH_EMOTIONS) {
+        return Err("invalid mesh avatar emotion mapping".into());
+    }
     Ok(())
+}
+
+/// Every key in `keys` maps to one of `values`, with no extra keys.
+fn is_complete_mapping(map: &BTreeMap<String, String>, keys: &[&str], values: &[&str]) -> bool {
+    map.len() == keys.len()
+        && map
+            .iter()
+            .all(|(k, v)| keys.contains(&k.as_str()) && values.contains(&v.as_str()))
 }
 
 #[cfg(test)]
@@ -408,8 +453,122 @@ mod tests {
     #[test]
     fn accepts_supported_asset_and_rejects_large_or_unknown_data() {
         let png = "data:image/png;base64,iVBORw0KGgo=";
-        assert!(decode_data_uri(png).is_ok());
-        assert!(decode_data_uri("data:text/plain;base64,SGk=").is_err());
+        assert!(decode_data_uri("avatar_image", png).is_ok());
+        assert!(decode_data_uri("avatar_image", "data:text/plain;base64,SGk=").is_err());
+    }
+
+    #[test]
+    fn mesh_avatar_scale_and_offset_ranges_are_enforced() {
+        let mut c = AppConfig::default();
+        c.mesh_avatar_scale = 0.5;
+        c.mesh_avatar_offset_x = -40;
+        c.mesh_avatar_offset_y = 40;
+        assert!(validate(&c).is_ok());
+        for scale in [0.49, 2.01, f32::NAN] {
+            let mut c = AppConfig::default();
+            c.mesh_avatar_scale = scale;
+            assert!(validate(&c).is_err());
+        }
+        let mut c = AppConfig::default();
+        c.mesh_avatar_offset_x = 41;
+        assert!(validate(&c).is_err());
+        let mut c = AppConfig::default();
+        c.mesh_avatar_offset_y = -41;
+        assert!(validate(&c).is_err());
+    }
+
+    #[test]
+    fn mesh_avatar_mappings_use_whitelists() {
+        let mut c = AppConfig::default();
+        c.mesh_avatar_expressions.insert("listening".into(), "smile".into());
+        assert!(validate(&c).is_ok());
+        c.mesh_avatar_expressions.insert("listening".into(), "grin".into());
+        assert!(validate(&c).is_err());
+
+        let mut c = AppConfig::default();
+        c.mesh_avatar_expressions.insert("dancing".into(), "smile".into());
+        assert!(validate(&c).is_err());
+        let mut c = AppConfig::default();
+        c.mesh_avatar_expressions.remove("idle");
+        assert!(validate(&c).is_err());
+
+        let mut c = AppConfig::default();
+        c.mesh_avatar_emotions.insert("calm".into(), "happy".into());
+        assert!(validate(&c).is_ok());
+        c.mesh_avatar_emotions.insert("calm".into(), "joyful".into());
+        assert!(validate(&c).is_err());
+        let mut c = AppConfig::default();
+        c.mesh_avatar_emotions.insert("__proto__".into(), "happy".into());
+        assert!(validate(&c).is_err());
+    }
+
+    #[test]
+    fn legacy_database_without_mesh_keys_uses_defaults() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO settings(key,value_json,updated_at) VALUES('volume','0.4','now')",
+            [],
+        )
+        .unwrap();
+        let loaded = load_from_connection(&conn).unwrap();
+        let d = AppConfig::default();
+        assert!(loaded.mesh_avatar_enabled);
+        assert_eq!(loaded.mesh_avatar_scale, d.mesh_avatar_scale);
+        assert_eq!(loaded.mesh_avatar_offset_x, 0);
+        assert_eq!(loaded.mesh_avatar_expressions, d.mesh_avatar_expressions);
+        assert_eq!(loaded.mesh_avatar_emotions, d.mesh_avatar_emotions);
+        assert!(validate(&loaded).is_ok());
+    }
+
+    #[test]
+    fn mesh_avatar_settings_round_trip() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize_schema(&conn).unwrap();
+        let mut config = AppConfig::default();
+        config.mesh_avatar_enabled = false;
+        config.mesh_avatar_scale = 1.5;
+        config.mesh_avatar_offset_x = -12;
+        config.mesh_avatar_expressions.insert("listening".into(), "smile".into());
+        let tx = conn.transaction().unwrap();
+        write_config(&tx, &config).unwrap();
+        tx.commit().unwrap();
+        let loaded = load_from_connection(&conn).unwrap();
+        assert!(!loaded.mesh_avatar_enabled);
+        assert_eq!(loaded.mesh_avatar_scale, 1.5);
+        assert_eq!(loaded.mesh_avatar_offset_x, -12);
+        assert_eq!(loaded.mesh_avatar_expressions["listening"], "smile");
+    }
+
+    fn octet_uri(data: &[u8]) -> String {
+        format!("data:application/octet-stream;base64,{}", STANDARD.encode(data))
+    }
+
+    #[test]
+    fn mesh_avatar_asset_requires_zip_octet_stream() {
+        assert!(ensure_asset_key("mesh_avatar").is_ok());
+        assert!(decode_data_uri("mesh_avatar", &octet_uri(b"PK\x03\x04rest")).is_ok());
+        // A png renamed to .mavatar is not a zip archive.
+        let png = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        assert!(decode_data_uri("mesh_avatar", &octet_uri(&png)).is_err());
+        assert!(decode_data_uri("mesh_avatar", &octet_uri(b"")).is_err());
+        assert!(decode_data_uri("mesh_avatar", "data:image/png;base64,UEsDBA==").is_err());
+    }
+
+    #[test]
+    fn image_keys_reject_octet_stream() {
+        let zip = octet_uri(b"PK\x03\x04rest");
+        assert!(decode_data_uri("avatar_image", &zip).is_err());
+        assert!(decode_data_uri("avatar_gif", &zip).is_err());
+    }
+
+    #[test]
+    fn assets_over_10mb_are_rejected() {
+        let mut data = b"PK\x03\x04".to_vec();
+        data.resize(MAX_ASSET_BYTES + 1, 0);
+        assert!(decode_data_uri("mesh_avatar", &octet_uri(&data)).is_err());
+        data.truncate(MAX_ASSET_BYTES);
+        assert!(decode_data_uri("mesh_avatar", &octet_uri(&data)).is_ok());
     }
 
     #[test]

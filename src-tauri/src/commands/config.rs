@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_store::StoreExt;
@@ -147,6 +149,20 @@ pub struct AppConfig {
     pub speaker_verification_enabled: bool,
     #[serde(default)]
     pub last_enrolled_speaker: String,
+    #[serde(default = "default_true")]
+    pub mesh_avatar_enabled: bool,
+    #[serde(default = "default_mesh_avatar_scale")]
+    pub mesh_avatar_scale: f32,
+    #[serde(default)]
+    pub mesh_avatar_offset_x: i32,
+    #[serde(default)]
+    pub mesh_avatar_offset_y: i32,
+    /// Character state → mesh-avatar expression.
+    #[serde(default = "default_mesh_avatar_expressions")]
+    pub mesh_avatar_expressions: BTreeMap<String, String>,
+    /// PA reply emotion → mesh-avatar emotion.
+    #[serde(default = "default_mesh_avatar_emotions")]
+    pub mesh_avatar_emotions: BTreeMap<String, String>,
 }
 
 fn default_pause_tolerance_ms() -> u32 {
@@ -167,6 +183,36 @@ fn default_ui_lang() -> String {
 }
 
 fn default_kws_threshold() -> f32 { 0.25 }
+
+fn default_mesh_avatar_scale() -> f32 {
+    1.0
+}
+
+fn string_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+}
+
+pub(crate) fn default_mesh_avatar_expressions() -> BTreeMap<String, String> {
+    string_map(&[
+        ("idle", "neutral"),
+        ("listening", "surprise"),
+        ("thinking", "halfLidded"),
+        ("speaking", "neutral"),
+    ])
+}
+
+pub(crate) fn default_mesh_avatar_emotions() -> BTreeMap<String, String> {
+    string_map(&[
+        ("cheerful", "happy"),
+        ("excited", "happy"),
+        ("friendly", "happy"),
+        ("sad", "sad"),
+        ("angry", "angry"),
+        ("calm", "relaxed"),
+        ("whisper", "relaxed"),
+        ("serious", "neutral"),
+    ])
+}
 
 fn default_wake_word_threshold() -> f32 {
     0.5
@@ -206,6 +252,12 @@ impl Default for AppConfig {
             wake_owner_only: true,
             speaker_verification_enabled: false,
             last_enrolled_speaker: String::new(),
+            mesh_avatar_enabled: true,
+            mesh_avatar_scale: default_mesh_avatar_scale(),
+            mesh_avatar_offset_x: 0,
+            mesh_avatar_offset_y: 0,
+            mesh_avatar_expressions: default_mesh_avatar_expressions(),
+            mesh_avatar_emotions: default_mesh_avatar_emotions(),
         }
     }
 }
@@ -247,6 +299,12 @@ pub(crate) fn load_legacy_config(app: &AppHandle) -> AppConfig {
         wake_owner_only: true,
         speaker_verification_enabled: store.get("speaker_verification_enabled").and_then(|v| v.as_bool()).unwrap_or(default.speaker_verification_enabled),
         last_enrolled_speaker: store.get("last_enrolled_speaker").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
+        mesh_avatar_enabled: default.mesh_avatar_enabled,
+        mesh_avatar_scale: default.mesh_avatar_scale,
+        mesh_avatar_offset_x: default.mesh_avatar_offset_x,
+        mesh_avatar_offset_y: default.mesh_avatar_offset_y,
+        mesh_avatar_expressions: default.mesh_avatar_expressions,
+        mesh_avatar_emotions: default.mesh_avatar_emotions,
     }
 }
 
@@ -378,8 +436,12 @@ pub fn open_settings_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn get_setting_asset(key: String) -> Result<Option<String>, String> {
-    settings_repository::get_asset(&key)
+pub async fn get_setting_asset(key: String) -> Result<Option<String>, String> {
+    // Assets can be up to 10 MB and the main window reads the mesh avatar on
+    // every settings change; keep the read and base64 encoding off the main thread.
+    tauri::async_runtime::spawn_blocking(move || settings_repository::get_asset(&key))
+        .await
+        .map_err(|e| format!("settings asset read task failed: {e}"))?
 }
 
 #[tauri::command]

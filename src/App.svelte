@@ -76,7 +76,25 @@
   let audioLevelTimer: ReturnType<typeof setInterval> | null = null;
   let firstStreamDelta = false;
   let lastSpeakingHadAudio = true;
+  let avatarEmotion: string | null = null;
+  // Mouth follows per-sentence audio truth: on while a sentence plays, brief linger between sentences.
+  let mouthActive = false;
+  let mouthLingerTimer: ReturnType<typeof setTimeout> | null = null;
   let bridgeThinkingActive = false;
+  // Custom .mavatar lives outside AppConfig (it can be megabytes), so it is fetched on its own.
+  let meshCustom: string | null = null;
+  let meshCustomRequest = 0;
+
+  async function refreshMeshCustom() {
+    const request = ++meshCustomRequest;
+    try {
+      const data = await invoke<string | null>('get_setting_asset', { key: 'mesh_avatar' });
+      // Only the latest request applies, and an unchanged file must not reload the avatar.
+      if (request === meshCustomRequest && data !== meshCustom) meshCustom = data;
+    } catch (e) {
+      console.warn('[avatar] custom mesh avatar read failed:', e);
+    }
+  }
 
   // ─── Media skins: avatar content per state ───
   $: mediaSkins = {
@@ -504,6 +522,7 @@
         cancelPendingStatusSpeech();
         debugState('chat-speaking-start', e.payload as unknown as Record<string, unknown>);
         lastSpeakingHadAudio = e.payload.has_audio;
+        avatarEmotion = e.payload.emotion;
         if (!$chatStore.isStreaming) {
           chatStore.startStream();
         }
@@ -512,7 +531,7 @@
           layoutStore.toggle();
         }
       }),
-      listen('chat-audio-playing', () => {
+      listen<boolean | undefined>('chat-audio-playing', (e) => {
         if (interruptedReply) return;
         cancelPendingStatusSpeech();
         lastSpokenStatus = null;
@@ -521,12 +540,26 @@
         characterState.toSpeaking();
         chatStore.finishThinkingPhase();
         spiritPhase = 3;
+        // Payload carries has_audio: animate the mouth only for real audio, not the text-only fallback.
+        if (e.payload === true) {
+          if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
+          mouthActive = true;
+        } else {
+          mouthActive = false;
+        }
         // Arm barge-in only once audio is actually playing. chat-speaking-start
         // fires before the LLM request, so arming there burns the 600ms warmup
         // during thinking and lets ambient speech kill a reply that never played.
         if (conversationActive && lastSpeakingHadAudio) {
           invoke('notify_conversation_tts_started').catch(console.error);
         }
+      }),
+      listen('chat-audio-sentence-end', () => {
+        if (interruptedReply) return;
+        // Sentence finished; next sentence's TTS may still be generating. Close the
+        // mouth after a short linger so brief gaps look natural but long ones don't flap.
+        if (mouthLingerTimer) clearTimeout(mouthLingerTimer);
+        mouthLingerTimer = setTimeout(() => { mouthActive = false; }, 300);
       }),
       listen<{ delta: string }>('chat-stream', (e) => {
         if (interruptedReply) return;
@@ -559,6 +592,9 @@
         autoCloseBreakConfirm();
       }),
       listen<number>('chat-audio-done', (e) => {
+        avatarEmotion = null;
+        mouthActive = false;
+        if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
         if (interruptedReply) return;
         debugState('chat-audio-done');
         chatStore.endStream();
@@ -734,6 +770,8 @@
         debugState('voice-cancel');
         islandMode = 'idle';
         spiritPhase = 0;
+        mouthActive = false;
+        if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
         characterState.toIdle();
         chatStore.clearThinkingSteps();
         chatStore.setVoiceStatus(null);
@@ -866,6 +904,7 @@
       listen('conversation-barge-in', () => {
         debugState('conversation-barge-in');
         interruptedReply = true;
+        avatarEmotion = null;
         cancelPendingStatusSpeech();
         // TTS was cut; kill typewriter immediately so text stops mid-sentence.
         chatStore.abortTypewriter();
@@ -904,6 +943,7 @@
       }),
       listen('settings-changed', () => {
         settingsStore.load();
+        void refreshMeshCustom();
       }),
       listen('tray-open-history', () => {
         openChatHistory();
@@ -916,6 +956,7 @@
         debugState('api-push', { emotion: e.payload.emotion, hasVoice: !!e.payload.voice, len: e.payload.text.length });
         const { text, emotion, voice } = e.payload;
         if (!text.trim()) return;
+        avatarEmotion = emotion;
         currentInputLang = voice ? langFromVoice(voice) : detectLang(text);
         clearBridgeFallbackTimer();
         bridgeThinkingActive = false;
@@ -1017,6 +1058,7 @@
     }
     
     const settingsLoaded = await settingsStore.load();
+    void refreshMeshCustom();
     if (!settingsLoaded) {
       chatStore.setError('Settings database is unavailable. Pocket Agent is using safe defaults.');
     }
@@ -1081,6 +1123,16 @@
         avatarImage={$settingsStore.avatar_image ?? null}
         spiritPhase={spiritPhase}
         mediaSkins={mediaSkins}
+        emotion={avatarEmotion}
+        interrupted={interruptedReply}
+        mouthActive={mouthActive}
+        meshEnabled={$settingsStore.mesh_avatar_enabled}
+        meshScale={$settingsStore.mesh_avatar_scale}
+        meshOffsetX={$settingsStore.mesh_avatar_offset_x}
+        meshOffsetY={$settingsStore.mesh_avatar_offset_y}
+        meshExpressions={$settingsStore.mesh_avatar_expressions}
+        meshEmotions={$settingsStore.mesh_avatar_emotions}
+        {meshCustom}
         on:expand={() => layoutStore.toggle()}
         on:contextmenu={() => invoke('open_settings_window')}
       />
