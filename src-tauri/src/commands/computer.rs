@@ -3,90 +3,9 @@ use serde::Serialize;
 
 use super::config::{get_api_agent, get_api_key, get_api_url};
 
-pub const COMPUTER_POLICY_VERSION: &str = "cu-route-v3";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DesktopRoute {
-    Visible,
-    Background,
-    Conversation,
-    Uncertain,
-}
-
-impl DesktopRoute {
-    pub fn parse_classifier_output(value: &str) -> Self {
-        match value
-            .trim()
-            .trim_matches('`')
-            .trim()
-            .to_ascii_uppercase()
-            .as_str()
-        {
-            "VISIBLE" => Self::Visible,
-            "BACKGROUND" => Self::Background,
-            "CONVERSATION" => Self::Conversation,
-            _ => Self::Uncertain,
-        }
-    }
-
-    pub fn instruction(self) -> &'static str {
-        match self {
-            Self::Visible => "PA_ROUTE=VISIBLE. The user expects the requested work to happen in their visible local browser or app. Use computer_use for every observation and action. Do not use browser_exec, any browser_* tool, web_search, web_fetch, terminal, execute_code, shell, open, or AppleScript as a substitute.",
-            Self::Background => "PA_ROUTE=BACKGROUND. The user explicitly wants results without local browser/app interaction. Do not use computer_use or manipulate the foreground. Background retrieval tools are allowed, but terminal, execute_code, shell, open, and AppleScript are not.",
-            Self::Conversation => "PA_ROUTE=CONVERSATION. This is ordinary conversation or a knowledge explanation. Do not use computer_use, browser automation, web retrieval, terminal, execute_code, shell, open, or AppleScript.",
-            Self::Uncertain => "PA_ROUTE=UNCERTAIN. Routing could not be classified safely. Do not use computer_use, browser automation, web retrieval, terminal, execute_code, shell, open, or AppleScript. Ask a concise clarification if the answer depends on acting or retrieving current information.",
-        }
-    }
-
-    fn session_scope(self) -> &'static str {
-        match self {
-            Self::Visible => "visible",
-            Self::Background => "background",
-            Self::Conversation => "conversation",
-            Self::Uncertain => "uncertain",
-        }
-    }
-}
-
-pub fn tool_allowed_for_route(route: DesktopRoute, name: &str) -> bool {
-    let name = name.trim().to_ascii_lowercase();
-    let browser = name == "browser" || name.starts_with("browser_");
-    let web = name == "web" || name.starts_with("web_");
-    let shell = matches!(
-        name.as_str(),
-        "terminal"
-            | "process_manage"
-            | "execute_code"
-            | "shell"
-            | "run_command"
-            | "local_command"
-            | "open"
-    );
-    if shell {
-        return false;
-    }
-    match route {
-        DesktopRoute::Visible => name == "computer_use" || (!browser && !web),
-        DesktopRoute::Background => name != "computer_use",
-        DesktopRoute::Conversation | DesktopRoute::Uncertain => {
-            name != "computer_use" && !browser && !web
-        }
-    }
-}
-
-pub fn routed_session_id(base: &str, date: &str, route: DesktopRoute) -> String {
-    format!(
-        "{}-{}-{}-{}",
-        base,
-        date,
-        COMPUTER_POLICY_VERSION,
-        route.session_scope()
-    )
-}
-
 pub const COMPUTER_HINT: &str = r#"
 POCKET AGENT DESKTOP INTERACTION:
-Route each request by its meaning, not by fixed keywords or where a phrase appears. The user's explicit instruction for the current task always wins.
+Only inspect the desktop when the user's current request needs screen context or computer interaction. The user's explicit instruction for the current task always wins.
 By default, requests to search, look up or retrieve current external information, and requests that require using an app, should be completed visibly in the user's local browser or app with computer_use. Do not merely describe steps when the requested work can be performed there.
 For an authorized operation (not a read-only inspection), make the target visible BEFORE any click, key, type, scroll or set_value: call focus_app(app=the resolved target, raise_window=true), then capture(mode='ax') WITHOUT an app target and verify that the foreground window belongs to the intended app. A successful background capture or 'target selected' is NOT proof that the user can see it. If raising fails, the window is minimized/hidden with no selectable window, or foreground verification does not match, STOP and briefly report that you cannot make the target visible; never continue the operation in the background. Keep the selected window in front while acting. If the user switches away, stop rather than repeatedly stealing focus. Read-only inspection does not authorize raising or restoring a window.
 Once the target is verified in front, use delivery_mode='foreground' for supported input actions (click, double_click, right_click, middle_click, drag, scroll, type and key) and verify the result on that same visible target. If foreground delivery is unsupported or denied, stop; never silently fall back to background delivery. Do not use set_value for visible operations: this backend does not support foreground delivery for that action. Use supported foreground input instead, or stop if that cannot safely achieve the request. Bringing a window forward still uses Hermes' existing approval gates. A request to see the operation means showing the real application, not recording the screen or narrating every step.
@@ -94,7 +13,7 @@ For a simple action request, execute directly, verify, then give ONE short resul
 If the user semantically asks for only the result, background research, or no browser/app interaction, do not open or control local apps. Use available non-desktop backend tools or existing knowledge instead. If those cannot complete the request, explain the limitation honestly rather than switching to desktop interaction.
 Ordinary conversation, brainstorming and knowledge explanations do not need desktop access. Never monitor continuously or capture for those requests.
 Use the actual Hermes computer_use tool, never [CMD:...] tags or shell/AppleScript workarounds. Tool availability is not proof of macOS permissions. If unavailable or denied, explain the actual failure; never pretend an action succeeded.
-Hermes browser_exec and browser_* tools control an internal headless browser, not the user's visible browser. They are never substitutes for computer_use on a visible route. Likewise, web_search and web_fetch do not satisfy a request to open or operate the user's browser.
+Hermes browser_exec and browser_* tools control an internal headless browser, not the user's visible browser. They are never substitutes for computer_use when the user expects visible work. Likewise, web_search and web_fetch do not satisfy a request to open or operate the user's browser.
 For 'current window', first capture(mode='ax') without an app target to discover the foreground window. If it is Pocket Agent itself, list_windows and ask which target the user means unless the request names an app or an app category; do not guess a previously active app. Naming an app category (browser, web page, and their equivalents in the user's language) already identifies the target: resolve it and act, never ask which app. Pin subsequent captures/actions to the observed target app/window.
 Resolve a named app or category in this order: list_apps for what is running, then list_windows for which of those actually has an on-screen window; prefer a running app of that category with an on-screen window, otherwise the system default app for it. list_apps reports running state only and never window state, so both calls are needed to tell the two apart.
 An app that list_apps reports running while list_windows shows no window for it has no on-screen window, and so does an app list_apps does not report running at all; both dead-end the same way. focus_app is only an on-screen-window selector and never launches or unhides an app, so it will keep returning 'No on-screen window found'; and without a captured window there is no active target, so every key/type is refused. Do not retry focus_app, do not send keys, and never hunt for a Dock or desktop icon by pixel: the Dock has no ordinary window, so capture(app='Dock') does not reach it, and on macOS capture(app='desktop') resolves to the Finder desktop window instead. Pocket Agent cannot launch or unhide an app from here. Stop immediately, say in one short sentence that the app has no open window (running without one, or not running at all) and that you cannot open one from here, quote the tool's actual error text, and ask the user to open it manually. Do not keep trying other routes.
@@ -116,8 +35,6 @@ pub fn is_local_gateway(url: &str) -> bool {
 pub struct ComputerStatus {
     pub available: bool,
     pub message: String,
-    #[serde(skip_serializing)]
-    pub controlled_runs: bool,
 }
 
 pub fn status_from_toolsets(value: &serde_json::Value) -> Result<ComputerStatus, String> {
@@ -139,7 +56,6 @@ pub fn status_from_toolsets(value: &serde_json::Value) -> Result<ComputerStatus,
     Ok(ComputerStatus {
         available,
         message: message.into(),
-        controlled_runs: false,
     })
 }
 
@@ -165,7 +81,6 @@ pub async fn get_computer_status(
             available: false,
             message: "此入口需要连接本机 Hermes 网关。远程网关控制的是远程机器，不能视为当前 Mac。"
                 .into(),
-            controlled_runs: false,
         });
     }
     let client = reqwest::Client::builder()
@@ -183,7 +98,7 @@ pub async fn get_computer_status(
         .map_err(|_| "无法连接 Hermes 能力接口。")?;
     if !capabilities.status().is_success() {
         return Ok(ComputerStatus { available: false, message: format!(
-            "Hermes 能力接口不可用（HTTP {}）。请检查密钥；旧版网关需升级到支持任务、审批及停止接口的版本。普通对话仍可使用。", capabilities.status()), controlled_runs: false });
+            "Hermes 能力接口不可用（HTTP {}）。请检查密钥；旧版网关需升级到支持任务、审批及停止接口的版本。普通对话仍可使用。", capabilities.status()) });
     }
     let capabilities: serde_json::Value = capabilities
         .json()
@@ -193,7 +108,6 @@ pub async fn get_computer_status(
         return Ok(ComputerStatus {
             available: false,
             message: "Hermes 缺少任务执行、审批或停止接口。请升级网关；普通对话仍可使用。".into(),
-            controlled_runs: false,
         });
     }
     let mut request = client.get(format!("{}/v1/toolsets", url.trim_end_matches('/')));
@@ -215,7 +129,6 @@ pub async fn get_computer_status(
         .await
         .map_err(|_| "Hermes 能力检查返回格式无效。")?;
     let mut status = status_from_toolsets(&value)?;
-    status.controlled_runs = true;
     if include_permissions.unwrap_or(true) {
         status.message.push_str(&permission_note().await);
     }
@@ -302,21 +215,6 @@ mod tests {
         assert!(supports_control(&value));
         value["features"]["run_stop"] = json!(false);
         assert!(!supports_control(&value));
-    }
-
-    #[test]
-    fn prompt_routes_visible_and_background_tasks_semantically() {
-        assert!(COMPUTER_HINT.contains("Route each request by its meaning, not by fixed keywords"));
-        assert!(COMPUTER_HINT.contains(
-            "should be completed visibly in the user's local browser or app with computer_use"
-        ));
-        assert!(COMPUTER_HINT.contains(
-            "asks for only the result, background research, or no browser/app interaction"
-        ));
-        assert!(COMPUTER_HINT.contains("Ordinary conversation, brainstorming and knowledge explanations do not need desktop access"));
-        assert!(COMPUTER_HINT.contains("never [CMD:...] tags or shell/AppleScript workarounds"));
-        assert!(COMPUTER_HINT
-            .contains("browser_exec and browser_* tools control an internal headless browser"));
     }
 
     #[test]
@@ -407,70 +305,5 @@ mod tests {
         assert!(COMPUTER_HINT.contains("require explicit user authorization"));
         assert!(COMPUTER_HINT
             .contains("executing shell/code to bypass a denied computer action is not"));
-    }
-
-    #[test]
-    fn classifier_output_is_exact_and_fail_closed() {
-        assert_eq!(
-            DesktopRoute::parse_classifier_output("VISIBLE"),
-            DesktopRoute::Visible
-        );
-        assert_eq!(
-            DesktopRoute::parse_classifier_output(" `background` "),
-            DesktopRoute::Background
-        );
-        assert_eq!(
-            DesktopRoute::parse_classifier_output("CONVERSATION"),
-            DesktopRoute::Conversation
-        );
-        assert_eq!(
-            DesktopRoute::parse_classifier_output("VISIBLE because it opens an app"),
-            DesktopRoute::Uncertain
-        );
-    }
-
-    #[test]
-    fn route_policy_rejects_bypass_tools() {
-        assert!(tool_allowed_for_route(
-            DesktopRoute::Visible,
-            "computer_use"
-        ));
-        assert!(!tool_allowed_for_route(
-            DesktopRoute::Visible,
-            "browser_exec"
-        ));
-        assert!(!tool_allowed_for_route(DesktopRoute::Visible, "web_search"));
-        for tool in ["terminal", "process_manage", "execute_code"] {
-            assert!(!tool_allowed_for_route(DesktopRoute::Visible, tool));
-            assert!(!tool_allowed_for_route(DesktopRoute::Background, tool));
-        }
-        assert!(tool_allowed_for_route(
-            DesktopRoute::Background,
-            "browser_exec"
-        ));
-        assert!(!tool_allowed_for_route(
-            DesktopRoute::Background,
-            "computer_use"
-        ));
-        assert!(!tool_allowed_for_route(
-            DesktopRoute::Conversation,
-            "web_search"
-        ));
-        assert!(!tool_allowed_for_route(
-            DesktopRoute::Uncertain,
-            "computer_use"
-        ));
-    }
-
-    #[test]
-    fn policy_version_breaks_old_tool_history_affinity() {
-        assert_eq!(
-            routed_session_id("pocket-agent", "2026-09-25", DesktopRoute::Visible),
-            "pocket-agent-2026-09-25-cu-route-v3-visible"
-        );
-        assert_ne!(
-            routed_session_id("pocket-agent", "2026-09-25", DesktopRoute::Visible),
-            routed_session_id("pocket-agent", "2026-09-25", DesktopRoute::Background)
-        );
     }
 }

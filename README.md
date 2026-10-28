@@ -10,7 +10,7 @@ Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust*
 
 ## On-demand computer interaction
 
-Install Hermes and Pocket Agent on each Mac, then enable the Hermes API computer tool and grant CuaDriver permissions. A separate semantic routing pass classifies each current request: search, lookup, and app-operation requests use the visible local browser or app by default, while an explicit request for results only or background research keeps the desktop untouched. Ordinary conversation and knowledge explanations do not open apps. Visible routes reject Hermes' internal headless-browser and command tools instead of treating them as local interaction. Text and voice requests can inspect a window, perform an authorized action, and read it again to check the result. The main model may be text-only; Hermes can use auxiliary vision when pixels are needed. See the [Mac installation and troubleshooting guide](docs/computer-interaction.md). The chat panel includes **▣** to inspect and **ⓘ** to check setup; no continuous screen monitoring is enabled.
+Install Hermes and Pocket Agent on each Mac, then enable the Hermes API computer tool and grant CuaDriver permissions. Requests go straight to Hermes, which decides from the prompt whether to use `computer_use`: search, lookup, and app-operation requests use the visible local browser or app by default, while an explicit request for results only keeps the desktop untouched. Ordinary conversation and knowledge explanations do not open apps. Text and voice requests can inspect a window, perform an authorized action, and read it again to check the result. The main model may be text-only; Hermes can use auxiliary vision when pixels are needed. See the [Mac installation and troubleshooting guide](docs/computer-interaction.md). The chat panel includes **▣** to inspect and **ⓘ** to check setup; no continuous screen monitoring is enabled.
 
 ## How It Works
 
@@ -111,7 +111,7 @@ always-on mic → sherpa-onnx KWS (wake phrase)
 - **Continuous conversation** — turn loop with silence-based turn ending; no keypress per utterance
 - **Barge-in** — talk over the assistant to interrupt it; a Silero VAD confirmation gate rejects non-speech noise
 - **Resident voice service** — Whisper / VAD / speaker / KWS models stay loaded on `:8651`, with a subprocess fallback if it is unreachable
-- **On-demand desktop interaction** — semantic routing decides per request whether to act in your visible browser/app via Hermes `computer_use`, retrieve in the background, or just talk
+- **On-demand desktop interaction** — Hermes decides per request whether to act in your visible browser/app via `computer_use`, retrieve in the background, or just talk
 - **Settings center** — SQLite-backed settings UI in its own window
 - **Interruptible TTS** — pressing the hotkey while PA is speaking stops current audio immediately before recording starts
 - **TTS toggle** — disable voice output for text-only mode
@@ -220,6 +220,7 @@ pip install faster-whisper
 
 > For the **packaged app** (built `.dmg`), Python deps must be available globally or via `pipx`.  
 > If `edge-tts` is not in PATH, set `EDGE_TTS_BIN` in `~/.pocket-agent/.env`.  
+> If TTS fails with a WebSocket **403**, your `edge-tts` is outdated (Microsoft rejects old client versions) — run `pip install -U edge-tts` (or `~/.pocket-agent/venv/bin/pip install -U edge-tts`).  
 > If `faster-whisper` Python is not the system default, set `STT_PYTHON` in `~/.pocket-agent/.env`.
 
 - **Backend gateway** — [Hermes Agent](https://github.com/nousresearch/hermes) (`localhost:8642`) or [OpenClaw](https://github.com/nousresearch/openclaw) (`localhost:18789`)
@@ -395,7 +396,7 @@ pocket-agent/
 │       │   └── server.rs         # Local HTTP API :8650 (/push, /bridge/send, /health)
 │       ├── commands/
 │       │   ├── chat.rs           # send_message: SSE → TTS → emit
-│       │   ├── computer.rs       # Desktop route policy + COMPUTER_HINT prompt
+│       │   ├── computer.rs       # Desktop status + COMPUTER_HINT prompt
 │       │   ├── config.rs         # Config model + voice hints
 │       │   ├── history.rs        # Chat history
 │       │   ├── settings_repository.rs # SQLite-backed settings persistence

@@ -37,13 +37,9 @@ Pocket Agent 的受支持部署方式是 **Pocket Agent、Hermes 和 CuaDriver �
 
 - 明确的电脑操作默认先把已有目标窗口带到前台，再独立读取前台窗口确认目标，随后才发送前台输入；前台不可用、目标不匹配或用户切走时停止，不静默降级为后台输入。只读查看不授权切换窗口。此为 Hermes 模型交互策略，不是 PA 的工具执行前硬性拦截。
 - 隐藏、最小化或未启动的应用若没有可选窗口，当前 Hermes `computer_use` 入口仍不能可靠恢复或启动；PA 应简短说明阻碍，不在后台继续，也不宣称已打开。现有窗口的 `focus_app(..., raise_window=true)` 不等于通用的启动/恢复能力。
-- 可见桌面任务期间继续显示工具进度和审批，但不把中间文字送去显示、播报或聊天历史；完整成功结束后只采用 Hermes 的最终回复，并清理已知思考标签。失败、部分完成、打断不会播放之前暂存的“成功”叙述。简单操作要求一句结果；一般问答默认一两句，用户明确要详细说明时再展开。
-
-- 按当前任务的语义决定路由，不依赖固定关键词或其在句子中的位置。查询、搜索、获取当前外部信息及需要应用操作的任务，默认通过 `computer_use` 在用户本机可见的浏览器或应用中完成。
-- 用户明确表达“只要结果”、后台查询或不要打开浏览器/应用的含义时，当前任务改为后台处理，不读取或操作本机界面。若后台能力不足，应如实说明，不得偷偷改用桌面操作。
+- 请求直接交给 Hermes，由模型按提示词自行决定是否使用 `computer_use`；PA 不做逐轮分类，也不按路由拦截工具（2026-10-09 起，见 decisions）。查询、搜索、获取当前外部信息及需要应用操作的任务，提示词默认要求在用户本机可见的浏览器或应用中完成。简单操作要求一句结果。
+- 用户明确表达“只要结果”、后台查询或不要打开浏览器/应用的含义时，提示词要求后台处理，不读取或操作本机界面。
 - 普通聊天、头脑风暴和知识解释不需要桌面访问。只有当前请求需要界面上下文或操作时才读取；没有持续屏幕监视，也没有定时抓屏。
-- 每个本机 UI 请求先通过无会话历史的语义分类回合判定 `VISIBLE`、`BACKGROUND` 或 `CONVERSATION`；分类结果会同时写入 system instructions 和当前用户回合。输出不符合精确协议时采用 `UNCERTAIN`，禁用界面及检索工具并要求澄清，不根据关键词猜测。
-- PA 的 Hermes 会话 ID 含电脑路由策略版本及路由类别；策略升级后不会继续加载旧会话里成功调用 `browser_exec` 的工具轨迹，后台 browser 历史也不会进入可见界面会话。`VISIBLE` 路由会拒绝 Hermes 内部 `browser_*`、`web_*`、terminal 和 `execute_code`；`BACKGROUND` 路由拒绝 `computer_use` 和本机命令工具；普通聊天拒绝两类操作工具。
 - 本机且能力齐备时使用 Hermes `/v1/runs`，通过事件流显示回复/工具进度。具体操作要求审批时，弹窗显示 Hermes 的操作说明，只提供「本次允许」和「拒绝」，不创建永久或整会话授权。Hermes 自己已有的审批策略仍生效，因此并非每个操作必定弹窗。
 - 窗口和网页内容只是资料，不能成为操作授权。查看不意味着可以输入/发送/购买。提示模型先读目标、执行有界动作、再读目标验证；这个策略由 Hermes 工具执行，并非 Pocket Agent 的独立沙箱。
 - 打断请求会调用后台停止接口；停止只能阻止后续工作，不能撤销已执行动作。如果停止失败或连接丢失，会提示后台状态不确定，不应盲目重复点击/输入。创建任务的响应丢失时也不会自动重发。
@@ -57,7 +53,7 @@ Pocket Agent **无法冷启动或恢复一个没有在屏窗口的应用**。这
 - **`focus_app` 只是在屏窗口选择器，故意不启动应用。** `~/.hermes/hermes-agent/tools/computer_use/cua_backend_capture.py:357-379` 在 `list_windows(on_screen_only=True)` 里匹配，匹配不到直接返回 `No on-screen window found for app 'X'.`，不回退到 launch。应用 `running=true` 但零窗口时，重试它必然反复失败。
 - **没有 sticky target 就投递不出任何按键。** `cua_backend_input.py:11,29` 要求已捕获的活动窗口，否则一律 `No active window — call capture() first.`。所以「先按 cmd+n 开个窗口」这类思路在无窗口状态下不成立。
 - **Dock 无法被捕获。** `list_windows` 只返回 layer-0 顶层窗口，Dock 不在其中；`list_apps` 又明确过滤掉系统 UI agent。`capture()` 的应用解析（`cua_backend_capture.py:165-196,228`）只在这两个来源里匹配，因此 `capture(app='Dock')` 必然返回 `no on-screen window matched`。macOS 上 `capture(app='desktop')` 则优先解析到 Finder 的桌面窗口而非 Dock（`cua_backend_capture.py:31-33`）。
-- **`launch_app` 存在但模型不可达。** CuaDriver 本身有 `launch_app(bundle_id/name, urls=[...])`（`cua_backend.py:319-331`，CLI `list-tools` 也列出它），但它既不在 `computer_use` 的 action 枚举（`schema.py:20-35`）也不在 dispatch 表（`tool.py:398-421`）里。PA 侧的 shell 族工具又被全路由封死（`src-tauri/src/commands/computer.rs`），因此冷启动没有任何一等公民路径。
+- **`launch_app` 存在但模型不可达。** CuaDriver 本身有 `launch_app(bundle_id/name, urls=[...])`（`cua_backend.py:319-331`，CLI `list-tools` 也列出它），但它既不在 `computer_use` 的 action 枚举（`schema.py:20-35`）也不在 dispatch 表（`tool.py:398-421`）里。提示词禁止用 shell/AppleScript 绕路（terminal 等工具由 Hermes 自身审批把关），因此冷启动没有任何一等公民路径。
 
 ### 定稿阶梯与实测结论
 
@@ -88,7 +84,7 @@ Pocket Agent **无法冷启动或恢复一个没有在屏窗口的应用**。这
 
 远程地址及 OpenClaw 等已有聊天兼容性保留，但 **PA 的本机 Computer Use 仅在本机 Hermes UI 路径生效**。配置 `API_AGENT` 的 OpenClaw、远程网关和 bridge 不会被当作用户本机桌面入口，也不会回退到旧命令执行。电脑工具操作驱动所在的机器，远程 Hermes 不会自动看到 PA 客户端。SSH 转发、代理或远程驱动即使用 localhost 地址，也不证明是同机；当前检测不是主机身份认证，请按同机方式部署。本功能不新建远程控制服务。
 
-当前 Hermes `/v1/runs` 接口没有每回合工具白名单参数。PA 因此会在收到 `tool.started` 时校验语义路由并立刻停止违规 run，且绝不把违规工具结果报告为成功；但这不是 Hermes 工具执行前的服务器级 deny。若未来 Hermes 提供 per-run allowlist，应把该校验前移到服务端。当前修复不修改用户的 Hermes 全局 toolset 配置。
+当前 Hermes `/v1/runs` 接口没有每回合工具白名单参数，PA 也不在客户端按路由停止 run；工具选择由提示词引导，执行前的把关依赖 Hermes 自身审批。PA 不修改用户的 Hermes 全局 toolset 配置。
 
 ## 验证记录（2026-09-19）
 
