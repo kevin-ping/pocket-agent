@@ -35,29 +35,27 @@ Pocket Agent 的受支持部署方式是 **Pocket Agent、Hermes 和 CuaDriver �
 
 ## 实际运行与权限边界
 
-- 明确的电脑操作默认先把已有目标窗口带到前台，再独立读取前台窗口确认目标，随后才发送前台输入；前台不可用、目标不匹配或用户切走时停止，不静默降级为后台输入。只读查看不授权切换窗口。此为 Hermes 模型交互策略，不是 PA 的工具执行前硬性拦截。
-- 隐藏、最小化或未启动的应用若没有可选窗口，当前 Hermes `computer_use` 入口仍不能可靠恢复或启动；PA 应简短说明阻碍，不在后台继续，也不宣称已打开。现有窗口的 `focus_app(..., raise_window=true)` 不等于通用的启动/恢复能力。
-- 请求直接交给 Hermes，由模型按提示词自行决定是否使用 `computer_use`；PA 不做逐轮分类，也不按路由拦截工具（2026-10-09 起，见 decisions）。查询、搜索、获取当前外部信息及需要应用操作的任务，提示词默认要求在用户本机可见的浏览器或应用中完成。简单操作要求一句结果。
-- 用户明确表达“只要结果”、后台查询或不要打开浏览器/应用的含义时，提示词要求后台处理，不读取或操作本机界面。
-- 普通聊天、头脑风暴和知识解释不需要桌面访问。只有当前请求需要界面上下文或操作时才读取；没有持续屏幕监视，也没有定时抓屏。
-- 本机且能力齐备时使用 Hermes `/v1/runs`，通过事件流显示回复/工具进度。具体操作要求审批时，弹窗显示 Hermes 的操作说明，只提供「本次允许」和「拒绝」，不创建永久或整会话授权。Hermes 自己已有的审批策略仍生效，因此并非每个操作必定弹窗。
-- 窗口和网页内容只是资料，不能成为操作授权。查看不意味着可以输入/发送/购买。提示模型先读目标、执行有界动作、再读目标验证；这个策略由 Hermes 工具执行，并非 Pocket Agent 的独立沙箱。
+- PA 只做传话筒(2026-10-28 起，见 decisions):提示词只告诉 Hermes 三件事——PA 是同机的语音前端、回复会被 TTS 念出;用户说的「电脑 / 浏览器 / 应用」指这台 Mac 上看得见的真实应用(`browser_exec` / `browser_*` 是用户看不见的无头浏览器);用什么工具、怎么做由 Hermes 自己决定，完成后用一句话说结果或阻碍。PA 不规定前台/后台投递、观察次数或失败后是否换方法，也不做逐轮分类或按路由拦截工具。
+- 隐藏、最小化或未启动的应用：由 Hermes 自行处理。`computer_use` 本身不能启动或恢复窗口(见下节),但 Hermes 可以改用 `terminal` 执行 `osascript` / `open -a`(Hermes 自带的 macOS `open` 前置窗口步骤见 `tools/terminal_tool_macos_open.py`),和 Hermes Desktop 的行为一致。是否需要审批，由 Hermes 的审批策略决定。
+- 普通聊天、头脑风暴和知识解释不需要桌面访问;没有持续屏幕监视，也没有定时抓屏。何时读取界面由 Hermes 判断。
+- 本机且能力齐备时使用 Hermes `/v1/runs`，通过事件流显示回复/工具进度。具体操作要求审批时，弹窗显示 Hermes 的操作说明，并原样提供 Hermes 本次给出的选项(本次允许 / 本会话允许 / 始终允许 / 拒绝)。PA 只接受本次请求提供的选项，同一请求不能重复提交，也不能用于其他任务。Hermes 自己的审批策略决定是否弹窗(例如 `approvals.mode: off` 时不弹)。任务只完成一部分时,PA 照样播报 Hermes 的回复，只有完全没有回复时才提示「结果未知」。
+- 窗口和网页内容只是资料，不能成为操作授权;实际的授权由 Hermes 的审批把关,PA 没有独立沙箱。
 - 打断请求会调用后台停止接口；停止只能阻止后续工作，不能撤销已执行动作。如果停止失败或连接丢失，会提示后台状态不确定，不应盲目重复点击/输入。创建任务的响应丢失时也不会自动重发。
 - Pocket Agent 所有 UI、远程网关和 bridge 路径都会过滤旧 `[CMD:...]` / `[LOCAL_CMD ...]` 标签，不会执行其中的 shell、`open`、AppleScript 或其他本机命令，也不会在界面中伪装为“正在运行命令”。
-- 点击 Pocket Agent 可能使其成为前台。当前窗口若确实是 Pocket Agent，助手会询问目标应用，不假装记得点击前的窗口。可以直接说「查看 Safari 当前页面」或在目标应用保持前台时用语音请求。
+- 点击 Pocket Agent 可能使其成为前台。说「当前窗口」时可能指向 Pocket Agent 自己，由 Hermes 判断是否追问。可以直接说「查看 Safari 当前页面」或在目标应用保持前台时用语音请求。
 
 ## 未启动 / 无窗口的应用
 
-Pocket Agent **无法冷启动或恢复一个没有在屏窗口的应用**。这不是提示词调优问题，而是四条叠加的机制约束（均已在本机 Hermes + CuaDriver 0.28.2 上核实）：
+`computer_use` **自身无法冷启动或恢复一个没有在屏窗口的应用**，有以下四条机制约束（均已在本机 Hermes + CuaDriver 0.28.2 上核实）。2026-10-28 起 PA 不再禁止 Hermes 用 `terminal`(`osascript` / `open -a`)绕过这些限制，由 Hermes 自行选择。
 
 - **`focus_app` 只是在屏窗口选择器，故意不启动应用。** `~/.hermes/hermes-agent/tools/computer_use/cua_backend_capture.py:357-379` 在 `list_windows(on_screen_only=True)` 里匹配，匹配不到直接返回 `No on-screen window found for app 'X'.`，不回退到 launch。应用 `running=true` 但零窗口时，重试它必然反复失败。
 - **没有 sticky target 就投递不出任何按键。** `cua_backend_input.py:11,29` 要求已捕获的活动窗口，否则一律 `No active window — call capture() first.`。所以「先按 cmd+n 开个窗口」这类思路在无窗口状态下不成立。
 - **Dock 无法被捕获。** `list_windows` 只返回 layer-0 顶层窗口，Dock 不在其中；`list_apps` 又明确过滤掉系统 UI agent。`capture()` 的应用解析（`cua_backend_capture.py:165-196,228`）只在这两个来源里匹配，因此 `capture(app='Dock')` 必然返回 `no on-screen window matched`。macOS 上 `capture(app='desktop')` 则优先解析到 Finder 的桌面窗口而非 Dock（`cua_backend_capture.py:31-33`）。
-- **`launch_app` 存在但模型不可达。** CuaDriver 本身有 `launch_app(bundle_id/name, urls=[...])`（`cua_backend.py:319-331`，CLI `list-tools` 也列出它），但它既不在 `computer_use` 的 action 枚举（`schema.py:20-35`）也不在 dispatch 表（`tool.py:398-421`）里。提示词禁止用 shell/AppleScript 绕路（terminal 等工具由 Hermes 自身审批把关），因此冷启动没有任何一等公民路径。
+- **`launch_app` 存在但模型不可达。** CuaDriver 本身有 `launch_app(bundle_id/name, urls=[...])`（`cua_backend.py:319-331`，CLI `list-tools` 也列出它），但它既不在 `computer_use` 的 action 枚举（`schema.py:20-35`）也不在 dispatch 表（`tool.py:398-421`）里。因此在 `computer_use` 内部没有冷启动路径;Hermes 可以改用 `terminal`。
 
 ### 定稿阶梯与实测结论
 
-设计阶段曾规划三级启动阶梯，实测后只有第 ① 级成立，其余**已从提示词中删除**——留着只会让模型换一种方式继续撞墙：
+以下是 2026-09-30 对 `computer_use` 内部启动路径的实测记录(当时 PA 提示词禁止 terminal),仅作参考：
 
 | 级别 | 方案 | 实测结论 |
 | --- | --- | --- |
@@ -66,9 +64,9 @@ Pocket Agent **无法冷启动或恢复一个没有在屏窗口的应用**。这
 | ③ | Finder 建 sticky target → `key cmd+space` (`delivery_mode='foreground'`) 唤 Spotlight | **不可用，已删除。** 驱动 0.28.2 接受 `foreground`（不报 `foreground_unsupported`）并返回 `route: global_input` / `effect: unverifiable`，但两次实测（目标分别为 Finder 与当前前台 iTerm2）Spotlight 均未出现。本机 hotkey 64 未改绑，走系统默认 Cmd+Space，排除绑定干扰。 |
 | ④ | 全败即停 | **唯一失败出口。** 一句话说明应用在运行但无窗口、本端无法打开，附工具返回的真实错误文本，请用户手动打开。 |
 
-因此提示词中「running 但无窗口」的正确行为是**立即停止**：不重试 `focus_app`、不发按键、不按像素找 Dock 图标、不继续换招。识别该状态需要 `list_apps`（只报运行状态）与 `list_windows`（才有窗口状态）两次调用；应用完全未运行时是同一个死胡同，停止行为相同。跨步骤观察预算按既定解析路径设为「首个推进动作前最多 4 次观察」（`list_apps` + `list_windows` + 前台 AX 核验 + 点击需要时的 SOM 元素读取）；将目标窗口置前并独立确认算作推进，无窗口即停的路径只花前两次。
+2026-10-28 起，提示词不再包含「无窗口即停」和观察次数上限，这些判断交给 Hermes。
 
-根治路径是在 Hermes 把 `launch_app` 暴露为 `computer_use` action，记于 `.auto-work/roadmap.md` 的 `ROAD-CU1`。
+在 `computer_use` 内部根治，需要 Hermes 把 `launch_app` 暴露为 action，记于 `.auto-work/roadmap.md` 的 `ROAD-CU1`。
 
 ## 检查结果的含义
 

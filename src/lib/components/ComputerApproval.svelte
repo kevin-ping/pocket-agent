@@ -10,6 +10,12 @@
   let busy = $state(false);
   let error = $state('');
   let current = $derived(pending[0]);
+  // Relay exactly the choices Hermes offered; deny first, the rest in Hermes' order.
+  const labels = new Map([['once', '本次允许'], ['session', '本会话允许'], ['always', '始终允许'], ['deny', '拒绝']]);
+  let choices = $derived.by(() => {
+    const unique = [...new Set(current?.choices ?? [])];
+    return [...unique.filter(c => c === 'deny'), ...unique.filter(c => c !== 'deny')];
+  });
 
   onMount(() => {
     let disposed = false;
@@ -31,7 +37,7 @@
     return () => { disposed = true; listeners.forEach(fn => fn()); };
   });
 
-  async function respond(choice: 'once' | 'deny') {
+  async function respond(choice: string) {
     if (!current || busy) return;
     const request = current;
     busy = true;
@@ -54,10 +60,9 @@
       {#if error}<p role="alert">{error}</p>{/if}
       <div class="actions">
         {#if current}
-          <button onclick={() => respond('deny')} disabled={busy}>拒绝</button>
-          {#if current.choices.includes('once')}
-            <button onclick={() => respond('once')} disabled={busy}>本次允许</button>
-          {/if}
+          {#each choices as choice (choice)}
+            <button onclick={() => respond(choice)} disabled={busy}>{labels.get(choice) ?? choice}</button>
+          {/each}
         {:else}
           <button onclick={() => error = ''}>我知道了</button>
         {/if}

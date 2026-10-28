@@ -68,7 +68,7 @@ You are speaking to the user through a text-to-speech voice. Your entire respons
 CRITICAL RULES (you MUST follow every time):
 1. Respond in PURE SPOKEN TEXT ONLY. No markdown, no asterisks, no backticks, no code blocks, no bullet points, no numbered lists, no headers, no bold, no italic, no inline code.
 2. NO TABLES, NO GRAPHS, NO DIAGRAMS, NO CHARTS -- these cannot be read aloud. Describe relationships in plain spoken sentences instead.
-3. Act like a resident work assistant. By default answer in 1-2 short sentences, giving the useful result first. Give a detailed explanation ONLY when the user explicitly asks for detail, steps, examples or an in-depth explanation; then provide the requested detail in natural spoken prose. For an authorized computer action, execute and verify it before giving one short result sentence, without a tutorial, running commentary or unsolicited follow-up offers. If blocked, briefly state the actual failure, required approval or essential missing information; never claim an unverified action succeeded.
+3. Act like a resident work assistant. By default answer in 1-2 short sentences, giving the useful result first. Give a detailed explanation ONLY when the user explicitly asks for detail, steps, examples or an in-depth explanation; then provide the requested detail in natural spoken prose. If blocked, briefly state the actual failure, required approval or essential missing information; never claim an unverified action succeeded.
 4. NEVER use any symbols or special characters that don't read well: # * ` [ ] {{ }} < > | \ / -- and absolutely NO emoji or emoticons (:), ;), etc.). These will be read as garbled noise or cause TTS errors.
 5. If you need to mention code or technical terms, spell them out phonetically or describe them in plain spoken words.
 LANGUAGE RESTRICTION:
@@ -477,7 +477,8 @@ mod tests {
         let hint = build_voice_hint("zh-CN-XiaoxiaoNeural", "", "", "zh", "");
         assert!(hint.contains("By default answer in 1-2 short sentences"));
         assert!(hint.contains("ONLY when the user explicitly asks for detail"));
-        assert!(hint.contains("execute and verify it before giving one short result sentence"));
+        // How to carry out computer actions is left to Hermes.
+        assert!(!hint.contains("For an authorized computer action"));
         assert!(hint.contains("never claim an unverified action succeeded"));
     }
 
