@@ -164,6 +164,10 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                                                         // sink race. The frontend treats this as playback truth.
                                                         if !prep.silent {
                                                             let _ = prep.app.emit("chat-audio-playing", true);
+                                                        } else {
+                                                            // Status speech (e.g. tool announcements) moves the mouth
+                                                            // without switching the UI into reply mode.
+                                                            let _ = prep.app.emit("chat-status-audio-playing", ());
                                                         }
                                                         sink.sleep_until_end();
                                                         // Per-sentence end lets the frontend close the mouth during

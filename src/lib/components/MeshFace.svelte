@@ -45,7 +45,8 @@
   $: ready = status === 'ready';
   $: meshEmotion = state === 'idle' || !emotion ? null : (emotionMap.get(emotion) ?? 'neutral');
   $: if (ready) meshEl?.avatar?.setEmotion(meshEmotion, { playMotion: false });
-  $: if (ready && state === 'speaking' && !interrupted && mouth) startMouth(); else stopMouth();
+  // `mouth` is true only while TTS is audible, including status speech during thinking.
+  $: if (ready && !interrupted && mouth) startMouth(); else stopMouth();
   $: if (meshEl && customSource && customSource !== loadedCustom) loadCustom(meshEl, customSource);
   $: if (!customSource && loadedCustom) {
     loadedCustom = null;

@@ -145,7 +145,7 @@
           <img class="avatar-media" src={mediaSrc} alt="头像" draggable="false" />
         {/if}
       {:else}
-        <div class="css-face" style:will-change={willChange}>
+        <div class="css-face" class:talking={mouthActive && !interrupted} style:will-change={willChange}>
           <div class="ear left"></div>
           <div class="ear right"></div>
           <div class="face-inner">
@@ -567,5 +567,5 @@
     0%, 100% { transform: scaleY(1);   }
     50%      { transform: scaleY(0.2); }
   }
-  .state-speaking .mouth { animation: mouth-talk 0.28s ease-in-out infinite; }
+  .talking .mouth { animation: mouth-talk 0.28s ease-in-out infinite; }
 </style>

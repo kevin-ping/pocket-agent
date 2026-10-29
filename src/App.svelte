@@ -288,6 +288,9 @@
   const STATUS_BLOCK_PAD = 18;   // 6+6 content padding + 6 .status-row margin-top
   const STATUS_MAX_EXTRA_H = 94; // 88 px scroll area + 6 px row margin
   const STATUS_EXPANDED_W = 400; // 108 (AVATAR_W) + 12 (GAP) + 280 (CHAT_W)
+  // The mouth no longer waits for the speaking state (status speech plays during thinking),
+  // so no path that leaves the turn may leave it open.
+  $: if ($characterState === 'idle' || $characterState === 'listening') mouthActive = false;
   $: extraStatusH = $chatStore.thinkingSteps.length === 0
     ? 0
     : Math.min(STATUS_MAX_EXTRA_H, STATUS_BLOCK_PAD + $chatStore.thinkingSteps.length * STATUS_LINE_H);
@@ -595,6 +598,12 @@
         if (conversationActive && lastSpeakingHadAudio) {
           invoke('notify_conversation_tts_started').catch(console.error);
         }
+      }),
+      listen('chat-status-audio-playing', () => {
+        if (interruptedReply) return;
+        // Status speech plays during thinking: open the mouth only, leave turn state alone.
+        if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
+        mouthActive = true;
       }),
       listen('chat-audio-sentence-end', () => {
         if (interruptedReply) return;
@@ -954,6 +963,9 @@
         debugState('conversation-barge-in');
         interruptedReply = true;
         avatarEmotion = null;
+        // sentence-end is ignored while interrupted, so close the mouth here.
+        mouthActive = false;
+        if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
         cancelPendingStatusSpeech();
         // TTS was cut; kill typewriter immediately so text stops mid-sentence.
         chatStore.abortTypewriter();

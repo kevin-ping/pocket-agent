@@ -453,7 +453,7 @@
               <div class="mesh-preview">
                 <div class="mesh-circle">
                   {#if meshPreviewStatus !== 'failed'}
-                    <MeshFace state={meshPreviewState} scale={local.mesh_avatar_scale}
+                    <MeshFace state={meshPreviewState} mouth={meshPreviewState === 'speaking'} scale={local.mesh_avatar_scale}
                       offsetX={local.mesh_avatar_offset_x} offsetY={local.mesh_avatar_offset_y}
                       expressions={local.mesh_avatar_expressions} emotions={local.mesh_avatar_emotions}
                       customSource={meshAvatar} bind:status={meshPreviewStatus} />
