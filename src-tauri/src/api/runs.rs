@@ -13,6 +13,7 @@ struct Run {
     url: String,
     key: Option<String>,
     pending: HashMap<String, Vec<String>>,
+    cancelled: bool,
 }
 fn active() -> &'static Mutex<HashMap<String, Run>> {
     static RUNS: OnceLock<Mutex<HashMap<String, Run>>> = OnceLock::new();
@@ -31,7 +32,12 @@ fn authorized(request: reqwest::RequestBuilder, key: &Option<String>) -> reqwest
         request
     }
 }
-async fn control(run: &Run, id: &str, action: &str, body: Value) -> Result<(), String> {
+struct ControlError {
+    message: String,
+    // Only connection establishment failures prove that no approval was delivered.
+    retryable: bool,
+}
+async fn control(run: &Run, id: &str, action: &str, body: Value) -> Result<(), ControlError> {
     let response = authorized(
         http().post(format!("{}/v1/runs/{}/{}", run.url, id, action)),
         &run.key,
@@ -40,14 +46,17 @@ async fn control(run: &Run, id: &str, action: &str, body: Value) -> Result<(), S
     .json(&body)
     .send()
     .await
-    .map_err(|_| "Hermes 操作响应失败，请检查连接；不要重复执行可能已完成的操作。")?;
+    .map_err(|error| ControlError {
+        message: "Hermes 操作响应失败，请检查连接；不要重复执行可能已完成的操作。".into(),
+        retryable: error.is_connect(),
+    })?;
     if response.status().is_success() {
         Ok(())
     } else {
-        Err(format!(
-            "Hermes 操作响应失败（HTTP {}）。",
-            response.status()
-        ))
+        Err(ControlError {
+            message: format!("Hermes 操作响应失败（HTTP {}）。", response.status()),
+            retryable: false,
+        })
     }
 }
 
@@ -62,6 +71,9 @@ pub async fn respond_computer_approval(
     let (run, choices) = {
         let mut runs = active().lock().unwrap();
         let run = runs.get_mut(&run_id).ok_or("该电脑任务已经结束。")?;
+        if run.cancelled {
+            return Err("该电脑任务已取消。".into());
+        }
         let choices = run
             .pending
             .get(&request_id)
@@ -80,18 +92,27 @@ pub async fn respond_computer_approval(
     )
     .await
     {
-        if let Some(run) = active().lock().unwrap().get_mut(&run_id) {
-            run.pending.insert(request_id, choices);
+        if error.retryable {
+            restore_approval(&run_id, request_id, choices);
         }
-        return Err(error);
+        return Err(error.message);
     }
     Ok(())
+}
+
+fn restore_approval(run_id: &str, request_id: String, choices: Vec<String>) {
+    if let Some(run) = active().lock().unwrap().get_mut(run_id) {
+        if !run.cancelled {
+            run.pending.entry(request_id).or_insert(choices);
+        }
+    }
 }
 
 pub async fn cancel_all() -> Result<(), String> {
     let runs = {
         let mut runs = active().lock().unwrap();
         for run in runs.values_mut() {
+            run.cancelled = true;
             run.pending.clear();
         }
         runs.clone()
@@ -99,7 +120,7 @@ pub async fn cancel_all() -> Result<(), String> {
     let mut errors = Vec::new();
     for (id, run) in runs {
         if let Err(error) = control(&run, &id, "stop", json!({})).await {
-            errors.push(error);
+            errors.push(error.message);
         }
     }
     if errors.is_empty() {
@@ -120,6 +141,7 @@ pub async fn chat_stream(
         url: get_api_url().trim_end_matches('/').into(),
         key: get_api_key(),
         pending: HashMap::new(),
+        cancelled: false,
     };
     let instructions = [context.unwrap_or(""), hint.unwrap_or("")].join("\n\n");
     // No automatic replay of run creation. A lost response may mean it already ran.
@@ -221,7 +243,12 @@ pub async fn chat_stream(
                             return Err("Hermes 批准请求缺少拒绝选项，已停止任务。".into());
                         }
                         if let Some(run) = active().lock().unwrap().get_mut(&id) {
+                            if run.cancelled {
+                                continue;
+                            }
                             run.pending.insert(request_id.into(), choices.clone());
+                        } else {
+                            continue;
                         }
                         app.emit(
                             "computer-approval",
@@ -231,19 +258,12 @@ pub async fn chat_stream(
                         )
                         .map_err(|e| e.to_string())?;
                     }
-                    "run.completed" => {
+                    "run.completed" | "run.failed" | "run.cancelled" | "run.interrupted" => {
                         terminal = true;
-                        if let Some(output) = completion_reply(&value, received_text)? {
+                        if let Some(output) = terminal_reply(&value, received_text)? {
                             let _ = tx.send(Ok(StreamEvent::Content(output))).await;
                         }
                         return Ok(());
-                    }
-                    "run.failed" | "run.cancelled" | "run.interrupted" => {
-                        terminal = true;
-                        return Err(value["error"]
-                            .as_str()
-                            .unwrap_or("电脑任务已停止或未完成；请检查当前窗口确认结果。")
-                            .into());
                     }
                     _ => {}
                 }
@@ -254,7 +274,7 @@ pub async fn chat_stream(
             if let Err(error) = control(&run, &id, "stop", json!({})).await {
                 let _ = app.emit(
                     "computer-control-error",
-                    format!("{} 后台任务可能仍在运行。", error),
+                    format!("{} 后台任务可能仍在运行。", error.message),
                 );
             }
         }
@@ -269,13 +289,33 @@ pub async fn chat_stream(
     })
     .boxed())
 }
+fn terminal_reply(value: &Value, received_text: bool) -> Result<Option<String>, String> {
+    match value["event"].as_str() {
+        Some("run.completed") => completion_reply(value, received_text),
+        // Hard failures carry an error; partial/budget exits carry completion fields
+        // and may carry the agent's own explanation instead.
+        Some("run.failed")
+            if (value["partial"] == true || value["completed"] == false)
+                && value["interrupted"] != true
+                && value.get("error").is_none_or(|error| {
+                    error.is_null() || error.as_str().is_some_and(|text| text.trim().is_empty())
+                }) =>
+        {
+            completion_reply(value, received_text)
+        }
+        _ => Err(value["error"]
+            .as_str()
+            .unwrap_or("电脑任务已停止或未完成；请检查当前窗口确认结果。")
+            .into()),
+    }
+}
 /// Hermes' own reply is relayed even for a partial run; only a run with no reply at all fails.
 /// Returns the output still to be spoken, if it was not already streamed.
 fn completion_reply(value: &Value, received_text: bool) -> Result<Option<String>, String> {
     if received_text {
         return Ok(None);
     }
-    if let Some(output) = value["output"].as_str().filter(|s| !s.is_empty()) {
+    if let Some(output) = value["output"].as_str().filter(|s| !s.trim().is_empty()) {
         return Ok(Some(output.into()));
     }
     if value["completed"] == false || value["partial"] == true {
@@ -293,6 +333,8 @@ fn valid_run_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Registry-wide cancellation must not race unrelated tests sharing active().
+    static REGISTRY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     #[test]
     fn rejects_run_ids_that_can_escape_control_path() {
         assert!(valid_run_id("run_123abc"));
@@ -305,12 +347,61 @@ mod tests {
         assert_eq!(completion_reply(&partial, true), Ok(None));
         let mut with_output = partial.clone();
         with_output["output"] = json!("只打开了浏览器");
-        assert_eq!(completion_reply(&with_output, false), Ok(Some("只打开了浏览器".into())));
-        assert!(completion_reply(&partial, false).unwrap_err().contains("只完成了一部分"));
-        assert!(completion_reply(&json!({}), false).unwrap_err().contains("未提供"));
+        assert_eq!(
+            completion_reply(&with_output, false),
+            Ok(Some("只打开了浏览器".into()))
+        );
+        assert!(completion_reply(&partial, false)
+            .unwrap_err()
+            .contains("只完成了一部分"));
+        assert!(completion_reply(&json!({}), false)
+            .unwrap_err()
+            .contains("未提供"));
+    }
+    #[test]
+    fn actual_partial_failed_events_relay_output_but_real_failures_do_not() {
+        for fields in [json!({"partial": true}), json!({"completed": false})] {
+            let mut event = fields;
+            event["event"] = json!("run.failed");
+            event["output"] = json!("只打开了浏览器，搜索没有完成。");
+            assert_eq!(
+                terminal_reply(&event, false),
+                Ok(Some("只打开了浏览器，搜索没有完成。".into()))
+            );
+            assert_eq!(terminal_reply(&event, true), Ok(None));
+            event["output"] = json!("  \n");
+            assert!(terminal_reply(&event, false).is_err());
+        }
+        for name in ["run.failed", "run.cancelled", "run.interrupted"] {
+            let event = json!({"event": name, "partial": true, "completed": false,
+                "output": "不能掩盖错误", "error": "实际故障"});
+            assert_eq!(terminal_reply(&event, false), Err("实际故障".into()));
+            assert_eq!(terminal_reply(&event, true), Err("实际故障".into()));
+        }
+        for name in ["run.cancelled", "run.interrupted"] {
+            assert!(terminal_reply(
+                &json!({"event": name, "partial": true,
+                "output": "已停止"}),
+                true
+            )
+            .is_err());
+        }
+        assert!(terminal_reply(
+            &json!({"event": "run.failed", "partial": true,
+            "interrupted": true, "output": "已停止"}),
+            true
+        )
+        .is_err());
+        assert!(terminal_reply(
+            &json!({"event": "run.failed", "completed": false,
+            "error": {"message": "故障"}, "output": "不能掩盖错误"}),
+            true
+        )
+        .is_err());
     }
     #[tokio::test]
     async fn cannot_approve_unowned_run() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         assert!(
             respond_computer_approval("run_unknown".into(), "request".into(), "once".into())
                 .await
@@ -319,8 +410,19 @@ mod tests {
     }
     fn register(id: &str, url: String, request: &str, choices: &[&str]) {
         let mut pending = HashMap::new();
-        pending.insert(request.into(), choices.iter().map(|c| c.to_string()).collect());
-        active().lock().unwrap().insert(id.into(), Run { url, key: None, pending });
+        pending.insert(
+            request.into(),
+            choices.iter().map(|c| c.to_string()).collect(),
+        );
+        active().lock().unwrap().insert(
+            id.into(),
+            Run {
+                url,
+                key: None,
+                pending,
+                cancelled: false,
+            },
+        );
     }
 
     /// A gateway stub that answers every request with 200 OK.
@@ -342,8 +444,14 @@ mod tests {
 
     #[tokio::test]
     async fn cannot_widen_or_reuse_an_approval() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let id = "run_approval_test";
-        register(id, "http://127.0.0.1:1".into(), "specific", &["once", "deny"]);
+        register(
+            id,
+            "http://127.0.0.1:1".into(),
+            "specific",
+            &["once", "deny"],
+        );
         // Choices Hermes did not offer for this request are refused, including session.
         for choice in ["session", "always"] {
             assert!(
@@ -363,14 +471,22 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(active().lock().unwrap()[id].pending.contains_key("specific"));
+        assert!(active().lock().unwrap()[id]
+            .pending
+            .contains_key("specific"));
         active().lock().unwrap().remove(id);
     }
 
     #[tokio::test]
     async fn relays_offered_session_choice_once() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let id = "run_session_test";
-        register(id, ok_gateway().await, "request", &["once", "session", "always", "deny"]);
+        register(
+            id,
+            ok_gateway().await,
+            "request",
+            &["once", "session", "always", "deny"],
+        );
         respond_computer_approval(id.into(), "request".into(), "session".into())
             .await
             .unwrap();
@@ -381,5 +497,132 @@ mod tests {
                 .is_err()
         );
         active().lock().unwrap().remove(id);
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_approval_delivery_does_not_restore_request() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let id = "run_cancel_approval_test";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        register(
+            id,
+            format!("http://{}", listener.local_addr().unwrap()),
+            "request",
+            &["session", "deny"],
+        );
+        let (received_tx, received_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let gateway = tokio::spawn(async move {
+            let (mut approval, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 4096];
+            let n = approval.read(&mut buf).await.unwrap();
+            assert!(String::from_utf8_lossy(&buf[..n]).contains("/approval"));
+            received_tx.send(()).unwrap();
+            let (mut stop, _) = listener.accept().await.unwrap();
+            let n = stop.read(&mut buf).await.unwrap();
+            assert!(String::from_utf8_lossy(&buf[..n]).contains("/stop"));
+            stop.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            release_rx.await.unwrap();
+            // Simulate a gateway that received the approval but lost its response.
+            drop(approval);
+        });
+        let response = tokio::spawn(respond_computer_approval(
+            id.into(),
+            "request".into(),
+            "session".into(),
+        ));
+        received_rx.await.unwrap();
+        assert!(
+            respond_computer_approval(id.into(), "request".into(), "session".into())
+                .await
+                .is_err()
+        );
+        cancel_all().await.unwrap();
+        release_tx.send(()).unwrap();
+        assert!(response.await.unwrap().is_err());
+        gateway.await.unwrap();
+        {
+            let runs = active().lock().unwrap();
+            assert!(runs[id].cancelled);
+            assert!(runs[id].pending.is_empty());
+        }
+        assert!(
+            respond_computer_approval(id.into(), "request".into(), "session".into())
+                .await
+                .is_err()
+        );
+        active().lock().unwrap().remove(id);
+    }
+
+    #[tokio::test]
+    async fn lost_approval_response_cannot_be_replayed() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let id = "run_lost_approval_test";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        register(
+            id,
+            format!("http://{}", listener.local_addr().unwrap()),
+            "request",
+            &["once", "deny"],
+        );
+        let gateway = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            assert!(String::from_utf8_lossy(&buf[..n]).contains("/approval"));
+            // No response: delivery may already have caused side effects.
+        });
+        assert!(
+            respond_computer_approval(id.into(), "request".into(), "once".into())
+                .await
+                .is_err()
+        );
+        gateway.await.unwrap();
+        assert!(!active().lock().unwrap()[id].pending.contains_key("request"));
+        assert!(
+            respond_computer_approval(id.into(), "request".into(), "once".into())
+                .await
+                .is_err()
+        );
+        active().lock().unwrap().remove(id);
+    }
+
+    #[tokio::test]
+    async fn retryable_failure_restores_only_a_live_uncancelled_request() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let id = "run_restore_approval_test";
+        register(
+            id,
+            "http://127.0.0.1:1".into(),
+            "request",
+            &["once", "deny"],
+        );
+        let choices = active()
+            .lock()
+            .unwrap()
+            .get_mut(id)
+            .unwrap()
+            .pending
+            .remove("request")
+            .unwrap();
+        // An ordinary definitely-unsent failure may be retried.
+        restore_approval(id, "request".into(), choices.clone());
+        assert!(active().lock().unwrap()[id].pending.contains_key("request"));
+        // cancel_all's locked invalidation occurs before the failed request completes.
+        {
+            let mut runs = active().lock().unwrap();
+            let run = runs.get_mut(id).unwrap();
+            run.pending.clear();
+            run.cancelled = true;
+        }
+        restore_approval(id, "request".into(), choices.clone());
+        assert!(active().lock().unwrap()[id].pending.is_empty());
+        active().lock().unwrap().remove(id);
+        restore_approval(id, "request".into(), choices);
+        assert!(!active().lock().unwrap().contains_key(id));
     }
 }
