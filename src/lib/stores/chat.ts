@@ -11,7 +11,8 @@ interface ChatState {
   streamingContent: string;
   isStreaming: boolean;
   error: string | null;
-  /** Steps shown during LLM thinking/tool-calling phase (cleared when final text arrives) */
+  /** Steps shown during LLM thinking/tool-calling phase. Turn-scoped: cleared at turn
+   *  start and turn end, never by startStream/finalizeStream (those fire per sentence). */
   thinkingSteps: string[];
   /** Voice-mode status line (e.g. "🎤 听着…"). Lives alongside thinkingSteps in
    *  the StatusPanel but is orthogonal to LLM streaming — never cleared by
@@ -185,7 +186,6 @@ function createChatStore() {
         streamingContent: '',
         isStreaming: false,
         error: null,
-        thinkingSteps: [],
       };
     });
   }
@@ -212,7 +212,7 @@ function createChatStore() {
     startStream: () => {
       trailingNewlines = 0;
       resetCmdState();
-      update((s) => ({ ...s, streamingContent: '', isStreaming: true, error: null, thinkingSteps: [] }));
+      update((s) => ({ ...s, streamingContent: '', isStreaming: true, error: null }));
     },
 
     /** Add an intermediate step shown during LLM thinking/tool-calling phase */

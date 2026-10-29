@@ -46,6 +46,7 @@
     // Save user message to history
     invoke('save_chat_message', { role: 'user', content: text }).catch(e => console.error('Failed to save user message:', e));
 
+    chatStore.clearThinkingSteps();
     chatStore.startStream();
     characterState.toThinking();
     islandMode = 'thinking';
@@ -230,6 +231,7 @@
     bridgeThinkingActive = true;
     clearBridgeFallbackTimer();
     enterThinkingVisuals();
+    chatStore.clearThinkingSteps();
     chatStore.addThinkingStep('🤔 正在思考...');
     cancelPendingStatusSpeech();
     pendingStatusSpeech = setTimeout(() => speakStatus({ kind: 'thinking' }), 250);
@@ -552,6 +554,7 @@
     unlisten = await Promise.all([
       listen('chat-thinking-start', () => {
         enterThinkingVisuals();
+        chatStore.clearThinkingSteps();
         chatStore.addThinkingStep('🤔 正在思考...');
         cancelPendingStatusSpeech();
         pendingStatusSpeech = setTimeout(() => speakStatus({ kind: 'thinking' }), 250);
@@ -622,6 +625,9 @@
         chatStore.endStream();
         if (!lastSpeakingHadAudio) {
           chatStore.clearThinkingSteps();
+        } else {
+          // An empty reply gets no chat-audio-done; drop 🤔 so it can't pin the turn active.
+          chatStore.finishThinkingPhase();
         }
         // If audio is expected, let chat-audio-playing / chat-audio-done drive the transition.
         if (!lastSpeakingHadAudio && get(characterState) !== 'speaking') {

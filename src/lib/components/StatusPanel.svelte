@@ -94,20 +94,16 @@
     border: 1px solid rgba(160, 168, 255, 0.18);
     border-radius: 8px;
     overflow: hidden;
-    /* Always take up space to prevent layout shift */
+    /* Always take up space to prevent layout shift. Hide with opacity/visibility only:
+       toggling backdrop-filter on the transparent window leaves a stale white layer in WKWebView. */
     opacity: 0;
-    border-color: transparent;
-    background: transparent;
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-    transition: opacity 0.2s ease;
+    visibility: hidden;
+    transition: opacity 0.2s ease, visibility 0s linear 0.2s;
   }
   .status-panel.visible {
     opacity: 1;
-    border-color: rgba(160, 168, 255, 0.18);
-    background: rgba(10, 10, 22, 0.72);
-    -webkit-backdrop-filter: blur(16px) saturate(140%);
-    backdrop-filter: blur(16px) saturate(140%);
+    visibility: visible;
+    transition: opacity 0.2s ease, visibility 0s;
   }
 
   .status-content {
