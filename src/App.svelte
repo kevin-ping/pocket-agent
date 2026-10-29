@@ -322,7 +322,26 @@
   }
 
   // ─── Wake-word state (FEAT-C4) ───
-  let wakeArmInFlight = false;
+  // Bumped by every disarm. An arm owns the epoch it started in; once the
+  // epoch moves or the switch is off, its awaits resolve into a world where
+  // the user already said "stop" — it must not start the mic or write status.
+  let wakeEpoch = 0;
+  let wakeArmInFlightEpoch: number | null = null;
+  // The voiceStatus text the wake path last wrote, so wake can clear its own
+  // stale error on recovery without wiping a conversation prompt.
+  let wakeOwnedStatus: string | null = null;
+
+  function setWakeStatus(text: string) {
+    wakeOwnedStatus = text;
+    chatStore.setVoiceStatus(text);
+  }
+
+  function clearWakeStatus() {
+    if (wakeOwnedStatus !== null && get(chatStore).voiceStatus === wakeOwnedStatus) {
+      chatStore.setVoiceStatus(null);
+    }
+    wakeOwnedStatus = null;
+  }
 
   // stt-server starts on a background thread and is not ready at app mount
   // (venv check + Whisper model load + token file write). Until it answers on
@@ -333,14 +352,16 @@
   async function armWakeListenerIfEnabled() {
     const s = get(settingsStore);
     if (!s.wake_word_enabled) return;
-    if (wakeArmInFlight) return;
-    wakeArmInFlight = true;
+    const epoch = wakeEpoch;
+    if (wakeArmInFlightEpoch === epoch) return;
+    wakeArmInFlightEpoch = epoch;
+    const stale = () => epoch !== wakeEpoch || !get(settingsStore).wake_word_enabled;
     const labels = convLabelsLang(s.ui_lang);
     try {
       // A missing wake phrase is a settled fact, not a race: the KWS session
       // would be rejected on every one of the retries below. Say so instead.
       if (!s.wake_phrase.trim()) {
-        if (!conversationActive) chatStore.setVoiceStatus(labels.wakeNeedsPhrase);
+        if (!conversationActive) setWakeStatus(labels.wakeNeedsPhrase);
         return;
       }
       const MAX_ATTEMPTS = 20;
@@ -353,21 +374,33 @@
         if (!modelConfirmed) {
           try {
             const model = await invoke<{ ready: boolean }>('wake_model_status');
+            if (stale()) return;
             if (!model.ready) {
-              if (!conversationActive) chatStore.setVoiceStatus(labels.wakeNeedsModel);
+              if (!conversationActive) setWakeStatus(labels.wakeNeedsModel);
               return;
             }
             modelConfirmed = true;
           } catch { /* not ready to answer — let the start attempt drive the retry */ }
+          if (stale()) return;
         }
         try {
           await invoke('start_wake_word_listening', { threshold: s.wake_word_threshold, speakerName: s.last_enrolled_speaker || 'Me' });
+          if (stale()) {
+            // The start landed after the user turned wake off: undo it. If the
+            // switch is back on, a newer arm owns the listener — leave it.
+            if (!get(settingsStore).wake_word_enabled) {
+              await invoke('stop_wake_word_listening').catch((err) => console.warn('[wake] late stop failed', err));
+            }
+            return;
+          }
           if (!conversationActive) {
             chatStore.setVoiceStatus(null);
+            wakeOwnedStatus = null;
             if (islandMode === 'idle') islandMode = 'waiting_for_wake';
           }
           return;
         } catch (e) {
+          if (stale()) return;
           const msg = String(e ?? '');
           // Idempotent ignore: "already active" races on conversation-ended.
           // The backend is listening, so the indicator must say so.
@@ -382,23 +415,29 @@
           // when the wake transport changed — retry by default instead.
           if (i === MAX_ATTEMPTS - 1) {
             console.warn('[wake] arm gave up after retries:', msg);
-            if (!conversationActive) chatStore.setVoiceStatus(labels.wakeStartFailed(msg));
+            if (!conversationActive) setWakeStatus(labels.wakeStartFailed(msg));
             return;
           }
           await new Promise((r) => setTimeout(r, 500));
+          if (stale()) return;
         }
       }
     } finally {
-      wakeArmInFlight = false;
+      if (wakeArmInFlightEpoch === epoch) wakeArmInFlightEpoch = null;
     }
   }
 
   async function disarmWakeListener() {
+    const epoch = ++wakeEpoch;
+    if (!conversationActive) clearWakeStatus();
     try {
       await invoke('stop_wake_word_listening');
     } catch (e) {
       console.warn('[wake] disarm failed', e);
     }
+    // A slow stop reply must not dim a listener the user already re-enabled.
+    // Re-enabling reuses this epoch, so the switch itself is checked too.
+    if (epoch !== wakeEpoch || get(settingsStore).wake_word_enabled || conversationActive) return;
     if (islandMode === 'waiting_for_wake') islandMode = 'idle';
   }
 
@@ -856,7 +895,11 @@
       // and restart the listener on its own (commands/config.rs), and the
       // worker can also die on its own. Both only reach us as these events.
       listen('wake-listener-started', () => {
-        if (!conversationActive && islandMode === 'idle') islandMode = 'waiting_for_wake';
+        if (conversationActive) return;
+        // A backend-side restart (settings save) is a recovery this window
+        // never asked for — drop wake's own stale "not ready / failed" text.
+        clearWakeStatus();
+        if (islandMode === 'idle') islandMode = 'waiting_for_wake';
       }),
       listen('wake-listener-stopped', () => {
         if (islandMode === 'waiting_for_wake' || islandMode === 'verifying_speaker') islandMode = 'idle';
@@ -867,7 +910,7 @@
         // light off here or it keeps breathing over a dead listener.
         if (islandMode === 'waiting_for_wake' || islandMode === 'verifying_speaker') islandMode = 'idle';
         if (!conversationActive) {
-          chatStore.setVoiceStatus(convLabelsLang(get(settingsStore).ui_lang).wakeStartFailed(e.payload.error));
+          setWakeStatus(convLabelsLang(get(settingsStore).ui_lang).wakeStartFailed(e.payload.error));
         }
       }),
       // Wake check in-progress: dot 3 turns red while /wake/check HTTP call is running
