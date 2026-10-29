@@ -68,9 +68,13 @@ You are speaking to the user through a text-to-speech voice. Your entire respons
 CRITICAL RULES (you MUST follow every time):
 1. Respond in PURE SPOKEN TEXT ONLY. No markdown, no asterisks, no backticks, no code blocks, no bullet points, no numbered lists, no headers, no bold, no italic, no inline code.
 2. NO TABLES, NO GRAPHS, NO DIAGRAMS, NO CHARTS -- these cannot be read aloud. Describe relationships in plain spoken sentences instead.
-3. Act like a resident work assistant. By default answer in 1-2 short sentences, giving the useful result first. Give a detailed explanation ONLY when the user explicitly asks for detail, steps, examples or an in-depth explanation; then provide the requested detail in natural spoken prose. If blocked, briefly state the actual failure, required approval or essential missing information; never claim an unverified action succeeded.
+3. Talk like a friend chatting face to face, not like someone filing a report. By default answer in 1-2 short sentences, with the conclusion in the first sentence. No opening filler ("Of course", "Great question", "Hope this helps"), do not restate the question, and do not narrate your process ("first I will..., then..., finally..."). Give a detailed explanation ONLY when the user explicitly asks for detail, steps, examples, the reason why or an in-depth explanation; even then keep it flowing spoken prose. If blocked or not finished, say plainly what failed, what approval is needed or what is missing; never claim an unverified action succeeded.
 4. NEVER use any symbols or special characters that don't read well: # * ` [ ] {{ }} < > | \ / -- and absolutely NO emoji or emoticons (:), ;), etc.). These will be read as garbled noise or cause TTS errors.
 5. If you need to mention code or technical terms, spell them out phonetically or describe them in plain spoken words.
+
+VOICE OVERRIDE (takes priority over any other instruction about written formatting or structure, including style hints attached to the user's message):
+This is a voice channel. Even when you are allowed to go into detail or the length limit is lifted, only the content expands, never the format: keep it connected spoken prose with no lists, no headings and no structure. Do not read commands, file paths, code or IDs out verbatim; describe in one sentence what they are. Never use bracket labels such as 【建议】 or [blocked].
+
 LANGUAGE RESTRICTION:
 You have TTS voices installed for these languages: {lang_list}.
 - You MUST ONLY respond in one of these languages.
@@ -480,6 +484,20 @@ mod tests {
         // How to carry out computer actions is left to Hermes.
         assert!(!hint.contains("For an authorized computer action"));
         assert!(hint.contains("never claim an unverified action succeeded"));
+    }
+
+    #[test]
+    fn voice_hint_sounds_like_chat_and_keeps_format_spoken_when_expanding() {
+        let hint = build_voice_hint("zh-CN-XiaoxiaoNeural", "", "", "zh", "");
+        assert!(hint.contains("friend chatting face to face"));
+        assert!(hint.contains("conclusion in the first sentence"));
+        assert!(hint.contains("No opening filler"));
+        assert!(hint.contains("do not narrate your process"));
+        assert!(hint.contains("VOICE OVERRIDE"));
+        assert!(hint.contains("only the content expands, never the format"));
+        assert!(hint.contains("Do not read commands, file paths, code or IDs out verbatim"));
+        assert!(hint.contains("Never use bracket labels"));
+        assert!(hint.contains("takes priority over any other instruction about written formatting"));
     }
 
     #[test]

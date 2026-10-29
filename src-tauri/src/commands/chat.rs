@@ -1024,7 +1024,8 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
     let on_sentence: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>> = if tts_on {
         Some(std::sync::Arc::new(move |sentence: &str| {
             // Strip [CMD:...] tags — they won't appear in chat box, so don't read them.
-            let clean_sentence = strip_all_cmd_tags(sentence);
+            // Then drop Markdown symbols so TTS doesn't read them aloud.
+            let clean_sentence = speakable(&strip_all_cmd_tags(sentence));
             if clean_sentence.is_empty() { return; }
 
             // Use first sentence's voice for all subsequent sentences.
@@ -1331,6 +1332,52 @@ fn strip_all_cmd_tags(text: &str) -> String {
     s.trim().to_string()
 }
 
+/// Turn Markdown-ish text into plain speech for TTS so edge-tts doesn't read
+/// `*`, `_`, `#`, list markers, backticks, table pipes or emoji aloud.
+/// Only affects what is spoken; the chat box still renders the original.
+/// Bare URLs are left untouched.
+fn speakable(text: &str) -> String {
+    let link_re = regex::Regex::new(r"!?\[([^\]]*)\]\([^)]*\)").unwrap();
+    let fence_re = regex::Regex::new(r"```[A-Za-z0-9_+-]*").unwrap();
+    let table_sep_re = regex::Regex::new(r"(?m)^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$").unwrap();
+    let marker_re = regex::Regex::new(r"(?m)^\s*(?:(?:#{1,6}|>|[-*+•]|\d+[.)])(?:\s+|$))+").unwrap();
+    let url_re = regex::Regex::new(r"https?://\S+").unwrap();
+
+    let s = link_re.replace_all(text, "$1").to_string();
+    let s = fence_re.replace_all(&s, "").replace('`', "");
+    let s = table_sep_re.replace_all(&s, "").to_string();
+    let s = marker_re.replace_all(&s, "").to_string();
+
+    // Inline symbols are cleaned only outside bare URLs.
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0;
+    for m in url_re.find_iter(&s) {
+        out.push_str(&speakable_inline(&s[last..m.start()]));
+        out.push_str(m.as_str());
+        last = m.end();
+    }
+    out.push_str(&speakable_inline(&s[last..]));
+
+    let space_re = regex::Regex::new(r"[ \t]+").unwrap();
+    let punct_re = regex::Regex::new(r"[ \t]+([，。！？、；：）])").unwrap();
+    let s = space_re.replace_all(&out, " ").to_string();
+    let s = punct_re.replace_all(&s, "$1").to_string();
+    s.trim().to_string()
+}
+
+fn speakable_inline(text: &str) -> String {
+    let pipe_edge_re = regex::Regex::new(r"(?m)^[ \t]*\||\|[ \t]*$").unwrap();
+    let pipe_re = regex::Regex::new(r"[ \t]*\|[ \t]*").unwrap();
+    let times_re = regex::Regex::new(r"(\d)[ \t]*\*[ \t]*(\d)").unwrap();
+    let emoji_re = regex::Regex::new(r"[\p{Extended_Pictographic}\u{FE0F}\u{200D}\u{20E3}\u{1F3FB}-\u{1F3FF}]").unwrap();
+
+    let s = pipe_edge_re.replace_all(text, "").to_string();
+    let s = pipe_re.replace_all(&s, "，").to_string();
+    let s = times_re.replace_all(&s, "${1}×${2}").to_string();
+    let s = s.replace('*', "").replace("~~", "").replace('_', " ");
+    emoji_re.replace_all(&s, "").to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1350,6 +1397,31 @@ mod tests {
             "",
         );
         assert_eq!(text, "hello world Please reply in English.");
+    }
+
+    #[test]
+    fn speakable_drops_markdown_symbols() {
+        assert_eq!(speakable("**好的**，已打开 `foo_bar`"), "好的，已打开 foo bar");
+        assert_eq!(speakable("- 买菜"), "买菜");
+        assert_eq!(speakable("2. 写周报"), "写周报");
+        assert_eq!(speakable("## 今天的安排"), "今天的安排");
+        assert_eq!(speakable("> 引用一句话"), "引用一句话");
+        assert_eq!(speakable("详见[官方文档](https://example.com/a_b)。"), "详见官方文档。");
+        assert_eq!(speakable("| 项目 | 状态 |"), "项目，状态");
+        assert_eq!(speakable("|---|:---:|"), "");
+        assert_eq!(speakable("搞定了🎉👍🏻"), "搞定了");
+        assert_eq!(speakable("```rust"), "");
+        assert_eq!(speakable("~~旧方案~~ 不用了"), "旧方案 不用了");
+    }
+
+    #[test]
+    fn speakable_keeps_plain_text_and_urls() {
+        let zh = "今天天气不错，我们出去走走吧。";
+        assert_eq!(speakable(zh), zh);
+        let url = "地址是 https://example.com/foo_bar?a=1*2";
+        assert_eq!(speakable(url), url);
+        assert_eq!(speakable("3*4 等于 12"), "3×4 等于 12");
+        assert_eq!(speakable("C++ 和 Rust"), "C++ 和 Rust");
     }
 
     #[cfg(unix)]
