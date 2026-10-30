@@ -18,6 +18,9 @@ interface ChatState {
    *  the StatusPanel but is orthogonal to LLM streaming — never cleared by
    *  startStream/finalizeStream, only by setVoiceStatus(null), clear, or setError. */
   voiceStatus: string | null;
+  /** Latest voice STT result, shown in SttPanel above the StatusPanel. Kept until
+   *  the next utterance replaces it; cleared only by setSttText(null) or clear. */
+  sttText: string | null;
   /** First-launch PA venv bootstrap (~/.pocket-agent/venv) state. Rendered in
    *  StatusPanel as an extra row. `idle` and `ready` hide it; `installing` and
    *  `error` show it with phase + last log line. */
@@ -167,6 +170,7 @@ function createChatStore() {
     error: null,
     thinkingSteps: [],
     voiceStatus: null,
+    sttText: null,
     voiceSetupState: 'idle',
     voiceSetupPhase: '',
     voiceSetupDetail: '',
@@ -275,6 +279,10 @@ function createChatStore() {
     setVoiceStatus: (text: string | null) =>
       update((s) => (s.voiceStatus === text ? s : { ...s, voiceStatus: text })),
 
+    /** Set or clear the latest voice STT result. Pass null to clear. */
+    setSttText: (text: string | null) =>
+      update((s) => (s.sttText === text ? s : { ...s, sttText: text })),
+
     setVoiceSetup: (patch: Partial<Pick<ChatState, 'voiceSetupState' | 'voiceSetupPhase' | 'voiceSetupDetail'>>) =>
       update((s) => ({ ...s, ...patch })),
 
@@ -381,6 +389,7 @@ function createChatStore() {
         error: null,
         thinkingSteps: [],
         voiceStatus: null,
+        sttText: null,
       }));
     },
   };

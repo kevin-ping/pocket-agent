@@ -10,6 +10,7 @@
   import Icon from './lib/components/Icon.svelte';
   import ChatPanel from './lib/components/ChatPanel.svelte';
   import StatusPanel from './lib/components/StatusPanel.svelte';
+  import SttPanel from './lib/components/SttPanel.svelte';
   import BreakConfirmModal from './lib/components/BreakConfirmModal.svelte';
   import ComputerApproval from './lib/components/ComputerApproval.svelte';
 
@@ -292,11 +293,16 @@
   // The mouth no longer waits for the speaking state (status speech plays during thinking),
   // so no path that leaves the turn may leave it open.
   $: if ($characterState === 'idle' || $characterState === 'listening') mouthActive = false;
+  // A new listen starts a new utterance: drop the previous one (covers fn key, manual
+  // start and continuous-mode re-listen alike).
+  $: if ($characterState === 'listening') chatStore.setSttText(null);
   $: extraStatusH = $chatStore.thinkingSteps.length === 0
     ? 0
     : Math.min(STATUS_MAX_EXTRA_H, STATUS_BLOCK_PAD + $chatStore.thinkingSteps.length * STATUS_LINE_H);
+  // Measured: 0 while no STT text, else 6 px row padding + panel (content capped at 88 px).
+  let sttRowH = 0;
   $: if ($layoutStore.expanded && !$layoutStore.resizing) {
-    const targetH = STATUS_BASE_H + extraStatusH;
+    const targetH = STATUS_BASE_H + sttRowH + extraStatusH;
     queueMicrotask(() => {
       appWindow.setSize(new LogicalSize(STATUS_EXPANDED_W, targetH)).catch(() => {});
     });
@@ -841,6 +847,7 @@
         debugState('stt-result', { language: e.payload.language, len: e.payload.text.length });
         islandMode = 'thinking';
         if (e.payload.text.trim()) {
+          chatStore.setSttText(e.payload.text.trim());
           handleSendMessage(e.payload.text, e.payload.language);
         } else if (conversationActive) {
           // Empty result in continuous mode: worker stays Listening, just ignore.
@@ -857,6 +864,7 @@
         islandMode = 'idle';
         spiritPhase = 0;
         console.warn('[STT]', e.payload.error);
+        chatStore.setSttText(null);
         chatStore.setError(`语音识别失败: ${e.payload.error}`);
         characterState.toIdle();
         if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
@@ -1222,6 +1230,7 @@
 
   <!-- Status panel: spans avatar + chat width, only when expanded -->
   {#if $layoutStore.expanded}
+    <div class="stt-row" class:empty={$chatStore.sttText === null} bind:offsetHeight={sttRowH}><SttPanel /></div>
     <div class="status-row"><StatusPanel /></div>
   {/if}
 
@@ -1345,4 +1354,8 @@
   }
   .guide-btn:hover { background: rgba(160, 168, 255, 0.35); }
   .status-row { margin-top: 6px; width: 100%; flex-shrink: 0; }
+  /* Padding, not margin, so bind:offsetHeight covers the gap. Empty collapses the row
+     instead of unmounting the panel, so its backdrop-filter never toggles. */
+  .stt-row { padding-top: 6px; width: 100%; flex-shrink: 0; }
+  .stt-row.empty { height: 0; padding-top: 0; overflow: hidden; }
 </style>

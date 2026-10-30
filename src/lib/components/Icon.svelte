@@ -1,5 +1,5 @@
 <script lang="ts">
-  export let name: 'message-square' | 'chat' | 'settings' | 'trash-2' | 'bell' | 'bell-off' | 'x' | 'alert-triangle' = 'x';
+  export let name: 'message-square' | 'chat' | 'settings' | 'trash-2' | 'bell' | 'bell-off' | 'x' | 'alert-triangle' | 'audio-lines' = 'x';
   export let size: number = 16;
   export let color: string = 'currentColor';
   export let strokeWidth: number = 2;
@@ -46,5 +46,12 @@
     <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
     <line x1="12" y1="9" x2="12" y2="13" />
     <line x1="12" y1="17" x2="12.01" y2="17" />
+  {:else if name === 'audio-lines'}
+    <path d="M2 10v3" />
+    <path d="M6 6v11" />
+    <path d="M10 3v18" />
+    <path d="M14 8v7" />
+    <path d="M18 5v13" />
+    <path d="M22 10v3" />
   {/if}
 </svg>
