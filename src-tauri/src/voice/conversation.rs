@@ -40,9 +40,8 @@ use crate::voice::stt::{transcribe, SttResult};
 /// only used when the frontend omits it. Keep low enough that an unconfigured
 /// install still feels responsive.
 const SEGMENT_END_SILENCE_MS: u64 = 1500;
-/// Lowered from 600 ms because energy-VAD with hysteresis still occasionally
-/// produces short bursts (e.g. "嗯", "是"). 300 ms is long enough to filter
-/// stray clicks/coughs but short enough that brief replies still flush.
+/// Minimum speech for the Stop flush to send buffered audio to STT. The
+/// Listening silence flush deliberately ignores it (see `should_flush`).
 const MIN_UTTERANCE_MS: u64 = 300;
 const MAX_UTTERANCE_S: f32 = 30.0;
 /// Listening floor RMS (normalized to [0, 1]). ~ -36 dBFS. Tuned for typical
@@ -426,10 +425,7 @@ fn worker_loop(
                                 silence_run_ms += chunk_ms;
 
                                 let total_secs = utter_buf.len() as f32 / utter_sr.max(1) as f32;
-                                if (silence_run_ms >= pause_tolerance_ms
-                                    && accumulated_speech_ms >= MIN_UTTERANCE_MS)
-                                    || total_secs >= MAX_UTTERANCE_S
-                                {
+                                if should_flush(silence_run_ms, pause_tolerance_ms, total_secs) {
                                     if listening_speech_active {
                                         eprintln!(
                                             "[conv] speech ended: duration={}ms peak_rms={:.4}",
@@ -735,6 +731,15 @@ fn downmix_to_mono(samples: &[i16], channels: u16) -> Vec<i16> {
     out
 }
 
+/// Whether an utterance in progress should go to STT. No minimum-speech check:
+/// a quiet speaker can register under MIN_UTTERANCE_MS of bursts, and with
+/// speech > 0 the idle deadline is paused, so requiring it left the session
+/// stuck until noise or MAX_UTTERANCE_S. Noise flushes come back as empty STT
+/// results, which MAX_CONSECUTIVE_EMPTY_STT already bounds.
+fn should_flush(silence_run_ms: u64, pause_tolerance_ms: u64, total_secs: f32) -> bool {
+    silence_run_ms >= pause_tolerance_ms || total_secs >= MAX_UTTERANCE_S
+}
+
 fn rms_i16(samples: &[i16]) -> f32 {
     if samples.is_empty() {
         return 0.0;
@@ -747,4 +752,25 @@ fn rms_i16(samples: &[i16]) -> f32 {
         })
         .sum();
     (sum_sq / samples.len() as f64).sqrt() as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_quiet_speech_flushes_after_pause() {
+        // 264ms of bursts (< MIN_UTTERANCE_MS), then a full pause: must flush.
+        assert!(should_flush(2500, 2500, 3.0));
+    }
+
+    #[test]
+    fn no_flush_before_pause_tolerance() {
+        assert!(!should_flush(2400, 2500, 3.0));
+    }
+
+    #[test]
+    fn flushes_at_max_utterance_length() {
+        assert!(should_flush(0, 2500, MAX_UTTERANCE_S));
+    }
 }

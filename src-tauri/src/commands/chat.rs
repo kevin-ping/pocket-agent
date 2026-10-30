@@ -509,8 +509,19 @@ fn emotion_to_prosody(emotion: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// edge-tts talks to Microsoft's cloud service, so a single socket timeout is
+/// common; retry once before dropping the sentence.
 fn generate_tts_to(text: &str, path: &str, voice: &str, rate: &str, volume: &str) -> bool {
     if text.trim().is_empty() { return false; }
+    if generate_tts_once(text, path, voice, rate, volume) {
+        return true;
+    }
+    eprintln!("[TTS] failed, retrying in 1s...");
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    generate_tts_once(text, path, voice, rate, volume)
+}
+
+fn generate_tts_once(text: &str, path: &str, voice: &str, rate: &str, volume: &str) -> bool {
     eprintln!("[TTS] generating for {} chars voice={} rate={} vol={}...", text.len(), voice, rate, volume);
     let rate_arg = format!("--rate={}", rate);
     let volume_arg = format!("--volume={}", volume);
@@ -1483,6 +1494,20 @@ mod tests {
             assert_eq!(Path::new(out).exists(), expect, "{:?}", bin);
             let _ = std::fs::remove_file(out);
         }
+
+        // Flaky edge-tts: first run fails (like a socket timeout), second succeeds.
+        let runs = dir.join("runs");
+        let flaky = dir.join("flaky.sh");
+        std::fs::write(&flaky, format!(
+            "#!/bin/sh\necho x >> \"{}\"\nwhile [ \"$1\" != \"--write-media\" ]; do shift; done\n: > \"$2\"\n[ $(wc -l < \"{}\") -ge 2 ] || exit 1\nprintf 'ID3' > \"$2\"\n",
+            runs.display(), runs.display()
+        )).unwrap();
+        std::fs::set_permissions(&flaky, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("EDGE_TTS_BIN", &flaky);
+        assert!(generate_tts_to("hi", out, "en-US-AriaNeural", "+0%", "+0%"));
+        assert!(Path::new(out).exists());
+        assert_eq!(std::fs::read_to_string(&runs).unwrap().lines().count(), 2);
+        let _ = std::fs::remove_file(out);
         std::env::remove_var("EDGE_TTS_BIN");
         let _ = std::fs::remove_dir_all(&dir);
     }
