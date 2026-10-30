@@ -173,6 +173,7 @@ Pocket Agent is a local desktop client. Please understand these boundaries:
 - **API key handling** — `API_SERVER_KEY` is stored in `.env` (plaintext on disk). Never commit `.env` to version control.
 - **Global input monitoring** — the hotkey listener uses macOS Accessibility APIs (CGEventTap). This grants system-level input monitoring capability. Only run builds you trust.
 - **Microphone access** — audio is captured via CoreAudio and processed **entirely locally** by faster-whisper. No audio data leaves your machine for STT.
+- **Wake engine on macOS older than 13.4** — the stock sherpa-onnx wheel cannot load there, so on first launch PA downloads a compatible build (sherpa-onnx 1.12.26 + onnxruntime 1.19.2) from this project's GitHub Release `sherpa-compat-1.12.26-ort1.19.2` over HTTPS. The archive's SHA256 is pinned in the source and checked before extraction; only the two expected library files are installed into PA's venv. The download runs in the background: the rest of PA starts normally, and wake word / voiceprint become available once the voice service reloads the new build while idle. Newer macOS versions never make this request. The build is reproducible with `scripts/build-sherpa-compat.sh`.
 - **Avatar** — the mesh avatar is bundled with the app and loaded from the app's own origin; it makes no network requests. A custom `.mavatar` is picked from a local file and stored in the settings database (zip header and 10 MB limit checked).
 - **Conversation persistence** — sessions are stored in the configured gateway (Hermes: `~/.hermes/sessions/`, OpenClaw: `~/.openclaw/agents/<agent>/sessions/`). These contain full conversation text. Consider disk encryption.
 
@@ -325,6 +326,8 @@ Configured in **Settings → Voice** (not via `.env`):
 - **Speaker threshold** (`wake_word_threshold`) — how close the voice must match the enrolled voiceprint
 
 Voiceprint enrollment and the KWS model download are driven from the same settings page; they call the resident voice service's `/speaker/*` and `/kws/*` endpoints.
+
+English words missing from the model's pronunciation dictionary are split into dictionary words for pronunciation only (for example `hey mimikyu` is pronounced as `hey mimi kyu`); the saved phrase is unchanged. If wake cannot start (empty or unpronounceable phrase, missing voiceprint, unsupported macOS), the other settings are still saved and the settings page explains what to fix.
 
 ### Continuous Conversation
 

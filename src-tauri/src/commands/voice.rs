@@ -376,6 +376,9 @@ pub(crate) fn check_silero_vad_samples(samples: &[i16], sample_rate: u32) -> Opt
         wav.extend_from_slice(&s.to_le_bytes());
     }
 
+    // Never wait out a reload here: the barge-in gate cannot stall for it.
+    let _txn = crate::voice::stt::try_voice_txn()?;
+
     // 800ms: this call blocks the conversation worker thread during the
     // barge-in confirmation gate, so a slow stt-server must not stall the
     // interrupt. Past the deadline the caller applies its own failure policy.
@@ -577,20 +580,25 @@ pub async fn stop_enroll_recording(
 }
 
 #[tauri::command]
-pub fn enroll_speaker(
+pub async fn enroll_speaker(
     name: String,
     audio_path: String,
 ) -> Result<crate::voice::sherpa_wake::EnrollResult, String> {
-    crate::voice::sherpa_wake::enroll_speaker(&name, &audio_path)
+    // Off the main thread: the request may wait out a voice-engine reload.
+    tokio::task::spawn_blocking(move || crate::voice::sherpa_wake::enroll_speaker(&name, &audio_path))
+        .await
+        .map_err(|e| format!("enroll task failed: {e}"))?
 }
 
 
 #[tauri::command]
-pub fn train_speaker(
+pub async fn train_speaker(
     name: String,
     audio_path: String,
 ) -> Result<crate::voice::sherpa_wake::EnrollResult, String> {
-    crate::voice::sherpa_wake::train_speaker(&name, &audio_path)
+    tokio::task::spawn_blocking(move || crate::voice::sherpa_wake::train_speaker(&name, &audio_path))
+        .await
+        .map_err(|e| format!("train task failed: {e}"))?
 }
 
 
@@ -610,11 +618,13 @@ pub fn remove_wake_word(name: String, word: String) -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn verify_speaker(
+pub async fn verify_speaker(
     audio_path: String,
     threshold: Option<f32>,
 ) -> Result<crate::voice::sherpa_wake::VerifyResult, String> {
-    crate::voice::sherpa_wake::verify_speaker(&audio_path, threshold)
+    tokio::task::spawn_blocking(move || crate::voice::sherpa_wake::verify_speaker(&audio_path, threshold))
+        .await
+        .map_err(|e| format!("verify task failed: {e}"))?
 }
 
 #[tauri::command]

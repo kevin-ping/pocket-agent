@@ -326,9 +326,23 @@ fn maybe_emit_audio_done(app: &AppHandle, generation: u64) {
     }
 }
 
-/// Get edge-tts binary path from env var, fallback to "edge-tts"
+/// edge-tts binary: EDGE_TTS_BIN, else the PA venv's copy, else PATH. A PATH
+/// lookup can hit an outdated user-site install that Microsoft rejects with 403.
 fn edge_tts_bin() -> String {
-    std::env::var("EDGE_TTS_BIN").unwrap_or_else(|_| "edge-tts".to_string())
+    pick_edge_tts_bin(
+        std::env::var("EDGE_TTS_BIN").ok(),
+        &crate::voice::venv::venv_root().join("bin").join("edge-tts"),
+    )
+}
+
+fn pick_edge_tts_bin(env_override: Option<String>, venv_bin: &std::path::Path) -> String {
+    if let Some(bin) = env_override.filter(|b| !b.trim().is_empty()) {
+        return bin;
+    }
+    if venv_bin.is_file() {
+        return venv_bin.to_string_lossy().into_owned();
+    }
+    "edge-tts".to_string()
 }
 
 /// Detect language from text content using Unicode character ranges.
@@ -1385,6 +1399,17 @@ fn speakable_inline(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edge_tts_prefers_override_then_venv_then_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let venv_bin = dir.path().join("edge-tts");
+        assert_eq!(pick_edge_tts_bin(None, &venv_bin), "edge-tts");
+        std::fs::write(&venv_bin, "").unwrap();
+        assert_eq!(pick_edge_tts_bin(None, &venv_bin), venv_bin.to_string_lossy());
+        assert_eq!(pick_edge_tts_bin(Some(" ".into()), &venv_bin), venv_bin.to_string_lossy());
+        assert_eq!(pick_edge_tts_bin(Some("/opt/edge-tts".into()), &venv_bin), "/opt/edge-tts");
+    }
 
     #[test]
     fn bridge_session_keys_are_namespaced() {

@@ -32,6 +32,7 @@ export interface AppSettings {
   wake_kws_threshold: number;
   wake_owner_only: boolean;
   speaker_verification_enabled: boolean;
+  conversation_owner_only: boolean;
   last_enrolled_speaker: string;
   mesh_avatar_enabled: boolean;
   mesh_avatar_scale: number;
@@ -80,6 +81,7 @@ export const SETTINGS_DEFAULTS: AppSettings = {
   wake_kws_threshold: 0.25,
   wake_owner_only: true,
   speaker_verification_enabled: false,
+  conversation_owner_only: false,
   last_enrolled_speaker: '',
   mesh_avatar_enabled: true,
   mesh_avatar_scale: 1,

@@ -1,15 +1,100 @@
 use std::path::PathBuf;
 use std::process::{Command, Stdio, Child};
 use std::io::BufRead;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
 use tauri::{Emitter, Manager};
 
 /// Store the STT server child process so we can kill it when PA exits.
 static STT_CHILD: Mutex<Option<Child>> = Mutex::new(None);
 static APP_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Bumped on every spawn; a health probe for an older process stops quietly.
+static SERVER_GEN: AtomicU64 = AtomicU64::new(0);
 
 pub fn is_app_ready() -> bool {
     APP_READY.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// First healthy server shows the main window and emits `app-ready`; later
+/// ones (a reload) do not replay the start sequence.
+fn mark_app_ready(notify: impl FnOnce()) {
+    if !APP_READY.swap(true, Ordering::AcqRel) {
+        notify();
+    }
+}
+
+fn show_main_window(handle: Option<&tauri::AppHandle>, source: &str) {
+    if let Some(h) = handle {
+        if let Some(window) = h.get_webview_window("main") {
+            let _ = window.show();
+            eprintln!("[stt] window shown ({source})");
+        }
+        let _ = h.emit("app-ready", ());
+    }
+}
+
+/// Requests in flight against the resident server, and whether a reload is
+/// swapping the server (and its token) out from under them.
+struct VoiceGate {
+    active: u32,
+    reloading: bool,
+}
+
+static VOICE_GATE: Mutex<VoiceGate> = Mutex::new(VoiceGate { active: 0, reloading: false });
+static VOICE_GATE_CV: Condvar = Condvar::new();
+
+fn voice_gate() -> std::sync::MutexGuard<'static, VoiceGate> {
+    VOICE_GATE.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Lease on the resident server for one request. A reload waits until no
+/// lease is held; a new lease waits until the reloaded server is healthy.
+pub struct VoiceTxn(());
+
+pub fn voice_txn() -> VoiceTxn {
+    let mut gate = VOICE_GATE_CV
+        .wait_while(voice_gate(), |g| g.reloading)
+        .unwrap_or_else(|p| p.into_inner());
+    gate.active += 1;
+    VoiceTxn(())
+}
+
+/// Like `voice_txn`, but `None` instead of waiting while a reload is running.
+pub fn try_voice_txn() -> Option<VoiceTxn> {
+    let mut gate = voice_gate();
+    if gate.reloading {
+        return None;
+    }
+    gate.active += 1;
+    Some(VoiceTxn(()))
+}
+
+impl Drop for VoiceTxn {
+    fn drop(&mut self) {
+        voice_gate().active -= 1;
+        VOICE_GATE_CV.notify_all();
+    }
+}
+
+/// Held for the whole reload; dropping it lets waiting requests through.
+struct ReloadLease(());
+
+impl Drop for ReloadLease {
+    fn drop(&mut self) {
+        voice_gate().reloading = false;
+        VOICE_GATE_CV.notify_all();
+    }
+}
+
+/// Claim the server for a reload only if no request is in flight and `idle`
+/// still holds, checked under the same lock new requests take.
+fn try_begin_reload(idle: impl Fn() -> bool) -> Option<ReloadLease> {
+    let mut gate = voice_gate();
+    if gate.active > 0 || gate.reloading || !idle() {
+        return None;
+    }
+    gate.reloading = true;
+    Some(ReloadLease(()))
 }
 
 const STT_SERVER_URL: &str = "http://127.0.0.1:8651";
@@ -152,6 +237,7 @@ fn transcribe_subprocess(wav_path: &str) -> Result<SttResult, String> {
 
 /// Main entry: try HTTP first, retry once on transient failure, then fallback to subprocess
 pub fn transcribe(wav_path: &str) -> Result<SttResult, String> {
+    let _txn = voice_txn();
     // Step 1: Try resident HTTP server (fast, model already loaded)
     match transcribe_http(wav_path) {
         Ok(result) => {
@@ -193,14 +279,7 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
 
     if running {
         eprintln!("[stt] resident server already running on :8651");
-        APP_READY.store(true, std::sync::atomic::Ordering::Release);
-        if let Some(h) = app_handle.as_ref() {
-            if let Some(window) = h.get_webview_window("main") {
-                let _ = window.show();
-                eprintln!("[stt] window shown (existing server)");
-            }
-            let _ = h.emit("app-ready", ());
-        }
+        mark_app_ready(|| show_main_window(app_handle.as_ref(), "existing server"));
         return;
     }
 
@@ -257,6 +336,7 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
     {
         Ok(child) => {
             let pid = child.id();
+            let generation = SERVER_GEN.fetch_add(1, Ordering::AcqRel) + 1;
             if let Ok(mut guard) = STT_CHILD.lock() {
                 *guard = Some(child);
             }
@@ -285,20 +365,20 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
                     let probe_deadline_s: u64 = 30;
                     let deadline = std::time::Instant::now()
                         + std::time::Duration::from_secs(probe_deadline_s);
-                    while std::time::Instant::now() < deadline {
-                        if client.get(&url).send().map(|r| r.status().is_success()).unwrap_or(false) {
+                    let outcome = probe_health(
+                        generation,
+                        deadline,
+                        std::time::Duration::from_millis(500),
+                        || client.get(&url).send().map(|r| r.status().is_success()).unwrap_or(false),
+                    );
+                    match outcome {
+                        Probe::Healthy => {
                             eprintln!("[stt] resident server healthy on :8651");
-            APP_READY.store(true, std::sync::atomic::Ordering::Release);
-                            if let Some(h) = probe_handle.as_ref() {
-                                if let Some(window) = h.get_webview_window("main") {
-                                    let _ = window.show();
-                                    eprintln!("[stt] window shown (new server)");
-                                }
-                                let _ = h.emit("app-ready", ());
-                            }
+                            mark_app_ready(|| show_main_window(probe_handle.as_ref(), "new server"));
                             return;
                         }
-                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        Probe::Superseded => return,
+                        Probe::TimedOut => {}
                     }
                     eprintln!(
                         "[stt] WARNING: resident server did not respond on :8651 within {}s.\n\
@@ -315,6 +395,95 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum Probe {
+    Healthy,
+    Superseded,
+    TimedOut,
+}
+
+/// Poll `healthy` until the deadline, giving up as soon as a newer server
+/// process (a reload) owns the port.
+fn probe_health(
+    generation: u64,
+    deadline: std::time::Instant,
+    interval: std::time::Duration,
+    healthy: impl Fn() -> bool,
+) -> Probe {
+    while std::time::Instant::now() < deadline {
+        if SERVER_GEN.load(Ordering::Acquire) != generation {
+            return Probe::Superseded;
+        }
+        if healthy() {
+            return Probe::Healthy;
+        }
+        std::thread::sleep(interval);
+    }
+    if SERVER_GEN.load(Ordering::Acquire) != generation {
+        Probe::Superseded
+    } else {
+        Probe::TimedOut
+    }
+}
+
+/// No microphone owner, conversation or wake listener — nothing is waiting on
+/// the resident server. In-flight requests are tracked by `VoiceTxn`.
+fn voice_idle() -> bool {
+    crate::voice::record::current_owner() == crate::voice::record::OWNER_NONE
+        && !crate::voice::conversation::is_active()
+        && !crate::voice::sherpa_wake::is_wake_active()
+}
+
+fn server_idle() -> bool {
+    voice_idle() && voice_gate().active == 0
+}
+
+/// Restart the resident server once voice has been idle for a while, so it
+/// re-imports native modules replaced on disk. Requests started meanwhile wait
+/// for the new server; `voice-engine-reloaded` follows once it is healthy. A
+/// server PA did not spawn is left alone: starting a second one would
+/// overwrite its token (see stt-server token file).
+pub fn restart_when_idle(app: tauri::AppHandle) {
+    const QUIET_SECS: u32 = 10;
+    if !STT_CHILD.lock().map(|g| g.is_some()).unwrap_or(false) {
+        eprintln!("[stt] server not owned by this PA; restart PA to load the new voice engine");
+        return;
+    }
+    let mut quiet = 0;
+    let _lease = loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        quiet = if server_idle() { quiet + 1 } else { 0 };
+        if quiet >= QUIET_SECS {
+            match try_begin_reload(voice_idle) {
+                Some(lease) => break lease,
+                None => quiet = 0,
+            }
+        }
+    };
+    eprintln!("[stt] voice idle; restarting STT server to load the new voice engine");
+    shutdown_stt_server();
+    // Keep the handle: if the first server never got healthy, this one shows
+    // the main window instead of the superseded probe.
+    ensure_stt_server(Some(app.clone()));
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if client.get(format!("{}/health", STT_SERVER_URL)).send().map(|r| r.status().is_success()).unwrap_or(false) {
+            eprintln!("[stt] STT server reloaded");
+            let _ = app.emit("voice-engine-reloaded", ());
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    eprintln!("[stt] WARNING: STT server did not come back within 30s after reload");
+}
+
 /// Kill the resident STT server. Called when PA exits.
 pub fn shutdown_stt_server() {
     if let Ok(mut guard) = STT_CHILD.lock() {
@@ -324,5 +493,89 @@ pub fn shutdown_stt_server() {
             let _ = child.wait(); // reap zombie
         }
         *guard = None;
+    }
+}
+
+/// Serializes tests that touch the process-wide voice gate.
+#[cfg(test)]
+pub(crate) fn test_serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Puts the gate in the reloading state until the returned lease drops.
+#[cfg(test)]
+pub(crate) fn hold_reload_for_test() -> impl Drop {
+    try_begin_reload(|| true).expect("gate idle")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn reload_waits_for_requests_in_flight() {
+        let _serial = test_serial();
+        let txn = voice_txn();
+        assert!(try_begin_reload(|| true).is_none(), "a /transcribe in flight blocks the reload");
+        drop(txn);
+        assert!(try_begin_reload(|| true).is_some());
+    }
+
+    #[test]
+    fn reload_rechecks_idle_under_the_gate() {
+        let _serial = test_serial();
+        // A conversation started after the last quiet sample.
+        assert!(try_begin_reload(|| false).is_none());
+        assert!(!voice_gate().reloading);
+    }
+
+    #[test]
+    fn requests_started_during_reload_wait_for_the_new_server() {
+        let _serial = test_serial();
+        let lease = try_begin_reload(|| true).expect("idle");
+        assert!(try_voice_txn().is_none(), "VAD does not wait out a reload");
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _txn = voice_txn();
+            tx.send(()).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "no request reaches the old server");
+        drop(lease);
+        rx.recv_timeout(Duration::from_secs(2)).expect("released once the server is back");
+        worker.join().unwrap();
+        assert_eq!(voice_gate().active, 0);
+    }
+
+    #[test]
+    fn reload_before_first_health_still_shows_the_window_once() {
+        let _serial = test_serial();
+        APP_READY.store(false, Ordering::Release);
+        // First server spawned; compat install finishes before it is healthy.
+        let first = SERVER_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+        let (gen_tx, gen_rx) = mpsc::channel();
+        let old_probe = std::thread::spawn(move || {
+            let outcome = probe_health(first, Instant::now() + Duration::from_secs(2), Duration::from_millis(10), || {
+                let _ = gen_tx.send(());
+                false
+            });
+            if outcome == Probe::Healthy {
+                mark_app_ready(|| panic!("old probe must not report ready"));
+            }
+            outcome
+        });
+        gen_rx.recv().unwrap();
+        // Reload spawns a second server that comes up after the old probe gives up.
+        let second = SERVER_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+        assert_eq!(old_probe.join().unwrap(), Probe::Superseded);
+
+        let mut shown = 0;
+        assert_eq!(probe_health(second, Instant::now() + Duration::from_secs(1), Duration::from_millis(10), || true), Probe::Healthy);
+        mark_app_ready(|| shown += 1);
+        mark_app_ready(|| shown += 1);
+        assert_eq!(shown, 1, "app-ready fires for the first healthy server only");
+        assert!(is_app_ready());
     }
 }

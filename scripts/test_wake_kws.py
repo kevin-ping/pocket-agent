@@ -6,7 +6,8 @@ import unittest
 from unittest.mock import Mock, patch
 import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src-tauri/resources'))
-from wake_kws import WakeKws, validate_config
+import wake_kws
+from wake_kws import WakeError, WakeKws, pronounceable_text, split_word, validate_config
 
 
 class FakeStream:
@@ -98,6 +99,89 @@ class WakeTests(unittest.TestCase):
     def test_sessions_are_bounded(self):
         for _ in range(4): self.kws.create(self.config())
         with self.assertRaises(ValueError): self.kws.create(self.config())
+
+
+    def test_error_codes(self):
+        cases = [(dict(phrase='  '), 'wake_phrase_empty'), (dict(phrase='x'), 'wake_phrase_invalid'),
+                 (dict(speaker=''), 'voiceprint_missing')]
+        for extra, code in cases:
+            c = self.config(); c.update(extra)
+            with self.subTest(code=code), self.assertRaises(WakeError) as cm: validate_config(c)
+            self.assertEqual(cm.exception.code, code)
+        with self.assertRaises(WakeError) as cm:
+            self.kws.create(dict(phrase='桃子桃子', owner_only=True, speaker='Other'))
+        self.assertEqual(cm.exception.code, 'voiceprint_missing')
+
+
+class EngineTests(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(wake_kws._engine.clear)
+        wake_kws._engine.clear()
+
+    def fail_import(self, mac_version):
+        real_import = __import__
+        def fake(name, *a, **k):
+            if name == 'sherpa_onnx': raise ImportError('dlopen: Symbol not found: __ZNSt3__18to_chars')
+            return real_import(name, *a, **k)
+        return patch('builtins.__import__', fake), patch('platform.mac_ver', return_value=(mac_version, '', ''))
+
+    def test_old_macos_reports_versions_without_raw_error(self):
+        imp, ver = self.fail_import('12.7.6')
+        with imp, ver, patch('sys.stderr'):
+            status = WakeKws(tempfile.gettempdir(), tempfile.gettempdir(), Mock()).status()
+        self.assertFalse(status['ready'])
+        self.assertEqual(status['error'], dict(code='wake_engine_unsupported_os',
+                                               params=dict(current='12.7.6', required='13.4')))
+        self.assertNotIn('dlopen', repr(status))
+
+    def test_new_macos_load_failure_is_generic(self):
+        imp, ver = self.fail_import('14.5')
+        with imp, ver, patch('sys.stderr'):
+            err = wake_kws.engine_error()
+        self.assertEqual((err.code, err.status), ('wake_engine_unavailable', 503))
+
+
+class SplitTests(unittest.TestCase):
+    WORDS = frozenset({'HEY', 'MIMI', 'KYU', 'MI', 'KU', 'KEVIN', 'BOT', 'Z', 'ORB', 'LAX',
+                       'A', 'B', 'AB', 'ABC', 'BCD', 'D'})
+
+    def test_dictionary_words_are_kept(self):
+        self.assertEqual(pronounceable_text('hey kevin', self.WORDS), 'HEY KEVIN')
+
+    def test_unknown_word_is_split(self):
+        self.assertEqual(split_word('MIMIKYU', self.WORDS), ['MIMI', 'KYU'])
+        self.assertEqual(pronounceable_text('hey mimikyu', self.WORDS), 'HEY MIMI KYU')
+        self.assertEqual(pronounceable_text('嘿 kevinbot', self.WORDS), '嘿 KEVIN BOT')
+
+    def test_single_letter_pieces_are_avoided(self):
+        # ABCDE+F is shorter but ends in a letter name; AB+CD+EF has none.
+        words = frozenset({'ABCDE', 'F', 'AB', 'CD', 'EF'})
+        self.assertEqual(split_word('ABCDEF', words), ['AB', 'CD', 'EF'])
+        # With no letter-free split, the fewest pieces wins.
+        self.assertEqual(split_word('ZORBLAX', self.WORDS), ['Z', 'ORB', 'LAX'])
+
+    def test_unsplittable_word_names_the_word(self):
+        self.assertIsNone(split_word('QQQ', self.WORDS))
+        with self.assertRaises(WakeError) as cm: pronounceable_text('hey qqq', self.WORDS)
+        self.assertEqual((cm.exception.code, cm.exception.params), ('wake_phrase_unpronounceable', dict(word='qqq')))
+
+    def test_saved_phrase_and_label_keep_original_spelling(self):
+        lexicon = Path(tempfile.mkdtemp()) / 'en.phone'
+        lexicon.write_text('HEY HH EY1\nMIMI M IY1 M IY0\nKYU K Y UW1\n', encoding='utf-8')
+        kws = WakeKws(tempfile.gettempdir(), tempfile.gettempdir(), Mock())
+        kws.path = lexicon.parent
+        seen = {}
+        class FakeSherpa:
+            @staticmethod
+            def text2token(texts, tokens, **kw):
+                seen['text'] = texts[0]; return [['HH', 'EY1']]
+            class KeywordSpotter:
+                def __init__(self, keywords_file, **kw): seen['keyword'] = Path(keywords_file).read_text()
+        with patch.object(wake_kws, 'FILES', ['en.phone'] * 3), patch.dict(sys.modules, sherpa_onnx=FakeSherpa), \
+                patch.object(wake_kws, 'engine_error', return_value=None):
+            kws._model(dict(phrase='hey mimikyu', kws_threshold=0.25))
+        self.assertEqual(seen['text'], 'HEY MIMI KYU')
+        self.assertTrue(seen['keyword'].strip().endswith('@hey_mimikyu'))
 
 
 if __name__ == '__main__': unittest.main()

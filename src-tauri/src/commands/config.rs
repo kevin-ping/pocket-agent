@@ -152,6 +152,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub speaker_verification_enabled: bool,
     #[serde(default)]
+    pub conversation_owner_only: bool,
+    #[serde(default)]
     pub last_enrolled_speaker: String,
     #[serde(default = "default_true")]
     pub mesh_avatar_enabled: bool,
@@ -255,6 +257,7 @@ impl Default for AppConfig {
             wake_kws_threshold: default_kws_threshold(),
             wake_owner_only: true,
             speaker_verification_enabled: false,
+            conversation_owner_only: false,
             last_enrolled_speaker: String::new(),
             mesh_avatar_enabled: true,
             mesh_avatar_scale: default_mesh_avatar_scale(),
@@ -302,6 +305,7 @@ pub(crate) fn load_legacy_config(app: &AppHandle) -> AppConfig {
         wake_kws_threshold: default_kws_threshold(),
         wake_owner_only: true,
         speaker_verification_enabled: store.get("speaker_verification_enabled").and_then(|v| v.as_bool()).unwrap_or(default.speaker_verification_enabled),
+        conversation_owner_only: default.conversation_owner_only,
         last_enrolled_speaker: store.get("last_enrolled_speaker").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
         mesh_avatar_enabled: default.mesh_avatar_enabled,
         mesh_avatar_scale: default.mesh_avatar_scale,
@@ -358,51 +362,74 @@ fn save_config_blocking(app: AppHandle, config: AppConfig) -> Result<SaveConfigR
     static APPLY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = APPLY_LOCK.lock().map_err(|_| "settings apply lock poisoned")?;
     let old = settings_repository::load()?;
-    let saved = settings_repository::save(&config)?;
-
-    let apply_result = (|| -> Result<(), String> {
-        if old.hotkey_code != saved.config.hotkey_code {
-            crate::voice::hotkey::update_hotkey(saved.config.hotkey_code);
-        }
-        if old.double_click_to_record != saved.config.double_click_to_record {
-            crate::voice::hotkey::set_double_click_mode(saved.config.double_click_to_record);
-        }
-        let wake_changed = old.wake_word_enabled != saved.config.wake_word_enabled
-            || (old.wake_word_threshold - saved.config.wake_word_threshold).abs() > f32::EPSILON
-            || old.last_enrolled_speaker != saved.config.last_enrolled_speaker
-            || old.wake_phrase != saved.config.wake_phrase
-            || old.wake_kws_threshold != saved.config.wake_kws_threshold
-            || old.wake_owner_only != saved.config.wake_owner_only;
-        if wake_changed {
+    let saved = save_then_apply(
+        &old,
+        &config,
+        settings_repository::save,
+        |new| {
+            if old.hotkey_code != new.hotkey_code {
+                crate::voice::hotkey::update_hotkey(new.hotkey_code);
+            }
+            if old.double_click_to_record != new.double_click_to_record {
+                crate::voice::hotkey::set_double_click_mode(new.double_click_to_record);
+            }
+            Ok(())
+        },
+        || {
+            crate::voice::hotkey::update_hotkey(old.hotkey_code);
+            crate::voice::hotkey::set_double_click_mode(old.double_click_to_record);
+        },
+        |new| {
             crate::commands::voice::stop_wake_word_listening()?;
-            if saved.config.wake_word_enabled {
+            if new.wake_word_enabled {
                 crate::voice::sherpa_wake::start_wake_listener(
                     app.clone(),
-                    saved.config.wake_word_threshold,
-                    Some(saved.config.last_enrolled_speaker.clone()),
+                    new.wake_word_threshold,
+                    Some(new.last_enrolled_speaker.clone()),
                 )?;
             }
-        }
-        Ok(())
-    })();
-
-    if let Err(error) = apply_result {
-        let _ = settings_repository::save(&old);
-        crate::voice::hotkey::update_hotkey(old.hotkey_code);
-        crate::voice::hotkey::set_double_click_mode(old.double_click_to_record);
-        let _ = crate::commands::voice::stop_wake_word_listening();
-        if old.wake_word_enabled {
-            let _ = crate::voice::sherpa_wake::start_wake_listener(
-                app.clone(),
-                old.wake_word_threshold,
-                Some(old.last_enrolled_speaker.clone()),
-            );
-        }
-        return Err(format!("apply settings failed; changes rolled back: {error}"));
-    }
+            Ok(())
+        },
+    )?;
 
     app.emit("settings-changed", serde_json::json!({ "revision": saved.revision }))
         .map_err(|e| e.to_string())?;
+    Ok(saved)
+}
+
+fn wake_changed(old: &AppConfig, new: &AppConfig) -> bool {
+    old.wake_word_enabled != new.wake_word_enabled
+        || (old.wake_word_threshold - new.wake_word_threshold).abs() > f32::EPSILON
+        || old.last_enrolled_speaker != new.last_enrolled_speaker
+        || old.wake_phrase != new.wake_phrase
+        || old.wake_kws_threshold != new.wake_kws_threshold
+        || old.wake_owner_only != new.wake_owner_only
+}
+
+/// Persist `config`, then apply it. A failed non-wake step restores `old` and
+/// fails the save. A failed wake restart does not: everything stays saved (wake
+/// settings as entered, listener off) and the reason is returned in
+/// `wake_error`, so wake problems never block unrelated settings.
+fn save_then_apply(
+    old: &AppConfig,
+    config: &AppConfig,
+    save: impl Fn(&AppConfig) -> Result<SaveConfigResponse, String>,
+    apply_other: impl FnOnce(&AppConfig) -> Result<(), String>,
+    rollback_other: impl FnOnce(),
+    restart_wake: impl FnOnce(&AppConfig) -> Result<(), String>,
+) -> Result<SaveConfigResponse, String> {
+    let mut saved = save(config)?;
+    if let Err(error) = apply_other(&saved.config) {
+        let _ = save(old);
+        rollback_other();
+        return Err(format!("apply settings failed; changes rolled back: {error}"));
+    }
+    if wake_changed(old, &saved.config) {
+        if let Err(error) = restart_wake(&saved.config) {
+            eprintln!("[settings] saved; wake listener not started: {error}");
+            saved.wake_error = Some(error);
+        }
+    }
     Ok(saved)
 }
 
@@ -507,5 +534,78 @@ mod tests {
         let hint = build_voice_hint("zh-CN-XiaoxiaoNeural", "", "", "zh", "");
         assert!(!hint.contains("[CMD:"));
         assert!(!hint.contains("LOCAL COMMAND EXECUTION"));
+    }
+
+    /// Runs `save_then_apply` against an in-memory store; returns the result and
+    /// what ended up stored.
+    fn run_save(
+        old: &AppConfig,
+        new: &AppConfig,
+        apply_other: Result<(), String>,
+        restart_wake: Result<(), String>,
+    ) -> (Result<SaveConfigResponse, String>, AppConfig, bool, bool) {
+        let stored = std::cell::RefCell::new(old.clone());
+        let (mut rolled_back, mut wake_called) = (false, false);
+        let result = save_then_apply(
+            old,
+            new,
+            |c| {
+                *stored.borrow_mut() = c.clone();
+                Ok(SaveConfigResponse { config: c.clone(), revision: 1, wake_error: None })
+            },
+            |_| apply_other,
+            || rolled_back = true,
+            |_| {
+                wake_called = true;
+                restart_wake
+            },
+        );
+        (result, stored.into_inner(), rolled_back, wake_called)
+    }
+
+    fn wake_on(phrase: &str) -> AppConfig {
+        AppConfig { wake_word_enabled: true, wake_phrase: phrase.into(), ..AppConfig::default() }
+    }
+
+    #[test]
+    fn wake_failure_keeps_unrelated_settings_saved() {
+        let old = wake_on("hey there");
+        let mut new = wake_on("hey mimikyu");
+        new.mesh_avatar_enabled = !old.mesh_avatar_enabled;
+        for code in ["wake_phrase_unpronounceable", "wake_engine_unsupported_os"] {
+            let err = crate::voice::sherpa_wake::wake_error(code, serde_json::json!({}));
+            let (result, stored, rolled_back, _) = run_save(&old, &new, Ok(()), Err(err.clone()));
+            let saved = result.expect("save must succeed");
+            assert_eq!(saved.wake_error.as_deref(), Some(err.as_str()));
+            assert_eq!(stored.mesh_avatar_enabled, new.mesh_avatar_enabled);
+            // Wake settings stay as entered and are not switched off.
+            assert!(stored.wake_word_enabled);
+            assert_eq!(stored.wake_phrase, "hey mimikyu");
+            assert!(!rolled_back);
+        }
+    }
+
+    #[test]
+    fn non_wake_apply_failure_still_rolls_back_everything() {
+        let old = wake_on("hey there");
+        let mut new = old.clone();
+        new.hotkey_code = old.hotkey_code + 1;
+        new.wake_phrase = "hey mimikyu".into();
+        let (result, stored, rolled_back, wake_called) =
+            run_save(&old, &new, Err("hotkey".into()), Ok(()));
+        assert!(result.unwrap_err().contains("rolled back"));
+        assert_eq!(stored.hotkey_code, old.hotkey_code);
+        assert_eq!(stored.wake_phrase, old.wake_phrase);
+        assert!(rolled_back && !wake_called);
+    }
+
+    #[test]
+    fn unchanged_wake_settings_do_not_restart_wake() {
+        let old = wake_on("hey there");
+        let mut new = old.clone();
+        new.mesh_avatar_enabled = !old.mesh_avatar_enabled;
+        let (result, _, _, wake_called) = run_save(&old, &new, Ok(()), Err("unused".into()));
+        assert!(result.unwrap().wake_error.is_none());
+        assert!(!wake_called);
     }
 }

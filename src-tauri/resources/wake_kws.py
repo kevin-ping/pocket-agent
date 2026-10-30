@@ -1,10 +1,13 @@
 """Local keyword spotting. No transcription, no network access during detection."""
 from collections import OrderedDict
+from functools import lru_cache
 from pathlib import Path
 import hashlib
 import math
+import platform
 import re
 import shutil
+import sys
 import tarfile
 import tempfile
 import threading
@@ -20,14 +23,92 @@ ARCHIVE_SHA256 = '68447f4fbc67e70eee3a93961f36e81e98f47aef73ce7e7ca00885c6cd3616
 SUFFIX = 'epoch-13-avg-2-chunk-16-left-64'
 FILES = [f'encoder-{SUFFIX}.int8.onnx', f'decoder-{SUFFIX}.onnx',
          f'joiner-{SUFFIX}.int8.onnx', 'tokens.txt', 'en.phone']
+# The PyPI sherpa-onnx wheel needs this; PA installs a compat build below it.
+NATIVE_MIN_MACOS = '13.4'
+
+
+class WakeError(ValueError):
+    """A wake failure the settings UI can explain: a stable `code` plus `params`."""
+    def __init__(self, code, message, status=422, **params):
+        super().__init__(message)
+        self.code, self.status, self.params = code, status, params
+
+
+_engine = []
+
+
+def engine_error():
+    """None when sherpa_onnx loads, else the WakeError saying why. The native
+    libraries cannot change while the server runs, so this is decided once."""
+    if not _engine:
+        try:
+            import sherpa_onnx  # noqa: F401
+            _engine.append(None)
+        except Exception as e:
+            print(f'[wake] sherpa_onnx failed to load: {e}', file=sys.stderr, flush=True)
+            current = platform.mac_ver()[0]
+            if current and _version(current) < _version(NATIVE_MIN_MACOS):
+                _engine.append(('wake_engine_unsupported_os', dict(current=current, required=NATIVE_MIN_MACOS)))
+            else:
+                _engine.append(('wake_engine_unavailable', {}))
+    if _engine[0] is None:
+        return None
+    code, params = _engine[0]
+    return WakeError(code, 'Wake detector unavailable', status=503, **params)
+
+
+def _version(text):
+    return tuple(int(p) for p in re.findall(r'\d+', text)[:3])
+
+
+@lru_cache(maxsize=2)
+def _lexicon_words(path):
+    with open(path, encoding='utf-8') as f:
+        return frozenset(line.split(' ', 1)[0] for line in f if line.strip())
+
+
+def split_word(word, words):
+    """Spell an out-of-dictionary word with dictionary pieces. Single-letter
+    pieces are read as letter names ("Z" -> "zee"), so the fewest of those wins,
+    then the fewest pieces. None when no split exists."""
+    best = [None] * (len(word) + 1)
+    best[0] = (0, 0, ())
+    for end in range(1, len(word) + 1):
+        for start in range(end):
+            piece = word[start:end]
+            if best[start] is None or piece not in words:
+                continue
+            singles, count, pieces = best[start]
+            candidate = (singles + (len(piece) == 1), count + 1, pieces + (piece,))
+            if best[end] is None or candidate[:2] < best[end][:2]:
+                best[end] = candidate
+    return list(best[-1][2]) if best[-1] else None
+
+
+def pronounceable_text(phrase, words):
+    """Upper-case `phrase` with every English word missing from the dictionary
+    replaced by its pieces. Only the pronunciation input changes; the saved
+    phrase and the keyword label keep the user's spelling."""
+    def replace(match):
+        word = match.group(0)
+        if word in words:
+            return word
+        pieces = split_word(word, words)
+        if pieces is None:
+            raise WakeError('wake_phrase_unpronounceable', f'No pronunciation for "{word.lower()}"',
+                            word=word.lower())
+        return ' '.join(pieces)
+    return re.sub(r'[A-Z]+', replace, phrase.upper())
 
 
 def validate_config(config):
     if not isinstance(config, dict) or not isinstance(config.get('phrase'), str):
         raise ValueError('Invalid wake configuration')
     phrase = config['phrase'].strip()
+    if not phrase:
+        raise WakeError('wake_phrase_empty', 'Set a wake phrase first.')
     if not 2 <= len(phrase) <= 48 or not re.fullmatch(r'[A-Za-z\u4e00-\u9fff ]+', phrase):
-        raise ValueError('Use 2–48 Chinese or English characters and spaces for the wake phrase.')
+        raise WakeError('wake_phrase_invalid', 'Use 2–48 Chinese or English characters and spaces for the wake phrase.')
     threshold = config.get('kws_threshold', 0.25)
     speaker_threshold = config.get('speaker_threshold', 0.5)
     if (not isinstance(threshold, (int, float)) or not math.isfinite(threshold)
@@ -41,7 +122,7 @@ def validate_config(config):
         raise ValueError('Invalid owner-only setting')
     speaker = config.get('speaker', '')
     if not isinstance(speaker, str) or (owner_only and not re.fullmatch(r'[A-Za-z0-9_-]{1,32}', speaker)):
-        raise ValueError('Enroll your voice before enabling owner-only wake.')
+        raise WakeError('voiceprint_missing', 'Enroll your voice before enabling owner-only wake.')
     return dict(phrase=phrase, kws_threshold=threshold, speaker_threshold=speaker_threshold,
                 owner_only=owner_only, speaker=speaker)
 
@@ -57,9 +138,10 @@ class WakeKws:
         self.sessions = {}
 
     def status(self):
-        import importlib.util
-        return dict(model=MODEL_ID, ready=all((self.path / f).is_file() for f in FILES)
-                    and importlib.util.find_spec('sherpa_onnx') is not None)
+        files = all((self.path / f).is_file() for f in FILES)
+        error = engine_error()
+        return dict(model=MODEL_ID, ready=files and error is None, model_ready=files,
+                    error=None if error is None else dict(code=error.code, params=error.params))
 
     def install(self):
         with self.install_lock:
@@ -95,18 +177,24 @@ class WakeKws:
             return self.status()
 
     def _model(self, config):
-        import sherpa_onnx
         key = (config['phrase'], config['kws_threshold'])
         if key in self.models:
             self.models.move_to_end(key)
             return self.models[key]
+        error = engine_error()
+        if error is not None:
+            raise error
+        import sherpa_onnx
         if not all((self.path / f).is_file() for f in FILES):
-            raise ValueError('Download the wake model in Settings first.')
-        tokens = sherpa_onnx.text2token([config['phrase'].upper()], str(self.path / 'tokens.txt'),
-                                      tokens_type='phone+ppinyin', lexicon=str(self.path / 'en.phone'))
+            raise WakeError('wake_model_missing', 'Download the wake model in Settings first.')
+        lexicon = str(self.path / 'en.phone')
+        text = pronounceable_text(config['phrase'], _lexicon_words(lexicon))
+        tokens = sherpa_onnx.text2token([text], str(self.path / 'tokens.txt'),
+                                      tokens_type='phone+ppinyin', lexicon=lexicon)
         tokens = tokens[0] if tokens else []
         if not tokens:
-            raise ValueError('Unable to convert this wake phrase to pronunciations')
+            raise WakeError('wake_phrase_unpronounceable', 'Unable to convert this wake phrase to pronunciations',
+                            word=config['phrase'])
         keyword = ' '.join(tokens) + ' @' + config['phrase'].replace(' ', '_')
         # KeywordSpotter reads the file during construction only.
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', encoding='utf-8') as f:
@@ -125,7 +213,7 @@ class WakeKws:
         with self.lock:
             config = validate_config(config)
             if config['owner_only'] and not (self.voiceprints / (config['speaker'] + '.bin')).is_file():
-                raise ValueError('No voiceprint for the selected speaker. Record your voice first.')
+                raise WakeError('voiceprint_missing', 'No voiceprint for the selected speaker. Record your voice first.')
             now = time.monotonic()
             self.sessions = {k: v for k, v in self.sessions.items() if now - v['time'] < 30}
             if len(self.sessions) >= 4:

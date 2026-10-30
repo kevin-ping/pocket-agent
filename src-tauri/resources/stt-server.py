@@ -703,7 +703,7 @@ async def speaker_train():
 
 
 # KWS uses unique temporary files only when extracting an owner embedding.
-from wake_kws import WakeKws
+from wake_kws import WakeError, WakeKws, engine_error
 from starlette.concurrency import run_in_threadpool
 
 
@@ -727,12 +727,19 @@ kws = WakeKws(MODELS_DIR, VOICEPRINTS_DIR, _kws_verify)
 
 
 async def _kws_call(fn, *args):
+    # Coded errors let the UI explain the problem; raw text stays in this log.
     try:
         return await run_in_threadpool(fn, *args)
+    except WakeError as e:
+        raise HTTPException(status_code=e.status,
+                            detail={"code": e.code, "params": e.params, "message": str(e)})
     except (ValueError, KeyError, AssertionError) as e:
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Wake detector unavailable: {e}")
+        print(f"[stt-server] wake detector error: {e}", file=sys.stderr, flush=True)
+        raise HTTPException(status_code=503,
+                            detail={"code": "wake_engine_unavailable", "params": {},
+                                    "message": "Wake detector unavailable"})
 
 
 @app.get("/kws/status")
@@ -806,7 +813,7 @@ def _startup_selfcheck() -> list[str]:
         "uvicorn":          "uvicorn>=0.27",
         "scipy":            "scipy>=1.10",
         "kaldi_native_fbank": "kaldi-native-fbank>=1.0",
-        "edge_tts":         "edge-tts>=6.1",
+        "edge_tts":         "edge-tts>=7.3.1",
     }
     optional_packages = {
         "silero_vad":       "silero-vad>=5.1",
@@ -847,6 +854,15 @@ def _startup_selfcheck() -> list[str]:
     except ImportError:
         fatal.append("MISSING: av>=12.0.0,<13 (PyAV). If install fails on x86_64 macOS: brew install pkg-config ffmpeg")
 
+    # 5. sherpa-onnx native libs only fail at load time (e.g. on macOS < 13.4),
+    # so import it for real. Wake word and owner voice checks depend on it;
+    # everything else keeps working.
+    wake_error = engine_error()
+    if wake_error is not None:
+        detail = ", ".join(f"{k}={v}" for k, v in wake_error.params.items())
+        warnings.append(f"sherpa-onnx does not load ({wake_error.code}{': ' + detail if detail else ''})"
+                        " — wake word and voiceprint checks unavailable")
+
     # Report
     for w in warnings:
         print(f"[stt-server] ⚠  {w}", file=sys.stderr, flush=True)
@@ -857,6 +873,9 @@ def _startup_selfcheck() -> list[str]:
             print(f"[stt-server]   ✗ {f_err}", file=sys.stderr, flush=True)
         print("[stt-server] Fix the above issues and restart.", file=sys.stderr, flush=True)
         raise SystemExit(1)
+    elif warnings:
+        print(f"[stt-server] ✓ self-check passed with {len(warnings)} warning(s)",
+              file=sys.stderr, flush=True)
     else:
         print("[stt-server] ✓ self-check passed (all dependencies & models OK)",
               file=sys.stderr, flush=True)

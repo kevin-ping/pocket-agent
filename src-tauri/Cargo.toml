@@ -53,6 +53,11 @@ tower-http = { version = "0.6", features = ["cors"] }
 
 tempfile = "3"
 base64 = "0.22"
+
+# macOS <13.4 sherpa-onnx compat install: checksum + whitelisted extraction
+sha2 = "0.10"
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
 [profile.release]
 opt-level = "s"     # 优化体积（旧机器存储也紧张）
 lto = true

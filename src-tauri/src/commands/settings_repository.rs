@@ -35,6 +35,9 @@ const MESH_EMOTIONS: &[&str] = &["happy", "sad", "angry", "surprised", "relaxed"
 pub struct SaveConfigResponse {
     pub config: AppConfig,
     pub revision: u64,
+    /// Settings were saved, but the wake listener did not start (coded error).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wake_error: Option<String>,
 }
 
 fn db_path() -> Result<PathBuf, String> {
@@ -145,6 +148,7 @@ pub fn save(config: &AppConfig) -> Result<SaveConfigResponse, String> {
     Ok(SaveConfigResponse {
         config: load()?,
         revision,
+        wake_error: None,
     })
 }
 
@@ -438,6 +442,7 @@ mod tests {
     fn validates_kws_settings_and_migration_defaults() {
         let mut c = AppConfig::default();
         assert!(c.wake_owner_only);
+        assert!(!c.conversation_owner_only);
         assert!(c.wake_phrase.is_empty());
         c.wake_phrase = "桃子桃子".into();
         assert!(validate(&c).is_ok());
@@ -448,6 +453,14 @@ mod tests {
         c.wake_phrase = "桃子桃子".into();
         c.wake_kws_threshold = f32::NAN;
         assert!(validate(&c).is_err());
+    }
+
+    #[test]
+    fn conversation_owner_only_defaults_off_for_old_configs() {
+        let mut value = serde_json::to_value(AppConfig::default()).unwrap();
+        value.as_object_mut().unwrap().remove("conversation_owner_only");
+        let config: AppConfig = serde_json::from_value(value).unwrap();
+        assert!(!config.conversation_owner_only);
     }
 
     #[test]

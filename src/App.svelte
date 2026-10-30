@@ -18,6 +18,7 @@
   import { settingsStore } from './lib/stores/settings';
   import { layoutStore } from './lib/stores/layout';
   import { STATUS_PHRASES, langFromVoice, detectLang, convLabels, convLabelsLang, type LangKey } from './lib/i18n';
+  import { wakeErrorMessage } from './lib/wakeErrors';
 
   const appWindow = getCurrentWindow();
 
@@ -378,10 +379,14 @@
         // once answered — the check costs a 5 s-timeout request per attempt.
         if (!modelConfirmed) {
           try {
-            const model = await invoke<{ ready: boolean }>('wake_model_status');
+            const model = await invoke<{ ready: boolean; error?: { code: string; params: Record<string, string> } | null }>('wake_model_status');
             if (stale()) return;
             if (!model.ready) {
-              if (!conversationActive) setWakeStatus(labels.wakeNeedsModel);
+              // An engine error (e.g. macOS too old) is not fixed by downloading the model.
+              const reason = model.error
+                ? labels.wakeStartFailed(wakeErrorMessage(s.ui_lang, JSON.stringify({ wake_error: model.error.code, params: model.error.params })))
+                : labels.wakeNeedsModel;
+              if (!conversationActive) setWakeStatus(reason);
               return;
             }
             modelConfirmed = true;
@@ -420,7 +425,7 @@
           // when the wake transport changed — retry by default instead.
           if (i === MAX_ATTEMPTS - 1) {
             console.warn('[wake] arm gave up after retries:', msg);
-            if (!conversationActive) setWakeStatus(labels.wakeStartFailed(msg));
+            if (!conversationActive) setWakeStatus(labels.wakeStartFailed(wakeErrorMessage(s.ui_lang, msg)));
             return;
           }
           await new Promise((r) => setTimeout(r, 500));
@@ -925,7 +930,8 @@
         // light off here or it keeps breathing over a dead listener.
         if (islandMode === 'waiting_for_wake' || islandMode === 'verifying_speaker') islandMode = 'idle';
         if (!conversationActive) {
-          setWakeStatus(convLabelsLang(get(settingsStore).ui_lang).wakeStartFailed(e.payload.error));
+          const lang = get(settingsStore).ui_lang;
+          setWakeStatus(convLabelsLang(lang).wakeStartFailed(wakeErrorMessage(lang, e.payload.error)));
         }
       }),
       // Wake check in-progress: dot 3 turns red while /wake/check HTTP call is running
@@ -1117,7 +1123,10 @@
         armWakeListenerIfEnabled();
       }).catch(console.error);
     }
-    
+    // Old macOS: the sherpa compat build installs after startup, then stt-server
+    // reloads it. Wake could not start before — try again now.
+    listen('voice-engine-reloaded', () => armWakeListenerIfEnabled()).catch(console.error);
+
     const settingsLoaded = await settingsStore.load();
     void refreshMeshCustom();
     if (!settingsLoaded) {

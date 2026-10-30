@@ -13,7 +13,7 @@ soundfile>=0.12.1
 faster-whisper>=1.0.0
 silero-vad>=5.1
 onnxruntime>=1.17
-edge-tts>=6.1
+edge-tts>=7.3.1
 
 # HTTP server framework (Phase B+C rewrite of stt-server.py).
 fastapi>=0.110

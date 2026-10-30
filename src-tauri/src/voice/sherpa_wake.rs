@@ -97,26 +97,100 @@ fn downmix_to_mono(samples: &[i16], channels: u16) -> Vec<i16> {
         .collect()
 }
 
-/// Resample mono samples to 16kHz via linear interpolation.
-fn resample_to_16k(mono: &[i16], source_sr: u32) -> Vec<i16> {
-    if source_sr == TARGET_SR || mono.is_empty() {
-        return mono.to_vec();
-    }
-    let ratio = source_sr as f64 / TARGET_SR as f64;
-    let out_len = ((mono.len() as f64) / ratio).floor() as usize;
-    let mut out = Vec::with_capacity(out_len);
-    for i in 0..out_len {
-        let pos = (i as f64) * ratio;
-        let idx = pos.floor() as usize;
-        let frac = (pos - pos.floor()) as f32;
-        let v = if idx + 1 >= mono.len() {
-            mono[mono.len() - 1] as f32
+/// Streaming resampler to 16 kHz: a Hann-windowed sinc low-pass (63 taps,
+/// 7.6 kHz cutoff) followed by linear interpolation. Enrollment resamples with
+/// scipy's anti-aliased `resample_poly`; plain interpolation here folded the
+/// microphone's >8 kHz content into the voice band and cut speaker similarity
+/// against the same audio to ~0.7. Keeps filter history and the fractional
+/// position between blocks, so chunked and one-shot output match.
+struct Resampler16k {
+    step: f64,
+    taps: Vec<f32>,
+    history: Vec<f32>,
+    filtered: Vec<f32>,
+    pos: f64,
+}
+
+impl Resampler16k {
+    const TAPS: usize = 63;
+    const CUTOFF_HZ: f64 = 7600.0;
+
+    fn new(source_sr: u32) -> Self {
+        // Upsampling adds no content above the source Nyquist: no filter needed.
+        let taps = if source_sr <= TARGET_SR {
+            vec![1.0]
         } else {
-            mono[idx] as f32 * (1.0 - frac) + mono[idx + 1] as f32 * frac
+            let fc = Self::CUTOFF_HZ / source_sr as f64;
+            let m = (Self::TAPS - 1) as f64;
+            let raw: Vec<f64> = (0..Self::TAPS)
+                .map(|n| {
+                    let t = n as f64 - m / 2.0;
+                    let sinc = if t == 0.0 { 1.0 } else { (2.0 * std::f64::consts::PI * fc * t).sin() / (2.0 * std::f64::consts::PI * fc * t) };
+                    let hann = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / m).cos();
+                    sinc * hann
+                })
+                .collect();
+            let sum: f64 = raw.iter().sum();
+            raw.iter().map(|h| (h / sum) as f32).collect()
         };
-        out.push(v.round().clamp(-32768.0, 32767.0) as i16);
+        Resampler16k {
+            step: source_sr as f64 / TARGET_SR as f64,
+            history: vec![0.0; taps.len() - 1],
+            taps,
+            filtered: Vec::new(),
+            pos: 0.0,
+        }
     }
-    out
+
+    fn process(&mut self, mono: &[i16]) -> Vec<i16> {
+        if self.step == 1.0 {
+            return mono.to_vec();
+        }
+        let mut ext = std::mem::take(&mut self.history);
+        ext.extend(mono.iter().map(|&s| s as f32));
+        let n = self.taps.len();
+        for window in ext.windows(n) {
+            self.filtered.push(window.iter().zip(&self.taps).map(|(x, h)| x * h).sum());
+        }
+        self.history = ext[ext.len() - (n - 1)..].to_vec();
+
+        let mut out = Vec::with_capacity((mono.len() as f64 / self.step) as usize + 1);
+        while (self.pos as usize) + 1 < self.filtered.len() {
+            let idx = self.pos as usize;
+            let frac = (self.pos - idx as f64) as f32;
+            let v = self.filtered[idx] * (1.0 - frac) + self.filtered[idx + 1] * frac;
+            out.push(v.round().clamp(-32768.0, 32767.0) as i16);
+            self.pos += self.step;
+        }
+        let consumed = (self.pos as usize).min(self.filtered.len());
+        self.filtered.drain(..consumed);
+        self.pos -= consumed as f64;
+        out
+    }
+}
+
+// ── Errors ───────────────────────────────────────────────────────────────────
+
+/// Wake and voiceprint failures cross to the UI as a JSON string
+/// `{"wake_error": code, "params": {...}}`; the UI maps the code to a localized
+/// problem + fix (src/lib/wakeErrors.ts). Raw details go to the log only.
+pub fn wake_error(code: &str, params: serde_json::Value) -> String {
+    serde_json::json!({ "wake_error": code, "params": params }).to_string()
+}
+
+/// Map a stt-server KWS reply to a coded error. Its `detail` carries a code
+/// for every failure the user can act on; anything else is logged and reported
+/// as a generic wake service error.
+fn kws_error(status: reqwest::StatusCode, body: &str) -> String {
+    eprintln!("[wake] service {status}: {body}");
+    let detail = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .map(|v| v["detail"].clone())
+        .unwrap_or_default();
+    match detail["code"].as_str() {
+        Some(code) => wake_error(code, detail["params"].clone()),
+        None => wake_error("wake_service_error", serde_json::json!({})),
+    }
 }
 
 // ── Start / Stop ─────────────────────────────────────────────────────────────
@@ -131,9 +205,12 @@ pub fn start_wake_listener(app: AppHandle, _threshold: f32, _speaker_name: Optio
 
     let setup = (|| {
         let config = crate::commands::settings_repository::load()?;
+        // Settled config, not a transient failure: say so without a request.
+        if config.wake_phrase.trim().is_empty() {
+            return Err(wake_error("wake_phrase_empty", serde_json::json!({})));
+        }
         let config = kws_config(&config);
-        let client = kws_client(5)?;
-        let session = kws_open(&client, &config)?;
+        let (client, session) = open_kws_session(|| kws_client(5), |c| kws_open(c, &config))?;
         Ok::<_, String>((config, client, session))
     })();
     let (config, client, session) = match setup {
@@ -150,7 +227,8 @@ pub fn start_wake_listener(app: AppHandle, _threshold: f32, _speaker_name: Optio
         Err(e) => {
             let _ = client.delete(format!("{}/kws/session/{}", STT_SERVER_URL, session)).send();
             WAKE_ACTIVE.store(false, Ordering::Release);
-            return Err(format!("mic capture: {}", e));
+            eprintln!("[wake] mic capture: {}", e);
+            return Err(wake_error("wake_mic_unavailable", serde_json::json!({})));
         }
     };
 
@@ -243,6 +321,7 @@ fn wake_http_worker_loop(
 ) -> Result<(), String> {
     let result = (|| {
         let mut pcm = Vec::new();
+        let mut resampler = Resampler16k::new(device_sr);
         let mut sequence = 0u64;
         let mut was_paused = false;
         let mut last_sent = std::time::Instant::now();
@@ -262,11 +341,12 @@ fn wake_http_worker_loop(
                 session = kws_open(&client, &config)?;
                 sequence = 0;
                 pcm.clear();
+                resampler = Resampler16k::new(device_sr);
                 was_paused = false;
                 last_sent = std::time::Instant::now();
             }
             match rx.recv_timeout(Duration::from_millis(READ_TIMEOUT_MS)) {
-                Ok(raw) => pcm.extend(resample_to_16k(&downmix_to_mono(&raw, device_ch), device_sr)),
+                Ok(raw) => pcm.extend(resampler.process(&downmix_to_mono(&raw, device_ch))),
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => return Err("mic channel disconnected".into()),
             }
@@ -280,6 +360,9 @@ fn wake_http_worker_loop(
                 // Never apply results from audio submitted before a stop/pause.
                 if stop_flag.load(Ordering::Acquire) || WAKE_PAUSED.load(Ordering::Acquire) || overflow.load(Ordering::Acquire) {
                     break;
+                }
+                if v["keyword_match"].as_bool() == Some(true) {
+                    log_speaker_score(&v, &config, device_sr);
                 }
                 if v["keyword_match"].as_bool() == Some(true) && v["speaker_match"].as_bool() == Some(true) {
                     // Suspend until the conversation releases the microphone.
@@ -299,7 +382,7 @@ fn wake_http_worker_loop(
 
 pub fn kws_client(timeout: u64) -> Result<reqwest::blocking::Client, String> {
     let token = std::fs::read_to_string(voiceprints_dir().parent().unwrap().join("server.token"))
-        .map_err(|_| "Voice service is not ready. Please wait and retry.".to_string())?;
+        .map_err(|_| wake_error("wake_service_unavailable", serde_json::json!({})))?;
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("authorization", format!("Bearer {}", token.trim()).parse().map_err(|_| "Invalid voice service token")?);
     headers.insert("origin", "tauri://localhost".parse().unwrap());
@@ -308,10 +391,13 @@ pub fn kws_client(timeout: u64) -> Result<reqwest::blocking::Client, String> {
 }
 
 fn kws_response(response: Result<reqwest::blocking::Response, reqwest::Error>) -> Result<serde_json::Value, String> {
-    let response = response.map_err(|e| format!("Wake service: {e}"))?;
+    let response = response.map_err(|e| {
+        eprintln!("[wake] service unreachable: {e}");
+        wake_error("wake_service_unavailable", serde_json::json!({}))
+    })?;
     let status = response.status();
     let text = response.text().map_err(|e| e.to_string())?;
-    if !status.is_success() { return Err(format!("Wake service {status}: {text}")); }
+    if !status.is_success() { return Err(kws_error(status, &text)); }
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
@@ -321,12 +407,27 @@ pub fn kws_config(config: &crate::commands::config::AppConfig) -> serde_json::Va
         "speaker_threshold": config.wake_word_threshold})
 }
 
+/// Read the token and build the client only once the lease is held: a reload
+/// rotates server.token, and a client built before it waited would carry the
+/// old token to the new server (401).
+fn open_kws_session<C>(
+    build: impl FnOnce() -> Result<C, String>,
+    open: impl FnOnce(&C) -> Result<String, String>,
+) -> Result<(C, String), String> {
+    let _txn = crate::voice::stt::voice_txn();
+    let client = build()?;
+    let session = open(&client)?;
+    Ok((client, session))
+}
+
 fn kws_open(client: &reqwest::blocking::Client, config: &serde_json::Value) -> Result<String, String> {
+    let _txn = crate::voice::stt::voice_txn();
     let v = kws_response(client.post(format!("{}/kws/session", STT_SERVER_URL)).json(config).send())?;
     v["session"].as_str().map(String::from).ok_or_else(|| "Missing wake session".into())
 }
 
 pub fn kws_model_action(install: bool) -> Result<serde_json::Value, String> {
+    let _txn = crate::voice::stt::voice_txn();
     let client = kws_client(if install { 180 } else { 5 })?;
     if install {
         kws_response(client.post(format!("{}/kws/install", STT_SERVER_URL)).body("").send())
@@ -340,11 +441,26 @@ pub fn test_wake_audio(path: &str, config: &crate::commands::config::AppConfig) 
     let mut reader = hound::WavReader::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let spec = reader.spec();
     let samples: Vec<i16> = reader.samples::<i16>().collect::<Result<_, _>>().map_err(|e| e.to_string())?;
-    let samples = resample_to_16k(&downmix_to_mono(&samples, spec.channels), spec.sample_rate);
-    kws_check_samples(&samples, &kws_config(config))
+    let samples = Resampler16k::new(spec.sample_rate).process(&downmix_to_mono(&samples, spec.channels));
+    let config = kws_config(config);
+    let v = kws_check_samples(&samples, &config)?;
+    if v["keyword_match"].as_bool() == Some(true) {
+        log_speaker_score(&v, &config, spec.sample_rate);
+    }
+    Ok(v)
+}
+
+fn log_speaker_score(v: &serde_json::Value, config: &serde_json::Value, device_sr: u32) {
+    eprintln!(
+        "[wake] speaker score={:.2} threshold={:.2} device_sr={}",
+        v["score"].as_f64().unwrap_or(0.0),
+        config["speaker_threshold"].as_f64().unwrap_or(0.0),
+        device_sr,
+    );
 }
 
 fn kws_check_samples(samples: &[i16], config: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let _txn = crate::voice::stt::voice_txn();
     let part = reqwest::blocking::multipart::Part::bytes(i16_to_wav(samples, TARGET_SR))
         .file_name("wake.wav").mime_str("audio/wav").map_err(|e| e.to_string())?;
     let form = reqwest::blocking::multipart::Form::new().part("file", part).text("config", config.to_string());
@@ -373,9 +489,12 @@ fn wake_http_check(
     device_ch: u16,
     threshold: f32,
 ) -> Result<WakeCheckResult, String> {
+    // Runs on the conversation worker: fail closed instead of waiting out a reload.
+    let _txn = crate::voice::stt::try_voice_txn()
+        .ok_or_else(|| wake_error("wake_service_unavailable", serde_json::json!({})))?;
     let config = crate::commands::settings_repository::load()?;
     let mono = downmix_to_mono(raw_samples, device_ch);
-    let samples = resample_to_16k(&mono, device_sr);
+    let samples = Resampler16k::new(device_sr).process(&mono);
     let mut config = kws_config(&config);
     config["speaker_threshold"] = serde_json::json!(threshold);
     let v = kws_check_samples(&samples, &config)?;
@@ -462,6 +581,7 @@ fn wav_duration_from_header(path: &str) -> f32 {
 /// Extract speaker embedding via HTTP to the Python STT server.
 /// Bypasses the native sherpa-onnx C API which has an ORT version mismatch on macOS 12.
 fn extract_embedding_http(wav_path: &str) -> Result<Vec<f32>, String> {
+    let _txn = crate::voice::stt::voice_txn();
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -514,6 +634,7 @@ fn extract_embedding_http(wav_path: &str) -> Result<Vec<f32>, String> {
 /// Enroll voice identity; explicit KWS settings define the wake phrase.
 pub fn enroll_speaker(name: &str, wav_path: &str) -> Result<EnrollResult, String> {
     validate_speaker_name(name)?;
+    let _txn = crate::voice::stt::voice_txn();
     let duration_s = wav_duration_from_header(wav_path);
 
     let client = reqwest::blocking::Client::builder()
@@ -543,12 +664,16 @@ pub fn enroll_speaker(name: &str, wav_path: &str) -> Result<EnrollResult, String
         .post(format!("{}/speaker/enroll", STT_SERVER_URL))
         .multipart(form)
         .send()
-        .map_err(|e| format!("enroll HTTP: {}", e))?;
+        .map_err(|e| {
+            eprintln!("[sherpa] enroll HTTP: {}", e);
+            wake_error("wake_service_unavailable", serde_json::json!({}))
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
-        return Err(format!("enroll server returned {}: {}", status, body));
+        eprintln!("[sherpa] enroll server returned {}: {}", status, body);
+        return Err(wake_error("voiceprint_enroll_failed", serde_json::json!({})));
     }
 
     let _v: serde_json::Value = resp.json()
@@ -572,6 +697,7 @@ pub fn enroll_speaker(name: &str, wav_path: &str) -> Result<EnrollResult, String
 /// Unlike enroll (which resets variants), this only appends a new variant.
 pub fn train_speaker(name: &str, wav_path: &str) -> Result<EnrollResult, String> {
     validate_speaker_name(name)?;
+    let _txn = crate::voice::stt::voice_txn();
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -663,6 +789,20 @@ pub fn remove_wake_word(name: &str, word: &str) -> Vec<String> {
         let _ = std::fs::write(&wake_txt, data);
     }
     words
+}
+
+/// Cosine similarity between a WAV and one selected speaker's voiceprint.
+/// A missing voiceprint is an error so owner-only callers can fail closed.
+pub fn owner_similarity(wav_path: &str, speaker: &str) -> Result<f32, String> {
+    validate_speaker_name(speaker)?;
+    let ref_path = voiceprints_dir().join(format!("{}.bin", speaker));
+    let bytes = std::fs::read(&ref_path).map_err(|e| format!("voiceprint {}: {}", speaker, e))?;
+    let ref_emb: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    let probe = extract_embedding_http(wav_path)?;
+    Ok(cosine_similarity(&probe, &ref_emb))
 }
 
 /// Verify: extract embedding from WAV, compare with all enrolled.
@@ -780,4 +920,107 @@ pub fn remove_speaker(name: &str) -> Result<(), String> {
         return Err("path escapes voiceprints directory".into());
     }
     std::fs::remove_file(&canon).map_err(|e| format!("remove: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sine(freq: f64, sr: u32, len: usize, amp: f64) -> Vec<i16> {
+        (0..len)
+            .map(|i| (amp * (2.0 * std::f64::consts::PI * freq * i as f64 / sr as f64).sin()) as i16)
+            .collect()
+    }
+
+    /// RMS of the settled middle, skipping filter start-up.
+    fn rms(samples: &[i16]) -> f64 {
+        let mid = &samples[samples.len() / 4..samples.len() * 3 / 4];
+        (mid.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / mid.len() as f64).sqrt()
+    }
+
+    #[test]
+    fn wake_session_waiting_out_a_reload_uses_the_new_token() {
+        let _serial = crate::voice::stt::test_serial();
+        let token = std::sync::Arc::new(std::sync::Mutex::new("A".to_string()));
+        let reload = crate::voice::stt::hold_reload_for_test();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let token_in = token.clone();
+        let start = std::thread::spawn(move || {
+            let result = open_kws_session(
+                || Ok(token_in.lock().unwrap().clone()),
+                |client: &String| Ok(format!("session-{client}")),
+            );
+            tx.send(()).unwrap();
+            result
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "start waits for the reload");
+        *token.lock().unwrap() = "B".to_string(); // new server writes its token
+        drop(reload);
+        rx.recv_timeout(Duration::from_secs(2)).expect("released after reload");
+        let (client, session) = start.join().unwrap().unwrap();
+        assert_eq!((client.as_str(), session.as_str()), ("B", "session-B"));
+    }
+
+    #[test]
+    fn resampler_passes_16k_through_and_thirds_48k() {
+        let input = sine(1000.0, 16000, 1600, 8000.0);
+        assert_eq!(Resampler16k::new(16000).process(&input), input);
+        let out = Resampler16k::new(48000).process(&vec![0i16; 48000]);
+        assert!((out.len() as i64 - 16000).abs() <= 1, "len {}", out.len());
+    }
+
+    #[test]
+    fn resampler_rejects_aliasing_and_keeps_the_voice_band() {
+        let tone = sine(12000.0, 48000, 48000, 10000.0);
+        let aliased = Resampler16k::new(48000).process(&tone);
+        let energy_ratio = (rms(&aliased) / rms(&tone)).powi(2);
+        assert!(energy_ratio < 0.01, "12 kHz energy kept: {energy_ratio}");
+
+        let voice = sine(1000.0, 48000, 48000, 10000.0);
+        let gain = rms(&Resampler16k::new(48000).process(&voice)) / rms(&voice);
+        assert!((gain - 1.0).abs() < 0.02, "1 kHz gain {gain}");
+    }
+
+    #[test]
+    fn resampler_streaming_matches_one_shot() {
+        for sr in [44100, 48000] {
+            let signal: Vec<i16> = sine(700.0, sr, sr as usize, 6000.0)
+                .iter()
+                .zip(sine(9500.0, sr, sr as usize, 3000.0))
+                .map(|(a, b)| a.saturating_add(b))
+                .collect();
+            let whole = Resampler16k::new(sr).process(&signal);
+            let mut streaming = Resampler16k::new(sr);
+            let chunked: Vec<i16> = signal.chunks(480).flat_map(|c| streaming.process(c)).collect();
+            assert!((whole.len() as i64 - chunked.len() as i64).abs() <= 1);
+            for (a, b) in whole.iter().zip(&chunked) {
+                assert!((*a as i32 - *b as i32).abs() <= 1, "{sr}: {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn owner_similarity_rejects_invalid_or_missing_voiceprints() {
+        assert!(owner_similarity("/nonexistent.wav", "../etc").is_err());
+        assert!(owner_similarity("/nonexistent.wav", "").is_err());
+        // Must fail before reaching the embedding service.
+        assert!(owner_similarity("/nonexistent.wav", "zz_missing_owner_test_7f3a").is_err());
+    }
+
+    #[test]
+    fn kws_errors_keep_codes_and_drop_raw_detail() {
+        let coded = kws_error(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"detail":{"code":"wake_engine_unsupported_os","params":{"current":"12.7.6","required":"13.4"},"message":"x"}}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&coded).unwrap();
+        assert_eq!(v["wake_error"], "wake_engine_unsupported_os");
+        assert_eq!(v["params"]["current"], "12.7.6");
+
+        for body in [r#"{"detail":"dlopen(/x/_sherpa_onnx.so): Symbol not found"}"#, "<html>502</html>"] {
+            let generic = kws_error(reqwest::StatusCode::BAD_GATEWAY, body);
+            assert_eq!(generic, wake_error("wake_service_error", serde_json::json!({})));
+            assert!(!generic.contains("dlopen") && !generic.contains("502"));
+        }
+    }
 }

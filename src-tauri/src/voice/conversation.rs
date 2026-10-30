@@ -13,6 +13,10 @@
 // the cue, and only a matching completion opens a fresh Listening buffer.
 // Wake audio and cue audio are never used as command pre-roll.
 //
+// With `conversation_owner_only`, every Listening utterance must match the
+// selected voiceprint before STT; mismatches and check errors are dropped
+// silently (fail closed) and listening resumes.
+//
 // All cross-thread coordination flows through a single mpsc channel into the
 // worker thread, so the worker is the sole owner of mutable state — no shared
 // locks beyond the channel itself and the active-flag atomic.
@@ -85,6 +89,7 @@ enum Msg {
     WakeResult(u64, bool),
     Ready(u64, bool, Duration),
     SttResult(Result<SttResult, String>),
+    SpeakerRejected(f32),
     TtsStarted,
     TtsDone(u64),
     Stop,
@@ -148,6 +153,14 @@ pub fn start_conversation(
     {
         return Err("conversation already active".into());
     }
+
+    let owner_gate = match owner_gate() {
+        Ok(gate) => gate,
+        Err(e) => {
+            ACTIVE.store(false, Ordering::Release);
+            return Err(e);
+        }
+    };
 
     // Owner-transition gate (record.rs file-header doc):
     //   SINGLE_SHOT  → CONVERSATION  ✗ refused (different active flow)
@@ -222,6 +235,7 @@ pub fn start_conversation(
                 single_shot.unwrap_or(false),
                 wake_threshold,
                 barge_in_enabled.unwrap_or(true),
+                owner_gate,
             );
             // Only clear shared state if our generation still owns the slot.
             // Otherwise, a newer start_conversation has already taken over.
@@ -268,6 +282,7 @@ fn worker_loop(
     single_shot: bool,
     wake_threshold: f32,
     barge_in_enabled: bool,
+    owner_gate: Option<(String, f32)>,
 ) {
     let device_channels = stream_handle.channels.max(1);
     let mut mode = if single_shot {
@@ -329,7 +344,7 @@ fn worker_loop(
                     );
                     // Don't break yet — let the SttResult handler do it
                     // for single-shot, or transition to Speaking for continuous.
-                    spawn_transcribe(flushed, utter_sr, tx.clone());
+                    spawn_transcribe(flushed, utter_sr, tx.clone(), owner_gate.clone());
                     mode = Mode::Transcribing;
                     emit_state("transcribing");
                     // Continue the loop so SttResult can be processed.
@@ -429,7 +444,7 @@ fn worker_loop(
                                     silence_run_ms = 0;
                                     mode = Mode::Transcribing;
                                     emit_state("transcribing");
-                                    spawn_transcribe(flushed, utter_sr, tx.clone());
+                                    spawn_transcribe(flushed, utter_sr, tx.clone(), owner_gate.clone());
                                 }
                             } else {
                                 listening_idle_ms += chunk_ms;
@@ -538,6 +553,22 @@ fn worker_loop(
                 }
             }
 
+            Ok(Msg::SpeakerRejected(score)) => {
+                eprintln!("[conv] speaker rejected: score={:.3}", score);
+                if single_shot {
+                    let _ = app.emit("conversation-ended", ());
+                    break;
+                }
+                // Not counted as an empty STT result and the idle clock keeps
+                // running, so a silent owner still times out normally.
+                mode = Mode::Listening;
+                silence_run_ms = 0;
+                accumulated_speech_ms = 0;
+                utter_buf.clear();
+                in_speech_burst = false;
+                emit_state("listening");
+            }
+
             Ok(Msg::WakeResult(epoch, matched)) => {
                 wake_pending = false;
                 if mode != Mode::Speaking || epoch != wake_epoch || !matched {
@@ -611,7 +642,26 @@ fn worker_loop(
     eprintln!("[conv] worker exit");
 }
 
-fn spawn_transcribe(samples: Vec<i16>, sample_rate: u32, tx: Sender<Msg>) {
+/// `(speaker, threshold)` when every utterance must match the owner's voiceprint.
+fn owner_gate() -> Result<Option<(String, f32)>, String> {
+    let config = crate::commands::settings_repository::load()?;
+    if !config.conversation_owner_only {
+        return Ok(None);
+    }
+    let voiceprint = crate::voice::sherpa_wake::voiceprints_dir()
+        .join(format!("{}.bin", config.last_enrolled_speaker));
+    if config.last_enrolled_speaker.is_empty() || !voiceprint.is_file() {
+        return Err("已开启「连续对话仅识别本人」，请先录制声纹".into());
+    }
+    Ok(Some((config.last_enrolled_speaker, config.wake_word_threshold)))
+}
+
+fn spawn_transcribe(
+    samples: Vec<i16>,
+    sample_rate: u32,
+    tx: Sender<Msg>,
+    owner_gate: Option<(String, f32)>,
+) {
     std::thread::Builder::new()
         .name("conv-transcribe".into())
         .spawn(move || {
@@ -628,6 +678,19 @@ fn spawn_transcribe(samples: Vec<i16>, sample_rate: u32, tx: Sender<Msg>) {
                     return;
                 }
             };
+
+            if let Some((speaker, threshold)) = owner_gate {
+                let score = crate::voice::sherpa_wake::owner_similarity(wav_path, &speaker)
+                    .unwrap_or_else(|e| {
+                        eprintln!("[conv] speaker check failed: {}", e);
+                        0.0
+                    });
+                if score < threshold {
+                    let _ = std::fs::remove_file(&path);
+                    let _ = tx.send(Msg::SpeakerRejected(score));
+                    return;
+                }
+            }
 
             let result = transcribe(wav_path);
             let _ = std::fs::remove_file(&path);

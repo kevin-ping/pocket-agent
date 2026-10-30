@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import {
     SETTINGS_DEFAULTS,
@@ -23,9 +24,12 @@
     meshSettingsText,
     type SettingsLang,
   } from './lib/settingsI18n';
+  import { convLabelsLang } from './lib/i18n';
+  import { wakeErrorMessage, wakeSaveNotice } from './lib/wakeErrors';
 
   type Section = 'general' | 'avatar' | 'voice' | 'conversation' | 'interruption' | 'wake';
-  type SaveResponse = { config: AppSettings; revision: number };
+  type SaveResponse = { config: AppSettings; revision: number; wake_error?: string };
+  type WakeModelStatus = { ready: boolean; error?: { code: string; params: Record<string, string> } | null };
   type SettingsBootstrap = { config?: AppSettings; error?: string };
 
   declare global {
@@ -96,20 +100,29 @@
 
   let modelReady = $state(false);
   let modelLoading = $state(false);
+  // Engine-level failure (e.g. macOS too old): downloading the model cannot fix it.
+  let modelError = $state('');
   let wakeTestResult = $state('');
   let wakeText = $derived(wakeSettingsText(local?.ui_lang ?? 'en'));
   let meshText = $derived(meshSettingsText(local?.ui_lang ?? 'en'));
+  function applyModelStatus(status: WakeModelStatus) {
+    modelReady = status.ready;
+    modelError = status.error
+      ? wakeErrorMessage(lang(), JSON.stringify({ wake_error: status.error.code, params: status.error.params }))
+      : '';
+  }
   async function refreshWakeModel() {
     if (!isTauri) return;
-    try { modelReady = (await invoke<{ready: boolean}>('wake_model_status')).ready; }
-    catch (e) { error = `${text.actionError}: ${String(e)}`; }
+    try { applyModelStatus(await invoke<WakeModelStatus>('wake_model_status')); }
+    catch (e) { error = wakeErrorMessage(lang(), e); }
   }
   async function downloadWakeModel() {
     modelLoading = true; error = '';
-    try { modelReady = (await invoke<{ready: boolean}>('install_wake_model')).ready; }
-    catch (e) { error = `${text.actionError}: ${String(e)}`; }
+    try { applyModelStatus(await invoke<WakeModelStatus>('install_wake_model')); }
+    catch (e) { error = wakeErrorMessage(lang(), e); }
     finally { modelLoading = false; }
   }
+  function lang() { return local?.ui_lang ?? 'en'; }
   async function testWakePhrase() {
     if (!local || enrolling) return;
     if (!local.wake_phrase.trim()) { error = wakeText.required; return; }
@@ -121,16 +134,27 @@
       const audioPath = await invoke<string>('stop_enroll_recording');
       const result = await invoke<{keyword_match: boolean; speaker_match: boolean}>('test_wake_word', {audioPath, config: local});
       wakeTestResult = !result.keyword_match ? wakeText.notDetected : !result.speaker_match ? wakeText.rejected : local.wake_owner_only ? wakeText.passed : wakeText.keywordOnly;
-    } catch (e) { error = `${text.actionError}: ${String(e)}`; }
+    } catch (e) { error = wakeErrorMessage(lang(), e); }
     finally { enrolling = false; enrollCountdown = 0; await resumeSavedWake(); }
   }
+  // Restart wake from the *saved* config after a test or enrollment paused it.
   async function resumeSavedWake() {
     try {
       const current = await invoke<AppSettings>('get_config');
-      if (current.wake_word_enabled) await invoke('start_wake_word_listening', {threshold: current.wake_word_threshold, speakerName: current.last_enrolled_speaker});
-    } catch (e) { error = `${text.actionError}: ${String(e)}`; }
+      if (!current.wake_word_enabled) return;
+      // An empty saved phrase is a settled config gap: say so, don't ask the backend.
+      if (!current.wake_phrase.trim()) {
+        if (!error) error = convLabelsLang(current.ui_lang).wakeNeedsPhrase;
+        return;
+      }
+      // Saving a new speaker already restarted the listener in the backend.
+      if (await invoke<boolean>('is_wake_word_active')) return;
+      await invoke('start_wake_word_listening', {threshold: current.wake_word_threshold, speakerName: current.last_enrolled_speaker});
+    } catch (e) { if (!error) error = wakeErrorMessage(lang(), e); }
   }
   void refreshWakeModel();
+  // The sherpa compat build can finish installing while this page is open.
+  if (isTauri) void listen('voice-engine-reloaded', () => void refreshWakeModel());
 
   let text = $derived(settingsText(local?.ui_lang ?? 'en'));
   let dirty = $derived((!!local && JSON.stringify(local) !== baseline) || pendingWakeDeletes.length > 0 || meshAvatarChanged);
@@ -197,8 +221,6 @@
 
   async function save() {
     if (!local || saving) return;
-    if (local.wake_word_enabled && !local.wake_phrase.trim()) { error = wakeText.required; return; }
-    if (local.wake_word_enabled && !modelReady) { error = wakeText.notReady; return; }
     saving = true; error = ''; notice = '';
     try {
       const avatarImage = local.avatar_image;
@@ -228,7 +250,8 @@
         pendingWakeDeletes = [];
       }
       baseline = JSON.stringify(local);
-      notice = text.saved;
+      if (result.wake_error) error = wakeSaveNotice(lang(), result.wake_error);
+      else notice = text.saved;
     } catch (e) {
       error = `${text.saveError}: ${String(e)}`;
     } finally {
@@ -259,7 +282,7 @@
     if (local) local = { ...local, ...partial };
     const base = JSON.parse(baseline || JSON.stringify(local)) as AppSettings;
     baseline = JSON.stringify({ ...base, ...partial });
-    return result.config;
+    return result;
   }
 
   async function captureHotkey() {
@@ -395,11 +418,13 @@
       clearInterval(timer);
       const wavPath = await invoke<string>('stop_enroll_recording');
       await invoke('enroll_speaker', { name: enrollName, audioPath: wavPath });
-      await persistImmediate({ last_enrolled_speaker: enrollName });
+      const saved = await persistImmediate({ last_enrolled_speaker: enrollName });
       await refreshVariantCount();
       notice = wakeText.voiceSaved;
+      // The voiceprint is saved either way; only the wake restart failed.
+      if (saved.wake_error) error = `${wakeText.voiceSaved} ${wakeErrorMessage(lang(), saved.wake_error)}`;
     } catch (e) {
-      error = `${text.actionError}: ${String(e)}`;
+      error = wakeErrorMessage(lang(), e);
     } finally {
       enrolling = false; enrollCountdown = 0;
       await resumeSavedWake();
@@ -537,6 +562,7 @@
             <RangeField label={text.silenceTimeout} hint={text.hintSilenceTimeout} value={local.silence_timeout_secs} min={3} max={10} step={1} display={`${local.silence_timeout_secs} ${text.seconds}`} change={(v) => local && (local.silence_timeout_secs = v)} />
             <RangeField label={text.pauseTolerance} hint={text.hintPauseTolerance} value={local.pause_tolerance_ms} min={500} max={5000} step={100} display={`${local.pause_tolerance_ms} ${text.milliseconds}`} change={(v) => local && (local.pause_tolerance_ms = v)} />
             <RangeField label={text.micSensitivity} hint={text.hintMicSensitivity} value={local.speech_rms_threshold} min={0.003} max={0.020} step={0.001} display={local.speech_rms_threshold.toFixed(3)} change={(v) => local && (local.speech_rms_threshold = v)} />
+            <Toggle label={text.conversationOwnerOnly} hint={local.last_enrolled_speaker ? text.hintConversationOwnerOnly : text.hintConversationOwnerNeedsVoice} value={local.conversation_owner_only} disabled={!local.last_enrolled_speaker && !local.conversation_owner_only} change={() => local && (local.conversation_owner_only = !local.conversation_owner_only)} />
           </section>
         {:else if active === 'interruption'}
           <section class="card">
@@ -549,10 +575,13 @@
             <Field label={wakeText.phrase}>
               <input type="text" aria-label={wakeText.phrase} maxlength="48" placeholder="桃子桃子 / star start" bind:value={local.wake_phrase} disabled={enrolling} />
             </Field>
+            {#if local.wake_word_enabled && !local.wake_phrase.trim()}
+              <p class="wake-help error" role="alert">{convLabelsLang(local.ui_lang).wakeNeedsPhrase}</p>
+            {/if}
             <p class="wake-help">{wakeText.phraseHint}</p>
             <div class="sample">
-              <div><strong>{wakeText.model}</strong><p>{modelReady ? wakeText.ready : wakeText.missing}</p></div>
-              {#if !modelReady}<button class="secondary" onclick={downloadWakeModel} disabled={modelLoading}>{modelLoading ? wakeText.downloading : wakeText.download}</button>{/if}
+              <div><strong>{wakeText.model}</strong><p class:error={!!modelError}>{modelError || (modelReady ? wakeText.ready : wakeText.missing)}</p></div>
+              {#if !modelReady && !modelError}<button class="secondary" onclick={downloadWakeModel} disabled={modelLoading}>{modelLoading ? wakeText.downloading : wakeText.download}</button>{/if}
             </div>
             <RangeField label={wakeText.kws} hint={wakeText.thresholdHint} value={local.wake_kws_threshold} min={0.05} max={0.90} step={0.05} display={`${Math.round(local.wake_kws_threshold * 100)}%`} change={(v) => local && (local.wake_kws_threshold = v)} />
             <Toggle label={wakeText.owner} hint={wakeText.ownerHint} value={local.wake_owner_only} change={() => local && (local.wake_owner_only = !local.wake_owner_only)} />

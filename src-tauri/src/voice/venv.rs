@@ -1,5 +1,5 @@
 use std::io::BufRead;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_json::json;
@@ -50,6 +50,34 @@ pub fn venv_ready() -> bool {
     };
     // Tolerate trailing whitespace differences (e.g. some editors strip the final newline).
     actual.trim_end() == expected.trim_end()
+}
+
+/// Whether a pip failure may fall back to an earlier full install. The marker
+/// lives outside the venv, so it only counts while the venv's interpreter still
+/// exists; a missing interpreter means the venv is about to be rebuilt and the
+/// marker is dropped so a half-built venv is never taken for the old one.
+fn previous_install(python: &Path, marker: &Path) -> bool {
+    if !python.exists() {
+        let _ = std::fs::remove_file(marker);
+        return false;
+    }
+    marker.exists()
+}
+
+/// Modules stt-server cannot start without. edge-tts is left out on purpose:
+/// an older edge-tts still serves STT, wake and voiceprints.
+const CORE_IMPORTS: &str =
+    "import numpy, faster_whisper, onnxruntime, fastapi, uvicorn, scipy, kaldi_native_fbank";
+
+fn core_deps_importable(python: &Path) -> bool {
+    Command::new(python)
+        .arg("-c")
+        .arg(CORE_IMPORTS)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Look up a bundled resource (e.g. `requirements-stt.txt`) using the same
@@ -191,6 +219,8 @@ pub fn ensure_venv(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
+    // Marker present but stale: a full install succeeded on an earlier launch.
+    let had_previous_install = previous_install(&venv_python_path(), &marker_path());
     let _ = app.emit("venv-setup-started", ());
 
     let requirements = resource_path("requirements-stt.txt");
@@ -248,6 +278,14 @@ pub fn ensure_venv(app: &AppHandle) -> Result<(), String> {
             .arg("-r")
             .arg(&requirements);
         if let Err(e) = run_streaming(app, "installing-deps", cmd) {
+            // A venv that was ready before only missed an update (new requirements,
+            // e.g. a raised edge-tts floor). Offline or pip SSL trouble must not take
+            // voice down: keep the old install and retry on the next launch.
+            if had_previous_install && core_deps_importable(&venv_python_path()) {
+                eprintln!("[venv] dependency update failed ({e}); keeping the previous install, will retry next launch");
+                let _ = app.emit("venv-setup-ready", ());
+                return Ok(());
+            }
             emit_error(app, "installing-deps", &e);
             return Err(e);
         }
@@ -269,4 +307,52 @@ pub fn ensure_venv(app: &AppHandle) -> Result<(), String> {
     let _ = app.emit("venv-setup-done", ());
     eprintln!("[venv] PA venv ready at {}", venv_root().display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn fake_python(path: &Path, exit_code: i32) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\nexit {exit_code}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn leftover_marker_does_not_survive_a_failed_rebuild() {
+        let dir = std::env::temp_dir().join(format!("pa-venv-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let python = dir.join("venv/bin/python3");
+        let marker = dir.join(".venv-ready");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&marker, "old requirements").unwrap();
+
+        // Launch 1: venv deleted, marker left over → rebuild, pip fails.
+        assert!(!previous_install(&python, &marker));
+        assert!(!marker.exists());
+        fake_python(&python, 1);
+
+        // Launch 2: half-built interpreter exists, marker gone → still no fallback.
+        assert!(!previous_install(&python, &marker));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fallback_requires_core_imports() {
+        let dir = std::env::temp_dir().join(format!("pa-venv-imports-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let broken = dir.join("broken/python3");
+        let working = dir.join("working/python3");
+        fake_python(&broken, 1);
+        fake_python(&working, 0);
+
+        assert!(!core_deps_importable(&broken));
+        assert!(core_deps_importable(&working));
+        assert!(!core_deps_importable(&dir.join("missing/python3")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
