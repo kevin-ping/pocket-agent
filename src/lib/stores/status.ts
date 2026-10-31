@@ -53,15 +53,14 @@ export function onSpeechDetected() {
 export const statusItems = derived([subagents, computer, speechFlash, settingsStore], ([$subagents, $computer, $speechFlash, $settings]) => {
   const labels = convLabelsLang($settings.ui_lang);
   const items: StatusItem[] = [];
-  if ($subagents.size > 0) {
-    const states = [...$subagents.values()];
-    const done = states.filter((s) => s === 'done').length;
-    items.push({
-      id: 'subagent',
-      tone: done < states.length ? 'active' : 'ok',
-      label: labels.statusSubagent(done, states.length),
-    });
-  }
+  // Always shown: grey 0/0 when idle, yellow breathing while running, green N/N when done.
+  const states = [...$subagents.values()];
+  const done = states.filter((s) => s === 'done').length;
+  items.push({
+    id: 'subagent',
+    tone: states.length === 0 ? 'off' : done < states.length ? 'active' : 'ok',
+    label: labels.statusSubagent(done, states.length),
+  });
   if ($computer) {
     items.push({
       id: 'computer',
