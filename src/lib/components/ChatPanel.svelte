@@ -135,7 +135,9 @@
     overflow: hidden;
     position: relative;
     flex-shrink: 0;
-    align-self: center;
+    /* Bottom of the 146px avatar row: centered, it left 5.5px under the panel, so the first
+       panel below sat 11.5px away instead of the 6px used between the panels. */
+    align-self: flex-end;
   }
 
   /* ─── Floating close button ─── */
