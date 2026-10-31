@@ -3,7 +3,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { chatStore } from '../stores/chat';
   import { settingsStore } from '../stores/settings';
-  import { tLang } from '../i18n';
+  import { tLang, idleHint } from '../i18n';
   import { characterState } from '../stores/character';
 
   let { side = 'right', onSend, onCollapse }: { side?: 'left' | 'right'; onSend: (text: string) => void; onCollapse: () => void } = $props();
@@ -79,7 +79,7 @@
   // During thinking/tool phase, show intermediate steps instead of empty box
   let displayContent = $derived($chatStore.isStreaming && !$chatStore.streamingContent
     ? ''
-    : ($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? tLang($settingsStore.ui_lang).hint.replace("{key}", $settingsStore.hotkey_name)));
+    : ($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? idleHint($settingsStore)));
 
   // Auto-scroll to bottom when streaming
   $effect(() => {
@@ -151,7 +151,7 @@
         </p>
       {:else}
         <p class="message-text" class:error-text={isError}>
-          {@html sanitizeHtml($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? tLang($settingsStore.ui_lang).hint.replace("{key}", $settingsStore.hotkey_name))}
+          {@html sanitizeHtml($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? idleHint($settingsStore))}
         </p>
       {/if}
     </div>

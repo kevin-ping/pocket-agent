@@ -4,6 +4,9 @@ type LangKey = 'zh' | 'en' | 'ja' | 'ko' | 'fr' | 'de' | 'es';
 
 interface Strings {
   hint: string;
+  hintWake: string;
+  talk: string;
+  talkDouble: string;
   inputPlaceholder: string;
   inputBusy: string;
   settings: string;
@@ -58,7 +61,10 @@ interface Strings {
 
 const translations: Record<string, Strings> = {
   zh: {
-    hint: '按下 {key} 说话，再按一次结束，或在下方输入文字',
+    hint: '{talk}，或在下方输入文字',
+    hintWake: '说出唤醒词唤醒我，或{talk}，或在下方输入文字',
+    talk: '按下 {key} 说话，再按一次结束',
+    talkDouble: '双击 {key} 说话，再双击结束',
     inputPlaceholder: '输入消息…',
     inputBusy: '处理中…',
     settings: '设置',
@@ -111,7 +117,10 @@ const translations: Record<string, Strings> = {
     animAvatar: '动画头像（思考/说话）',
   },
   en: {
-    hint: 'Press {key} to talk, press again to stop, or type below',
+    hint: '{talk}, or type below',
+    hintWake: 'Say the wake word to wake me. {talk}, or type below',
+    talk: 'Press {key} to talk, press again to stop',
+    talkDouble: 'Double-click {key} to talk, double-click again to stop',
     inputPlaceholder: 'Type a message…',
     inputBusy: 'Processing…',
     settings: 'Settings',
@@ -164,7 +173,10 @@ const translations: Record<string, Strings> = {
     animAvatar: 'Animated Avatar (thinking/speaking)',
   },
   ja: {
-    hint: '{key}キーで話す、もう一度で終了、または下に入力',
+    hint: '{talk}、または下に入力',
+    hintWake: 'ウェイクワードで起動、または{talk}、または下に入力',
+    talk: '{key}キーで話す、もう一度で終了',
+    talkDouble: '{key}キーをダブルクリックで話す、もう一度ダブルクリックで終了',
     inputPlaceholder: 'メッセージを入力…',
     inputBusy: '処理中…',
     settings: '設定',
@@ -217,7 +229,10 @@ const translations: Record<string, Strings> = {
     animAvatar: 'アニメーションアバター（思考/発話）',
   },
   ko: {
-    hint: '{key} 키를 눌러 말하기, 다시 눌러 끝내기, 또는 아래에 입력',
+    hint: '{talk}, 또는 아래에 입력',
+    hintWake: '호출어로 깨우기, {talk}, 또는 아래에 입력',
+    talk: '{key} 키를 눌러 말하기, 다시 눌러 끝내기',
+    talkDouble: '{key} 키를 더블클릭해 말하기, 다시 더블클릭해 끝내기',
     inputPlaceholder: '메시지 입력…',
     inputBusy: '처리 중…',
     settings: '설정',
@@ -270,7 +285,10 @@ const translations: Record<string, Strings> = {
     animAvatar: '애니메이션 아바타 (생각/말하기)',
   },
   fr: {
-    hint: 'Appuyez sur {key} pour parler, puis à nouveau pour arrêter',
+    hint: '{talk}',
+    hintWake: 'Dites le mot d’activation pour me réveiller. {talk}',
+    talk: 'Appuyez sur {key} pour parler, puis à nouveau pour arrêter',
+    talkDouble: 'Double-cliquez sur {key} pour parler, puis à nouveau pour arrêter',
     inputPlaceholder: 'Saisissez un message…', inputBusy: 'Traitement…', settings: 'Réglages',
     general: 'Général', voice: 'Voix', apiUrl: 'URL API', volume: 'Volume', skin: 'Thème',
     primaryLang: 'Principale', aux1Lang: 'Auxiliaire 1', aux2Lang: 'Auxiliaire 2',
@@ -293,7 +311,10 @@ const translations: Record<string, Strings> = {
     animAvatar: 'Avatar animé (réflexion/parole)',
   },
   de: {
-    hint: '{key} zum Sprechen drücken, erneut zum Beenden',
+    hint: '{talk}',
+    hintWake: 'Sag das Aktivierungswort, um mich zu wecken. {talk}',
+    talk: '{key} zum Sprechen drücken, erneut zum Beenden',
+    talkDouble: '{key} zum Sprechen doppelt drücken, erneut doppelt zum Beenden',
     inputPlaceholder: 'Nachricht eingeben…', inputBusy: 'Verarbeitung…', settings: 'Einstellungen',
     general: 'Allgemein', voice: 'Stimme', apiUrl: 'API-URL', volume: 'Lautstärke', skin: 'Design',
     primaryLang: 'Hauptstimme', aux1Lang: 'Zusatzstimme 1', aux2Lang: 'Zusatzstimme 2',
@@ -315,7 +336,10 @@ const translations: Record<string, Strings> = {
     voiceOutput: 'Sprachausgabe', animAvatar: 'Animierter Avatar (Denken/Sprechen)',
   },
   es: {
-    hint: 'Pulsa {key} para hablar y otra vez para terminar',
+    hint: '{talk}',
+    hintWake: 'Di la palabra de activación para despertarme. {talk}',
+    talk: 'Pulsa {key} para hablar y otra vez para terminar',
+    talkDouble: 'Haz doble clic en {key} para hablar y otra vez para terminar',
     inputPlaceholder: 'Escribe un mensaje…', inputBusy: 'Procesando…', settings: 'Ajustes',
     general: 'General', voice: 'Voz', apiUrl: 'URL de API', volume: 'Volumen', skin: 'Tema',
     primaryLang: 'Principal', aux1Lang: 'Auxiliar 1', aux2Lang: 'Auxiliar 2',
@@ -362,6 +386,16 @@ export function resolveLang(uiLang: string, voice: string): LangKey {
 export function tLang(lang: string): Strings {
   const lk = (lang && lang in TRANSLATIONS) ? lang as LangKey : 'en';
   return TRANSLATIONS[lk] ?? TRANSLATIONS.zh;
+}
+
+/** Idle dialog hint, matching how the user can currently start talking. */
+export function idleHint(s: { ui_lang: string; hotkey_name: string; double_click_to_record: boolean; wake_word_enabled: boolean; wake_phrase: string }): string {
+  const tr = tLang(s.ui_lang);
+  // Mention the wake word without revealing it.
+  const template = s.wake_word_enabled && s.wake_phrase.trim() ? tr.hintWake : tr.hint;
+  return template
+    .replace('{talk}', s.double_click_to_record ? tr.talkDouble : tr.talk)
+    .replace('{key}', () => s.hotkey_name);
 }
 
 /** Conversation labels by explicit lang key. */
