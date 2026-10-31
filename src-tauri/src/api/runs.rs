@@ -19,13 +19,13 @@ fn active() -> &'static Mutex<HashMap<String, Run>> {
     static RUNS: OnceLock<Mutex<HashMap<String, Run>>> = OnceLock::new();
     RUNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
-fn http() -> reqwest::Client {
+pub(super) fn http() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("HTTP client")
 }
-fn authorized(request: reqwest::RequestBuilder, key: &Option<String>) -> reqwest::RequestBuilder {
+pub(super) fn authorized(request: reqwest::RequestBuilder, key: &Option<String>) -> reqwest::RequestBuilder {
     if let Some(key) = key {
         request.bearer_auth(key)
     } else {
@@ -228,11 +228,6 @@ pub async fn chat_stream(
                             return Ok(());
                         }
                     }
-                    "subagent.start" | "subagent.complete" => {
-                        if let Some(status) = subagent_status(&id, &value) {
-                            let _ = app.emit("subagent-status", status);
-                        }
-                    }
                     "approval.request" => {
                         let request_id = value["request_id"]
                             .as_str()
@@ -329,20 +324,6 @@ fn completion_reply(value: &Value, received_text: bool) -> Result<Option<String>
         Err("Hermes 任务结束，但未提供可核实的回复。".into())
     }
 }
-/// Lifecycle facts only: the child's goal/summary/output never reach the UI.
-fn subagent_status(run_id: &str, value: &Value) -> Option<Value> {
-    let subagent_id = value["subagent_id"]
-        .as_str()
-        .filter(|s| !s.is_empty() && s.len() <= 256)?;
-    let phase = match value["event"].as_str()? {
-        "subagent.start" => "start",
-        "subagent.complete" => "complete",
-        _ => return None,
-    };
-    Some(json!({"run_id": run_id, "subagent_id": subagent_id, "phase": phase,
-        "status": value["status"].as_str().unwrap_or("")}))
-}
-
 fn valid_run_id(id: &str) -> bool {
     id.starts_with("run_")
         && id.len() <= 128
@@ -359,23 +340,6 @@ mod tests {
         assert!(valid_run_id("run_123abc"));
         assert!(!valid_run_id("run_../../stop"));
         assert!(!valid_run_id("other"));
-    }
-    #[test]
-    fn subagent_status_relays_lifecycle_without_text() {
-        let start = json!({"event": "subagent.start", "subagent_id": "sa_1",
-            "goal": "secret goal", "preview": "p"});
-        assert_eq!(
-            subagent_status("run_1", &start).unwrap(),
-            json!({"run_id": "run_1", "subagent_id": "sa_1", "phase": "start", "status": ""})
-        );
-        let done = json!({"event": "subagent.complete", "subagent_id": "sa_1",
-            "status": "completed", "summary": "child output"});
-        let out = subagent_status("run_1", &done).unwrap();
-        assert_eq!(out["phase"], "complete");
-        assert_eq!(out["status"], "completed");
-        assert!(out.get("summary").is_none() && out.get("goal").is_none());
-        assert!(subagent_status("run_1", &json!({"event": "subagent.start"})).is_none());
-        assert!(subagent_status("run_1", &json!({"event": "subagent.start", "subagent_id": ""})).is_none());
     }
     #[test]
     fn partial_runs_still_relay_hermes_reply() {

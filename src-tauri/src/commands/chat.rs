@@ -755,6 +755,13 @@ async fn run_hermes_turn(
             }
         }
     } else { false };
+    if request.mode == HermesTurnMode::Ui {
+        if let Some(reminder) = crate::api::subagents::before_turn(app).await {
+            effective_hint.push_str(&reminder);
+        }
+    }
+    // Registers background delegations at turn end, including superseded/early-return exits.
+    let mut delegate_watch = DelegateWatch { app: app.clone(), session: request.session_id.clone(), armed: false };
     if request.turn_gen != TURN_GENERATION.load(Ordering::SeqCst) { return Ok(full_response); }
     // Event name prefix: bridge mode uses "bridge-" prefix, UI mode uses "chat-"
     let evp = |suffix: &str| -> String {
@@ -866,6 +873,9 @@ async fn run_hermes_turn(
                         eprintln!("[SSE] <<< first tool call from LLM [{}]: {}", chrono::Local::now().format("%H:%M:%S%.3f"), name);
                     }
                     received_data = true;
+                    if name == "delegate_task" && request.mode == HermesTurnMode::Ui {
+                        delegate_watch.armed = true;
+                    }
                     let _ = app.emit(&evp("tool-call"), serde_json::json!({
                         "id": id,
                         "name": name
@@ -901,9 +911,29 @@ async fn run_hermes_turn(
         break;
     }
 
+    if request.mode == HermesTurnMode::Ui {
+        crate::api::subagents::dismiss(&crate::api::subagents::dismiss_ids(&full_response));
+    }
     let full_response = strip_cmd_tags(&full_response);
 
     Ok(full_response)
+}
+
+struct DelegateWatch {
+    app: AppHandle,
+    session: String,
+    armed: bool,
+}
+
+impl Drop for DelegateWatch {
+    fn drop(&mut self) {
+        if self.armed {
+            let (app, session) = (self.app.clone(), std::mem::take(&mut self.session));
+            tauri::async_runtime::spawn(async move {
+                crate::api::subagents::after_delegate(&app, &session).await;
+            });
+        }
+    }
 }
 
 pub async fn dispatch_bridge_message(
@@ -1333,7 +1363,7 @@ pub async fn speak_status(
 
 /// Strip [CMD:...] tags from text without executing them.
 fn strip_cmd_tags(text: &str) -> String {
-    let re = regex::Regex::new(r#"\[CMD:[^\]]+\]"#).unwrap();
+    let re = regex::Regex::new(r#"\[CMD:[^\]]+\]|\[SUBAGENT_DONE:[^\]]*\]"#).unwrap();
     let clean = re.replace_all(text, "").to_string();
     let space_re = regex::Regex::new(r"  +").unwrap();
     space_re.replace_all(&clean.trim(), " ").to_string()
@@ -1345,7 +1375,7 @@ fn strip_cmd_tags(text: &str) -> String {
 /// Returns cleaned text with multi-space collapsed.
 fn strip_all_cmd_tags(text: &str) -> String {
     let full_re = regex::Regex::new(r#"\[LOCAL_CMD[\s\S]*?\]"#).unwrap();
-    let cmd_re = regex::Regex::new(r#"\[CMD:[^\]]*\]"#).unwrap();
+    let cmd_re = regex::Regex::new(r#"\[CMD:[^\]]*\]|\[SUBAGENT_DONE:[^\]]*\]"#).unwrap();
     let resid_re = regex::Regex::new(r#"CMD\][^\n]*"#).unwrap();
     let kw_re = regex::Regex::new(r#"(?m)^(executing:|OK|ERROR|FAILED)\s[^\n]*\n?"#).unwrap();
 
@@ -1420,6 +1450,16 @@ mod tests {
         assert_eq!(pick_edge_tts_bin(None, &venv_bin), venv_bin.to_string_lossy());
         assert_eq!(pick_edge_tts_bin(Some(" ".into()), &venv_bin), venv_bin.to_string_lossy());
         assert_eq!(pick_edge_tts_bin(Some("/opt/edge-tts".into()), &venv_bin), "/opt/edge-tts");
+    }
+
+    #[test]
+    fn subagent_done_marker_is_never_shown_or_spoken() {
+        let reply = "子代理已经结束了。[SUBAGENT_DONE:deleg_ab12]";
+        assert_eq!(strip_cmd_tags(reply), "子代理已经结束了。");
+        assert_eq!(strip_all_cmd_tags(reply), "子代理已经结束了。");
+        let (sentences, rest) = split_sentences("好的。[SUBAGENT_DONE:deleg_ab12] 还有呢？");
+        assert!(rest.is_empty());
+        assert_eq!(speakable(&strip_all_cmd_tags(&sentences[1])), "还有呢？");
     }
 
     #[test]

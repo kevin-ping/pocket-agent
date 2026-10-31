@@ -18,7 +18,7 @@
   import { chatStore } from './lib/stores/chat';
   import { settingsStore } from './lib/stores/settings';
   import { layoutStore } from './lib/stores/layout';
-  import { clearSubagents, onSpeechDetected, onSubagentStatus, refreshComputerStatus, settleSubagents } from './lib/stores/status';
+  import { onBackgroundSubagents, onSpeechDetected, refreshComputerStatus, settleSubagents } from './lib/stores/status';
   import { STATUS_PHRASES, langFromVoice, detectLang, convLabels, convLabelsLang, type LangKey } from './lib/i18n';
   import { wakeErrorMessage } from './lib/wakeErrors';
 
@@ -570,7 +570,6 @@
       listen('chat-thinking-start', () => {
         enterThinkingVisuals();
         chatStore.clearThinkingSteps();
-        clearSubagents();
         chatStore.addThinkingStep('🤔 正在思考...');
         cancelPendingStatusSpeech();
         pendingStatusSpeech = setTimeout(() => speakStatus({ kind: 'thinking' }), 250);
@@ -721,11 +720,10 @@
 
       listen('bridge-thinking-start', () => {
         debugState('bridge-thinking-start');
-        clearSubagents();
         startBridgeThinking();
       }),
-      listen<{ subagent_id: string; phase: 'start' | 'complete' }>('subagent-status', (e) => {
-        onSubagentStatus(e.payload);
+      listen<{ count: number }>('background-subagents', (e) => {
+        onBackgroundSubagents(e.payload.count);
       }),
       listen('conv-speech-detected', () => {
         onSpeechDetected();

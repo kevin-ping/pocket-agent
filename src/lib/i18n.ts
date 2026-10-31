@@ -447,7 +447,7 @@ export interface ConversationLabels {
   wakeNeedsModel: string;
   wakeStartFailed: (msg: string) => string;
   // ── Status strip (replaces the chat input row) ──
-  statusSubagent: (done: number, total: number) => string;
+  statusSubagent: (running: number) => string;
   statusComputer: string;
   statusSpeech: string;
   statusSpeechHint: string;
@@ -496,7 +496,7 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsPhrase: '⚠ 唤醒未启动：请在设置 → 唤醒词 中填写目标唤醒词',
     wakeNeedsModel: '⚠ 唤醒未启动：请在设置 → 唤醒词 中下载离线唤醒模型',
     wakeStartFailed: (m) => `⚠ 唤醒启动失败：${m}`,
-    statusSubagent: (d, t) => `子代理 ${d}/${t}`,
+    statusSubagent: (n) => (n > 0 ? `子代理 · 后台 ${n} 个` : '子代理'),
     statusComputer: '电脑工具',
     statusSpeech: '语音侦测',
     statusSpeechHint: '侦测到你说话时闪红光',
@@ -539,7 +539,7 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsPhrase: '⚠ Wake word off: set a wake phrase in Settings → Wake word',
     wakeNeedsModel: '⚠ Wake word off: download the offline wake model in Settings → Wake word',
     wakeStartFailed: (m) => `⚠ Wake word failed to start: ${m}`,
-    statusSubagent: (d, t) => `Subagents ${d}/${t}`,
+    statusSubagent: (n) => (n > 0 ? `Subagents · ${n} in background` : 'Subagents'),
     statusComputer: 'Computer tools',
     statusSpeech: 'Speech detection',
     statusSpeechHint: 'Flashes red when it hears you speak',
@@ -582,7 +582,7 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsPhrase: '⚠ ウェイクワード停止中：設定 → ウェイクワード でウェイクワードを入力してください',
     wakeNeedsModel: '⚠ ウェイクワード停止中：設定 → ウェイクワード でオフラインモデルをダウンロードしてください',
     wakeStartFailed: (m) => `⚠ ウェイクワードの起動に失敗しました：${m}`,
-    statusSubagent: (d, t) => `サブエージェント ${d}/${t}`,
+    statusSubagent: (n) => (n > 0 ? `サブエージェント · バックグラウンド ${n} 件` : 'サブエージェント'),
     statusComputer: 'PC ツール',
     statusSpeech: '音声検出',
     statusSpeechHint: '話し声を検出すると赤く点滅します',
@@ -625,7 +625,7 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsPhrase: '⚠ 웨이크 워드 중지됨: 설정 → 웨이크 워드에서 웨이크 워드를 입력하세요',
     wakeNeedsModel: '⚠ 웨이크 워드 중지됨: 설정 → 웨이크 워드에서 오프라인 모델을 내려받으세요',
     wakeStartFailed: (m) => `⚠ 웨이크 워드 시작 실패: ${m}`,
-    statusSubagent: (d, t) => `하위 에이전트 ${d}/${t}`,
+    statusSubagent: (n) => (n > 0 ? `하위 에이전트 · 백그라운드 ${n}개` : '하위 에이전트'),
     statusComputer: '컴퓨터 도구',
     statusSpeech: '음성 감지',
     statusSpeechHint: '말소리를 감지하면 빨갛게 깜박입니다',
@@ -668,7 +668,7 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsPhrase: '⚠ Mot de réveil inactif : renseignez un mot de réveil dans Réglages → Mot de réveil',
     wakeNeedsModel: '⚠ Mot de réveil inactif : téléchargez le modèle hors ligne dans Réglages → Mot de réveil',
     wakeStartFailed: (m) => `⚠ Échec du démarrage du mot de réveil : ${m}`,
-    statusSubagent: (d, t) => `Sous-agents ${d}/${t}`,
+    statusSubagent: (n) => (n > 0 ? `Sous-agents · ${n} en arrière-plan` : 'Sous-agents'),
     statusComputer: 'Outils ordinateur',
     statusSpeech: 'Détection de la voix',
     statusSpeechHint: 'Clignote en rouge quand je vous entends parler',
@@ -711,7 +711,7 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsPhrase: '⚠ Aktivierungswort inaktiv: Aktivierungswort unter Einstellungen → Aktivierungswort eintragen',
     wakeNeedsModel: '⚠ Aktivierungswort inaktiv: Offline-Modell unter Einstellungen → Aktivierungswort herunterladen',
     wakeStartFailed: (m) => `⚠ Aktivierungswort konnte nicht gestartet werden: ${m}`,
-    statusSubagent: (d, t) => `Subagenten ${d}/${t}`,
+    statusSubagent: (n) => (n > 0 ? `Subagenten · ${n} im Hintergrund` : 'Subagenten'),
     statusComputer: 'Computer-Tools',
     statusSpeech: 'Spracherkennung',
     statusSpeechHint: 'Blinkt rot, wenn ich dich sprechen höre',
@@ -754,7 +754,7 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsPhrase: '⚠ Palabra de activación inactiva: escribe una palabra de activación en Ajustes → Palabra de activación',
     wakeNeedsModel: '⚠ Palabra de activación inactiva: descarga el modelo sin conexión en Ajustes → Palabra de activación',
     wakeStartFailed: (m) => `⚠ Error al iniciar la palabra de activación: ${m}`,
-    statusSubagent: (d, t) => `Subagentes ${d}/${t}`,
+    statusSubagent: (n) => (n > 0 ? `Subagentes · ${n} en segundo plano` : 'Subagentes'),
     statusComputer: 'Herramientas del equipo',
     statusSpeech: 'Detección de voz',
     statusSpeechHint: 'Parpadea en rojo cuando te oye hablar',

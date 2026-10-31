@@ -168,6 +168,7 @@ pub fn run() {
             commands::config::quit_app,
             commands::computer::get_computer_status,
             api::runs::respond_computer_approval,
+            api::subagents::settle_background_subagents,
             commands::history::open_chat_history,
             commands::history::save_chat_message,
 

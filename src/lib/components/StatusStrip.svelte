@@ -36,6 +36,7 @@
     <button
       type="button"
       class="item"
+      class:end={item.end}
       aria-label={item.tooltip ? `${item.label} — ${item.tooltip}` : item.label}
       onmouseenter={() => hoverIn(item.id)}
       onmouseleave={hoverOut}
@@ -53,7 +54,7 @@
     position: relative;
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     gap: 4px;
     height: 22px;
     padding: 0 8px 2px;
@@ -97,6 +98,7 @@
     cursor: default;
     font: inherit;
   }
+  .item.end { margin-left: auto; }
   .item:hover .dot { transform: scale(1.35); }
 
   .dot {

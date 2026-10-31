@@ -78,13 +78,15 @@ let scriptDetected: boolean = false;
 let streamEnding = false;
 // Collapse runs of 3+ newlines (LLM tool-call segment stitching) to a single blank line.
 let trailingNewlines = 0;
-// CMD-strip state: swallow [CMD:...] and [LOCAL_CMD ...] tokens from the displayed stream.
+// CMD-strip state: swallow [CMD:...], [LOCAL_CMD ...] and [SUBAGENT_DONE:...] tokens from the displayed stream.
 // Tokens may straddle delta boundaries, so we buffer chars that might be opener prefixes.
 let inCmd = false;
 let cmdHold = '';
 // hold refs to store functions so timer callbacks can use them
 let storeUpdate: any;
 let storeFinalize: (() => void) | null = null;
+
+const CMD_OPENERS = ['[CMD:', '[LOCAL_CMD', '[SUBAGENT_DONE:'];
 
 // Streaming filter that hides CMD tokens from chat display.
 // Backend still sends raw deltas; TTS and history are stripped server-side.
@@ -100,12 +102,12 @@ function filterCmd(delta: string): string {
       continue;
     }
     cmdHold += ch;
-    if (cmdHold === '[CMD:' || cmdHold === '[LOCAL_CMD') {
+    if (CMD_OPENERS.includes(cmdHold)) {
       cmdHold = '';
       inCmd = true;
       continue;
     }
-    if (!'[CMD:'.startsWith(cmdHold) && !'[LOCAL_CMD'.startsWith(cmdHold)) {
+    if (!CMD_OPENERS.some((opener) => opener.startsWith(cmdHold))) {
       out += cmdHold;
       cmdHold = '';
     }
