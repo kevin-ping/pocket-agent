@@ -1,33 +1,12 @@
 <script lang="ts">
   import { fly } from 'svelte/transition';
-  import { invoke } from '@tauri-apps/api/core';
   import { chatStore } from '../stores/chat';
   import { settingsStore } from '../stores/settings';
-  import { tLang, idleHint } from '../i18n';
-  import { characterState } from '../stores/character';
+  import { idleHint } from '../i18n';
+  import StatusStrip from './StatusStrip.svelte';
 
-  let { side = 'right', onSend, onCollapse }: { side?: 'left' | 'right'; onSend: (text: string) => void; onCollapse: () => void } = $props();
+  let { side = 'right', onCollapse }: { side?: 'left' | 'right'; onCollapse: () => void } = $props();
 
-  let inputText = $state('');
-  let computerChecking = $state(false);
-  let computerMessage = $state('');
-
-  async function checkComputer(inspect = false) {
-    computerChecking = true;
-    computerMessage = '';
-    try {
-      const status = await invoke<{ available: boolean; message: string }>('get_computer_status');
-      computerMessage = status.message;
-      if (inspect && status.available) {
-        computerMessage = '';
-        onSend('请按需读取当前窗口，告诉我正在看什么。只查看，不点击或输入。如果当前窗口是 Pocket Agent，请先询问我要查看哪个应用。');
-      }
-    } catch (error) {
-      computerMessage = String(error);
-    } finally {
-      computerChecking = false;
-    }
-  }
   let contentEl: HTMLDivElement | undefined;
   let panelEl: HTMLDivElement | undefined;
 
@@ -112,22 +91,6 @@
 
   let isError = $derived(!$chatStore.isStreaming && !!$chatStore.error);
   let isStreaming = $derived($chatStore.isStreaming);
-  let isBusy = $derived($chatStore.isStreaming || $characterState === 'thinking');
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey && inputText.trim()) {
-      e.preventDefault();
-      onSend(inputText.trim());
-      inputText = '';
-    }
-  }
-
-  function handleSendClick() {
-    if (inputText.trim()) {
-      onSend(inputText.trim());
-      inputText = '';
-    }
-  }
 </script>
 
 <div
@@ -142,9 +105,6 @@
   <!-- Content area -->
   <div class="content-area" bind:this={contentEl} class:error={isError}>
     <div class="message-content">
-      {#if computerMessage}
-        <p class="computer-status" role="status">{computerMessage}</p>
-      {/if}
       {#if $chatStore.isStreaming}
         <p class="message-text" class:error-text={isError}>
           {@html sanitizeHtml($chatStore.streamingContent)}<span class="cursor" aria-hidden="true">▋</span>
@@ -157,43 +117,10 @@
     </div>
   </div>
 
-  <!-- Input area -->
-  <div class="input-area">
-    <button class="computer-btn" onclick={() => checkComputer(true)} disabled={isBusy || computerChecking}
-      title="按需看当前窗口（也可直接语音提出请求）" aria-label="看当前窗口">▣</button>
-    <button class="computer-btn" onclick={() => checkComputer()} disabled={computerChecking}
-      title="检查电脑工具连接与权限说明，不读取屏幕" aria-label="检查电脑工具">ⓘ</button>
-    <input
-      type="text"
-      placeholder={isBusy ? tLang($settingsStore.ui_lang).inputBusy : tLang($settingsStore.ui_lang).inputPlaceholder}
-      bind:value={inputText}
-      onkeydown={handleKeydown}
-      maxlength={500}
-      autocomplete="off"
-      spellcheck="false"
-      aria-label="消息输入"
-    />
-    <button
-      class="send-btn"
-      onclick={handleSendClick}
-      disabled={!inputText.trim()}
-      aria-label="发送"
-    >
-      ↑
-    </button>
-  </div>
+  <StatusStrip />
 </div>
 
 <style>
-  .computer-btn {
-    border: 0;
-    background: transparent;
-    color: rgba(160, 180, 255, 0.95);
-    padding: 3px;
-    cursor: pointer;
-  }
-  .computer-btn:disabled { opacity: 0.4; cursor: default; }
-  .computer-status { font-size: 11px; line-height: 1.5; color: #b6c6ff; margin: 0 0 5px; }
   /* ─── Panel ─── */
   .chat-panel {
     width: 280px;
@@ -324,50 +251,4 @@
     color: var(--primary);
     animation: blink-cursor 0.75s ease-in-out infinite;
   }
-
-  /* ─── Input area ─── */
-  .input-area {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 6px 6px;
-    border-top: 1px solid rgba(255, 255, 255, 0.06);
-    flex-shrink: 0;
-  }
-
-  input {
-    flex: 1;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 7px;
-    padding: 4px 9px;
-    color: rgba(232, 232, 240, 0.92);
-    font-size: 11.5px;
-    outline: none;
-    transition: border-color 0.15s;
-    min-width: 0;
-  }
-  input:focus       { border-color: rgba(160, 168, 255, 0.5); }
-  input:disabled    { opacity: 0.4; cursor: not-allowed; }
-  input::placeholder { color: rgba(232, 232, 240, 0.28); }
-
-  .send-btn {
-    width: 26px;
-    height: 26px;
-    border-radius: 6px;
-    background: rgba(160, 168, 255, 0.18);
-    border: 1px solid rgba(160, 168, 255, 0.32);
-    color: #A0A8FF;
-    font-size: 14px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: background 0.12s, opacity 0.12s;
-    flex-shrink: 0;
-    line-height: 1;
-    padding: 0;
-  }
-  .send-btn:hover:not(:disabled) { background: rgba(160, 168, 255, 0.32); }
-  .send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 </style>

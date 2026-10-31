@@ -18,6 +18,7 @@
   import { chatStore } from './lib/stores/chat';
   import { settingsStore } from './lib/stores/settings';
   import { layoutStore } from './lib/stores/layout';
+  import { clearSubagents, onSpeechDetected, onSubagentStatus, refreshComputerStatus, settleSubagents } from './lib/stores/status';
   import { STATUS_PHRASES, langFromVoice, detectLang, convLabels, convLabelsLang, type LangKey } from './lib/i18n';
   import { wakeErrorMessage } from './lib/wakeErrors';
 
@@ -569,6 +570,7 @@
       listen('chat-thinking-start', () => {
         enterThinkingVisuals();
         chatStore.clearThinkingSteps();
+        clearSubagents();
         chatStore.addThinkingStep('🤔 正在思考...');
         cancelPendingStatusSpeech();
         pendingStatusSpeech = setTimeout(() => speakStatus({ kind: 'thinking' }), 250);
@@ -657,6 +659,7 @@
         autoCloseBreakConfirm();
       }),
       listen<number>('chat-audio-done', (e) => {
+        settleSubagents();
         avatarEmotion = null;
         mouthActive = false;
         if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
@@ -705,6 +708,7 @@
         }
       }),
       listen<string>('chat-stream-error', (e) => {
+        settleSubagents();
         cancelPendingStatusSpeech();
         lastSpokenStatus = null;
         debugState('chat-stream-error', { error: e.payload });
@@ -717,7 +721,14 @@
 
       listen('bridge-thinking-start', () => {
         debugState('bridge-thinking-start');
+        clearSubagents();
         startBridgeThinking();
+      }),
+      listen<{ subagent_id: string; phase: 'start' | 'complete' }>('subagent-status', (e) => {
+        onSubagentStatus(e.payload);
+      }),
+      listen('conv-speech-detected', () => {
+        onSpeechDetected();
       }),
       listen('bridge-push-received', () => {
         debugState('bridge-push-received');
@@ -1019,6 +1030,7 @@
       listen('settings-changed', () => {
         settingsStore.load();
         void refreshMeshCustom();
+        void refreshComputerStatus();
       }),
       listen('tray-open-history', () => {
         openChatHistory();
@@ -1185,7 +1197,6 @@
     {#if $layoutStore.expanded && $layoutStore.avatarSide === 'right'}
       <ChatPanel
         side="left"
-        onSend={handleSendMessage}
         onCollapse={() => layoutStore.toggle()}
       />
       <div class="gap"></div>
@@ -1222,7 +1233,6 @@
       <div class="gap"></div>
       <ChatPanel
         side="right"
-        onSend={handleSendMessage}
         onCollapse={() => layoutStore.toggle()}
       />
     {/if}

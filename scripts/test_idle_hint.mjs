@@ -17,10 +17,10 @@ const LANGS = ['zh', 'en', 'ja', 'ko', 'fr', 'de', 'es'];
 const base = { ui_lang: 'zh', hotkey_name: 'fn', double_click_to_record: false, wake_word_enabled: false, wake_phrase: '' };
 
 test('zh hints for each wake / double-click combination', () => {
-  assert.equal(idleHint(base), '按下 fn 说话，再按一次结束，或在下方输入文字');
-  assert.equal(idleHint({ ...base, double_click_to_record: true }), '双击 fn 说话，再双击结束，或在下方输入文字');
-  assert.equal(idleHint({ ...base, wake_word_enabled: true, wake_phrase: '桃子桃子' }), '说出唤醒词唤醒我，或按下 fn 说话，再按一次结束，或在下方输入文字');
-  assert.equal(idleHint({ ...base, wake_word_enabled: true, wake_phrase: '桃子桃子', double_click_to_record: true }), '说出唤醒词唤醒我，或双击 fn 说话，再双击结束，或在下方输入文字');
+  assert.equal(idleHint(base), '按下 fn 说话，再按一次结束');
+  assert.equal(idleHint({ ...base, double_click_to_record: true }), '双击 fn 说话，再双击结束');
+  assert.equal(idleHint({ ...base, wake_word_enabled: true, wake_phrase: '桃子桃子' }), '说出唤醒词唤醒我，或按下 fn 说话，再按一次结束');
+  assert.equal(idleHint({ ...base, wake_word_enabled: true, wake_phrase: '桃子桃子', double_click_to_record: true }), '说出唤醒词唤醒我，或双击 fn 说话，再双击结束');
 });
 
 test('wake enabled with an empty or blank phrase falls back to the plain hint', () => {
@@ -39,10 +39,12 @@ test('every language fills all placeholders and never reveals the wake phrase', 
         assert.doesNotMatch(hint, /\{|\}|undefined/, `${ui_lang}: ${hint}`);
         assert.match(hint, /fn/, `${ui_lang}: ${hint}`);
         assert.doesNotMatch(hint, /star start/, `${ui_lang}: ${hint}`);
+        // The chat input row was removed; hints must not point at it.
+        assert.doesNotMatch(hint, /输入|type below|入力|입력|tape|tipp|escrib/i, `${ui_lang}: ${hint}`);
         assert.equal(hint !== idleHint({ ...s, wake_word_enabled: false }), wake_word_enabled, `${ui_lang}: ${hint}`);
       }
     }
   }
   assert.equal(idleHint({ ...base, ui_lang: 'en', wake_word_enabled: true, wake_phrase: 'star start', double_click_to_record: true }),
-    'Say the wake word to wake me. Double-click fn to talk, double-click again to stop, or type below');
+    'Say the wake word to wake me. Double-click fn to talk, double-click again to stop');
 });

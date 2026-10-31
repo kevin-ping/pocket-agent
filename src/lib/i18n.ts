@@ -61,8 +61,8 @@ interface Strings {
 
 const translations: Record<string, Strings> = {
   zh: {
-    hint: '{talk}，或在下方输入文字',
-    hintWake: '说出唤醒词唤醒我，或{talk}，或在下方输入文字',
+    hint: '{talk}',
+    hintWake: '说出唤醒词唤醒我，或{talk}',
     talk: '按下 {key} 说话，再按一次结束',
     talkDouble: '双击 {key} 说话，再双击结束',
     inputPlaceholder: '输入消息…',
@@ -117,8 +117,8 @@ const translations: Record<string, Strings> = {
     animAvatar: '动画头像（思考/说话）',
   },
   en: {
-    hint: '{talk}, or type below',
-    hintWake: 'Say the wake word to wake me. {talk}, or type below',
+    hint: '{talk}',
+    hintWake: 'Say the wake word to wake me. {talk}',
     talk: 'Press {key} to talk, press again to stop',
     talkDouble: 'Double-click {key} to talk, double-click again to stop',
     inputPlaceholder: 'Type a message…',
@@ -173,8 +173,8 @@ const translations: Record<string, Strings> = {
     animAvatar: 'Animated Avatar (thinking/speaking)',
   },
   ja: {
-    hint: '{talk}、または下に入力',
-    hintWake: 'ウェイクワードで起動、または{talk}、または下に入力',
+    hint: '{talk}',
+    hintWake: 'ウェイクワードで起動、または{talk}',
     talk: '{key}キーで話す、もう一度で終了',
     talkDouble: '{key}キーをダブルクリックで話す、もう一度ダブルクリックで終了',
     inputPlaceholder: 'メッセージを入力…',
@@ -229,8 +229,8 @@ const translations: Record<string, Strings> = {
     animAvatar: 'アニメーションアバター（思考/発話）',
   },
   ko: {
-    hint: '{talk}, 또는 아래에 입력',
-    hintWake: '호출어로 깨우기, {talk}, 또는 아래에 입력',
+    hint: '{talk}',
+    hintWake: '호출어로 깨우기, 또는 {talk}',
     talk: '{key} 키를 눌러 말하기, 다시 눌러 끝내기',
     talkDouble: '{key} 키를 더블클릭해 말하기, 다시 더블클릭해 끝내기',
     inputPlaceholder: '메시지 입력…',
@@ -446,6 +446,11 @@ export interface ConversationLabels {
   wakeNeedsPhrase: string;
   wakeNeedsModel: string;
   wakeStartFailed: (msg: string) => string;
+  // ── Status strip (replaces the chat input row) ──
+  statusSubagent: (done: number, total: number) => string;
+  statusComputer: string;
+  statusSpeech: string;
+  statusSpeechHint: string;
 }
 
 function fmtSeconds(ms: number): string {
@@ -491,6 +496,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsPhrase: '⚠ 唤醒未启动：请在设置 → 唤醒词 中填写目标唤醒词',
     wakeNeedsModel: '⚠ 唤醒未启动：请在设置 → 唤醒词 中下载离线唤醒模型',
     wakeStartFailed: (m) => `⚠ 唤醒启动失败：${m}`,
+    statusSubagent: (d, t) => `子代理 ${d}/${t}`,
+    statusComputer: '电脑工具',
+    statusSpeech: '语音侦测',
+    statusSpeechHint: '侦测到你说话时闪红光',
   },
   en: {
     continuousMode: 'Continuous Conversation',
@@ -530,6 +539,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsPhrase: '⚠ Wake word off: set a wake phrase in Settings → Wake word',
     wakeNeedsModel: '⚠ Wake word off: download the offline wake model in Settings → Wake word',
     wakeStartFailed: (m) => `⚠ Wake word failed to start: ${m}`,
+    statusSubagent: (d, t) => `Subagents ${d}/${t}`,
+    statusComputer: 'Computer tools',
+    statusSpeech: 'Speech detection',
+    statusSpeechHint: 'Flashes red when it hears you speak',
   },
   ja: {
     continuousMode: '連続会話モード',
@@ -569,6 +582,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsPhrase: '⚠ ウェイクワード停止中：設定 → ウェイクワード でウェイクワードを入力してください',
     wakeNeedsModel: '⚠ ウェイクワード停止中：設定 → ウェイクワード でオフラインモデルをダウンロードしてください',
     wakeStartFailed: (m) => `⚠ ウェイクワードの起動に失敗しました：${m}`,
+    statusSubagent: (d, t) => `サブエージェント ${d}/${t}`,
+    statusComputer: 'PC ツール',
+    statusSpeech: '音声検出',
+    statusSpeechHint: '話し声を検出すると赤く点滅します',
   },
   ko: {
     continuousMode: '연속 대화 모드',
@@ -608,6 +625,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsPhrase: '⚠ 웨이크 워드 중지됨: 설정 → 웨이크 워드에서 웨이크 워드를 입력하세요',
     wakeNeedsModel: '⚠ 웨이크 워드 중지됨: 설정 → 웨이크 워드에서 오프라인 모델을 내려받으세요',
     wakeStartFailed: (m) => `⚠ 웨이크 워드 시작 실패: ${m}`,
+    statusSubagent: (d, t) => `하위 에이전트 ${d}/${t}`,
+    statusComputer: '컴퓨터 도구',
+    statusSpeech: '음성 감지',
+    statusSpeechHint: '말소리를 감지하면 빨갛게 깜박입니다',
   },
   fr: {
     continuousMode: 'Conversation continue',
@@ -647,6 +668,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsPhrase: '⚠ Mot de réveil inactif : renseignez un mot de réveil dans Réglages → Mot de réveil',
     wakeNeedsModel: '⚠ Mot de réveil inactif : téléchargez le modèle hors ligne dans Réglages → Mot de réveil',
     wakeStartFailed: (m) => `⚠ Échec du démarrage du mot de réveil : ${m}`,
+    statusSubagent: (d, t) => `Sous-agents ${d}/${t}`,
+    statusComputer: 'Outils ordinateur',
+    statusSpeech: 'Détection de la voix',
+    statusSpeechHint: 'Clignote en rouge quand je vous entends parler',
   },
   de: {
     continuousMode: 'Fortlaufendes Gespräch',
@@ -686,6 +711,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsPhrase: '⚠ Aktivierungswort inaktiv: Aktivierungswort unter Einstellungen → Aktivierungswort eintragen',
     wakeNeedsModel: '⚠ Aktivierungswort inaktiv: Offline-Modell unter Einstellungen → Aktivierungswort herunterladen',
     wakeStartFailed: (m) => `⚠ Aktivierungswort konnte nicht gestartet werden: ${m}`,
+    statusSubagent: (d, t) => `Subagenten ${d}/${t}`,
+    statusComputer: 'Computer-Tools',
+    statusSpeech: 'Spracherkennung',
+    statusSpeechHint: 'Blinkt rot, wenn ich dich sprechen höre',
   },
   es: {
     continuousMode: 'Conversación continua',
@@ -725,6 +754,10 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsPhrase: '⚠ Palabra de activación inactiva: escribe una palabra de activación en Ajustes → Palabra de activación',
     wakeNeedsModel: '⚠ Palabra de activación inactiva: descarga el modelo sin conexión en Ajustes → Palabra de activación',
     wakeStartFailed: (m) => `⚠ Error al iniciar la palabra de activación: ${m}`,
+    statusSubagent: (d, t) => `Subagentes ${d}/${t}`,
+    statusComputer: 'Herramientas del equipo',
+    statusSpeech: 'Detección de voz',
+    statusSpeechHint: 'Parpadea en rojo cuando te oye hablar',
   },
 };
 

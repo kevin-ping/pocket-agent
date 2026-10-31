@@ -392,6 +392,8 @@ fn worker_loop(
                                     "[conv] speech detected: rms={:.4} start={:.4} rel={:.4} floor={:.4}",
                                     rms, effective_threshold, effective_release, noise_floor
                                 );
+                                // Status strip pulses its speech dot on each burst start.
+                                let _ = app.emit("conv-speech-detected", ());
                             }
                         } else if listening_speech_active {
                             eprintln!(
