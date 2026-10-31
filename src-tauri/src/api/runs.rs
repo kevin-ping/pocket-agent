@@ -215,6 +215,18 @@ pub async fn chat_stream(
                             }
                         }
                     }
+                    "reasoning.available" => {
+                        if let Some(text) = reasoning_text(&value) {
+                            // Each event is a whole block; the newline keeps blocks apart.
+                            if tx
+                                .send(Ok(StreamEvent::Reasoning(format!("{}\n", text))))
+                                .await
+                                .is_err()
+                            {
+                                return Ok(());
+                            }
+                        }
+                    }
                     "tool.started" => {
                         let name = value["tool"].as_str().unwrap_or("computer_use").to_string();
                         if tx
@@ -324,6 +336,12 @@ fn completion_reply(value: &Value, received_text: bool) -> Result<Option<String>
         Err("Hermes 任务结束，但未提供可核实的回复。".into())
     }
 }
+fn reasoning_text(value: &Value) -> Option<String> {
+    value["text"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .map(String::from)
+}
 fn valid_run_id(id: &str) -> bool {
     id.starts_with("run_")
         && id.len() <= 128
@@ -340,6 +358,13 @@ mod tests {
         assert!(valid_run_id("run_123abc"));
         assert!(!valid_run_id("run_../../stop"));
         assert!(!valid_run_id("other"));
+    }
+    #[test]
+    fn reasoning_text_relays_only_non_empty_text() {
+        let event = json!({"event": "reasoning.available", "text": "先打开浏览器"});
+        assert_eq!(reasoning_text(&event), Some("先打开浏览器".into()));
+        assert_eq!(reasoning_text(&json!({"text": "  \n"})), None);
+        assert_eq!(reasoning_text(&json!({"event": "reasoning.available"})), None);
     }
     #[test]
     fn partial_runs_still_relay_hermes_reply() {

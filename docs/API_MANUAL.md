@@ -73,7 +73,7 @@ curl -X POST http://127.0.0.1:8650/push \
 | text | string | ✅ | - | 发送给 Hermes 的消息内容 |
 | user_language | string | ❌ | null | 用户语言偏好 |
 | context | string | ❌ | null | 附加上下文（如棋局状态） |
-| show_thinking | bool | ❌ | true | 是否在 PA 显示 thinking 动画 |
+| show_thinking | bool | ❌ | true | 是否在 PA 显示 thinking 动画；为 false 时思考内容也不写入思考面板 |
 
 ### 响应
 
@@ -129,7 +129,7 @@ Bridge 使用独立命名空间：`bridge:{source}:{session_id}`
 2. PA 返回 202 Accepted
 3. PA 进入 thinking 状态（bridge-thinking-start）
 4. Hermes 流式返回中间推理：
-   - bridge-thinking（reasoning 更新）
+   - bridge-thinking（reasoning 片段，追加到状态栏下方的思考面板）
    - bridge-tool-call（工具调用通知）
 5. Hermes 处理完毕，PA 拿到完整回复
 6. PA 通过 push_to_self 调内部 /push 触发 TTS + 展示

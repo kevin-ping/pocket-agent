@@ -21,6 +21,9 @@ interface ChatState {
   /** Latest voice STT result, shown in SttPanel above the StatusPanel. Kept until
    *  the next utterance replaces it; cleared only by setSttText(null) or clear. */
   sttText: string | null;
+  /** Hermes' reasoning text for the current turn, shown in ReasoningPanel below the
+   *  StatusPanel. Appended chunk by chunk; kept until the next turn starts. */
+  reasoningText: string;
   /** First-launch PA venv bootstrap (~/.pocket-agent/venv) state. Rendered in
    *  StatusPanel as an extra row. `idle` and `ready` hide it; `installing` and
    *  `error` show it with phase + last log line. */
@@ -173,6 +176,7 @@ function createChatStore() {
     thinkingSteps: [],
     voiceStatus: null,
     sttText: null,
+    reasoningText: '',
     voiceSetupState: 'idle',
     voiceSetupPhase: '',
     voiceSetupDetail: '',
@@ -231,22 +235,13 @@ function createChatStore() {
         return { ...s, thinkingSteps: [...s.thinkingSteps, step] };
       }),
 
-    /** Update the last thinking step in-place (reasoning comes as many tiny chunks).
-     *  Once a tool (🔧) step has been added, ignore further reasoning so the visible
-     *  sequence is 🤔 → 🔧 → 🔧 → 🔧 instead of 🤔 → 🔧 → 🤔 → 🔧 → 🤔. */
-    updateLastThinkingStep: (text: string) =>
-      update((s) => {
-        if (s.thinkingSteps.length === 0) {
-          return { ...s, thinkingSteps: [`🤔 ${text}`] };
-        }
-        const last = s.thinkingSteps[s.thinkingSteps.length - 1];
-        if (last.startsWith('🤔')) {
-          const updated = [...s.thinkingSteps];
-          updated[updated.length - 1] = `🤔 ${text}`;
-          return { ...s, thinkingSteps: updated };
-        }
-        return s;
-      }),
+    /** Append a reasoning chunk (reasoning comes as many tiny chunks). */
+    appendReasoning: (text: string) =>
+      update((s) => ({ ...s, reasoningText: s.reasoningText + text })),
+
+    /** Drop the previous turn's reasoning — called only at turn start. */
+    clearReasoning: () =>
+      update((s) => (s.reasoningText === '' ? s : { ...s, reasoningText: '' })),
 
     /** Clear all thinking steps — called when final text arrives */
     clearThinkingSteps: () =>
@@ -392,6 +387,7 @@ function createChatStore() {
         thinkingSteps: [],
         voiceStatus: null,
         sttText: null,
+        reasoningText: '',
       }));
     },
   };

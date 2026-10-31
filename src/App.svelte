@@ -11,6 +11,7 @@
   import ChatPanel from './lib/components/ChatPanel.svelte';
   import StatusPanel from './lib/components/StatusPanel.svelte';
   import SttPanel from './lib/components/SttPanel.svelte';
+  import ReasoningPanel from './lib/components/ReasoningPanel.svelte';
   import BreakConfirmModal from './lib/components/BreakConfirmModal.svelte';
   import ComputerApproval from './lib/components/ComputerApproval.svelte';
 
@@ -235,6 +236,7 @@
     clearBridgeFallbackTimer();
     enterThinkingVisuals();
     chatStore.clearThinkingSteps();
+    chatStore.clearReasoning();
     chatStore.addThinkingStep('🤔 正在思考...');
     cancelPendingStatusSpeech();
     pendingStatusSpeech = setTimeout(() => speakStatus({ kind: 'thinking' }), 250);
@@ -296,14 +298,16 @@
   $: if ($characterState === 'idle' || $characterState === 'listening') mouthActive = false;
   // A new listen starts a new utterance: drop the previous one (covers fn key, manual
   // start and continuous-mode re-listen alike).
-  $: if ($characterState === 'listening') chatStore.setSttText(null);
+  $: if ($characterState === 'listening') { chatStore.setSttText(null); chatStore.clearReasoning(); }
   $: extraStatusH = $chatStore.thinkingSteps.length === 0
     ? 0
     : Math.min(STATUS_MAX_EXTRA_H, STATUS_BLOCK_PAD + $chatStore.thinkingSteps.length * STATUS_LINE_H);
   // Measured: 0 while no STT text, else 6 px row padding + panel (content capped at 88 px).
   let sttRowH = 0;
+  // Same as sttRowH, for the reasoning row below the status panel.
+  let reasoningRowH = 0;
   $: if ($layoutStore.expanded && !$layoutStore.resizing) {
-    const targetH = STATUS_BASE_H + sttRowH + extraStatusH;
+    const targetH = STATUS_BASE_H + sttRowH + extraStatusH + reasoningRowH;
     queueMicrotask(() => {
       appWindow.setSize(new LogicalSize(STATUS_EXPANDED_W, targetH)).catch(() => {});
     });
@@ -570,6 +574,7 @@
       listen('chat-thinking-start', () => {
         enterThinkingVisuals();
         chatStore.clearThinkingSteps();
+        chatStore.clearReasoning();
         chatStore.addThinkingStep('🤔 正在思考...');
         cancelPendingStatusSpeech();
         pendingStatusSpeech = setTimeout(() => speakStatus({ kind: 'thinking' }), 250);
@@ -681,10 +686,10 @@
         autoCloseBreakConfirm();
       }),
 
-      // LLM intermediate thinking/reasoning updates (in-place update of last 🤔 step)
+      // LLM intermediate thinking/reasoning updates (appended to ReasoningPanel)
       listen<string>('chat-thinking', (e) => {
         enterThinkingVisuals();
-        chatStore.updateLastThinkingStep(e.payload);
+        chatStore.appendReasoning(e.payload);
       }),
 
       // Tool call start notification
@@ -745,7 +750,8 @@
       // Bridge-mode intermediate events (reasoning + tool calls from Hermes via bridge)
       listen<string>("bridge-thinking", (e) => {
         enterThinkingVisuals();
-        chatStore.updateLastThinkingStep(e.payload);
+        // Without bridge-thinking-start (show_thinking=false) the panel was never cleared.
+        if (bridgeThinkingActive) chatStore.appendReasoning(e.payload);
       }),
       listen<string>("bridge-tool-call", (e) => {
         enterThinkingVisuals();
@@ -1240,6 +1246,7 @@
   {#if $layoutStore.expanded}
     <div class="stt-row" class:empty={$chatStore.sttText === null} bind:offsetHeight={sttRowH}><SttPanel /></div>
     <div class="status-row"><StatusPanel /></div>
+    <div class="reasoning-row" class:empty={!$chatStore.reasoningText.trim()} bind:offsetHeight={reasoningRowH}><ReasoningPanel /></div>
   {/if}
 
 
@@ -1366,4 +1373,6 @@
      instead of unmounting the panel, so its backdrop-filter never toggles. */
   .stt-row { padding-top: 6px; width: 100%; flex-shrink: 0; }
   .stt-row.empty { height: 0; padding-top: 0; overflow: hidden; }
+  .reasoning-row { padding-top: 6px; width: 100%; flex-shrink: 0; }
+  .reasoning-row.empty { height: 0; padding-top: 0; overflow: hidden; }
 </style>
