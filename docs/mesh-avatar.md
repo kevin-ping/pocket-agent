@@ -45,6 +45,8 @@
 
 离开 `speaking`、被 barge-in 打断、组件卸载时，口型循环都会停止，音量归零，嘴巴闭上。barge-in 时 `App.svelte` 通过 `interrupted` prop 通知 `AvatarIcon`，并清空回复情绪：此时 `characterState` 可能还停在 `speaking`（要等后端 Ready 后才切到 `listening`），但嘴巴会立刻停下。
 
+圆形裁剪除了圆角加 `overflow: hidden`,外层 `.mesh-face` 还加了 `mask-image` 圆形遮罩：旧版 WebKit(macOS 12 实测)不会按圆角裁剪单独合成的 WebGL 画布，只靠 `overflow` 时头像会露出圆圈。
+
 WebGL 上下文丢失后恢复时，元素会换一个新的头像实例。组件在每次 `load` 事件里把当前的情绪和说话状态重新设置到新实例上，所以正在说话时恢复，嘴巴会继续动。
 
 ## 回复情绪

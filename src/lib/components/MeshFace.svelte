@@ -143,6 +143,10 @@
     inset: 0;
     overflow: hidden;
     border-radius: 50%;
+    /* Older WebKit (macOS 12) ignores the rounded overflow clip for the composited WebGL
+       canvas, so the avatar spilled out of the circle; a mask clips composited layers too. */
+    -webkit-mask-image: radial-gradient(circle closest-side, #000 99%, transparent 100%);
+    mask-image: radial-gradient(circle closest-side, #000 99%, transparent 100%);
     pointer-events: none;
   }
   /* 1600px source at 96px = 0.06 scale; face center (797, 860) → (48, 51.6), placed at (36, 42) — slightly below the 72px padding-box center */
