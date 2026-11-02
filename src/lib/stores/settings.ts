@@ -19,6 +19,7 @@ export interface AppSettings {
   hotkey_name: string;
   tts_enabled: boolean;
   double_click_to_record: boolean;
+  show_reasoning: boolean;
   continuous_conversation: boolean;
   silence_timeout_secs: number;
   pause_tolerance_ms: number;
@@ -68,6 +69,7 @@ export const SETTINGS_DEFAULTS: AppSettings = {
   hotkey_name: "RightShift",
   tts_enabled: true,
   double_click_to_record: false,
+  show_reasoning: false,
   continuous_conversation: false,
   silence_timeout_secs: 5,
   pause_tolerance_ms: 1500,

@@ -128,6 +128,8 @@ pub struct AppConfig {
     pub hotkey_name: String,
     pub tts_enabled: bool,
     pub double_click_to_record: bool,
+    #[serde(default)]
+    pub show_reasoning: bool,
     pub continuous_conversation: bool,
     pub silence_timeout_secs: u32,
     #[serde(default = "default_pause_tolerance_ms")]
@@ -244,6 +246,7 @@ impl Default for AppConfig {
             hotkey_name: "RightShift".to_string(),
             tts_enabled: true,
             double_click_to_record: false,
+            show_reasoning: false,
             continuous_conversation: false,
             silence_timeout_secs: 5,
             pause_tolerance_ms: default_pause_tolerance_ms(),
@@ -292,6 +295,7 @@ pub(crate) fn load_legacy_config(app: &AppHandle) -> AppConfig {
         hotkey_name: store.get("hotkey_name").and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "RightShift".to_string()),
         tts_enabled: store.get("tts_enabled").and_then(|v| v.as_bool()).unwrap_or(true),
         double_click_to_record: store.get("double_click_to_record").and_then(|v| v.as_bool()).unwrap_or(false),
+        show_reasoning: false,
         continuous_conversation: store.get("continuous_conversation").and_then(|v| v.as_bool()).unwrap_or(default.continuous_conversation),
         silence_timeout_secs: store.get("silence_timeout_secs").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(default.silence_timeout_secs),
         pause_tolerance_ms: store.get("pause_tolerance_ms").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(default.pause_tolerance_ms),

@@ -7,7 +7,7 @@ const en = {
   interruption: 'Interruption', wake: 'Wake word', uiLanguage: 'Interface language',
   recordKey: 'Recording hotkey', capture: 'Capture key', capturing: 'Press any key…',
   immediateHint: 'Hotkey and voice enrollment actions are saved immediately.',
-  doubleClick: 'Double-click to record', staticAvatar: 'Static avatar',
+  doubleClick: 'Double-click to record', showReasoning: 'Show reasoning', hintShowReasoning: 'Show the model\'s thinking below the status panel while it works.', staticAvatar: 'Static avatar',
   animatedAvatar: 'Animated avatar', chooseImage: 'Choose image', remove: 'Remove',
   imageHint: 'JPG, PNG, WebP or GIF, up to 10 MB', voiceOutput: 'Voice output',
   primaryVoice: 'Primary voice', auxiliary1: 'Auxiliary voice 1',
@@ -47,7 +47,7 @@ export type SettingsStrings = typeof en;
 const zh: SettingsStrings = {
   title:'设置',subtitle:'自定义 Pocket Agent',general:'常规',avatar:'角色',voice:'语音',conversation:'对话',
   interruption:'打断',wake:'唤醒词',uiLanguage:'界面语言',recordKey:'录音快捷键',capture:'捕获按键',
-  capturing:'请按任意键…',immediateHint:'快捷键和声纹登记会立即保存；唤醒词设置请点击保存更改。',doubleClick:'双击录音',
+  capturing:'请按任意键…',immediateHint:'快捷键和声纹登记会立即保存；唤醒词设置请点击保存更改。',doubleClick:'双击录音',showReasoning:'显示思考过程',hintShowReasoning:'Hermes 处理时，在状态栏下方显示模型的思考内容。',
   staticAvatar:'静态头像',animatedAvatar:'动画头像',chooseImage:'选择图片',remove:'移除',
   imageHint:'支持 JPG、PNG、WebP、GIF，最大 10 MB',voiceOutput:'语音输出',primaryVoice:'主语音',
   auxiliary1:'辅助语音 1',auxiliary2:'辅助语音 2',lockLanguage:'固定使用此语音回复',
@@ -80,7 +80,7 @@ const zh: SettingsStrings = {
 const ja: SettingsStrings = {
   title:'設定',subtitle:'Pocket Agent をカスタマイズ',general:'一般',avatar:'アバター',voice:'音声',conversation:'会話',
   interruption:'割り込み',wake:'ウェイクワード',uiLanguage:'表示言語',recordKey:'録音ホットキー',capture:'キーを登録',
-  capturing:'キーを押してください…',immediateHint:'ホットキーとウェイクワード学習はすぐに保存されます。',doubleClick:'ダブルクリック録音',
+  capturing:'キーを押してください…',immediateHint:'ホットキーとウェイクワード学習はすぐに保存されます。',doubleClick:'ダブルクリック録音',showReasoning:'思考を表示',hintShowReasoning:'処理中、ステータスの下にモデルの思考を表示します。',
   staticAvatar:'静止アバター',animatedAvatar:'動画アバター',chooseImage:'画像を選択',remove:'削除',
   imageHint:'JPG、PNG、WebP、GIF、最大10 MB',voiceOutput:'音声出力',primaryVoice:'メイン音声',
   auxiliary1:'補助音声 1',auxiliary2:'補助音声 2',lockLanguage:'この音声の言語に固定',
@@ -113,7 +113,7 @@ const ja: SettingsStrings = {
 const ko: SettingsStrings = {
   title:'설정',subtitle:'Pocket Agent 사용자 지정',general:'일반',avatar:'아바타',voice:'음성',conversation:'대화',
   interruption:'응답 중단',wake:'웨이크 워드',uiLanguage:'인터페이스 언어',recordKey:'녹음 단축키',capture:'키 캡처',
-  capturing:'아무 키나 누르세요…',immediateHint:'단축키와 웨이크 워드 학습은 즉시 저장됩니다.',doubleClick:'더블클릭 녹음',
+  capturing:'아무 키나 누르세요…',immediateHint:'단축키와 웨이크 워드 학습은 즉시 저장됩니다.',doubleClick:'더블클릭 녹음',showReasoning:'생각 과정 표시',hintShowReasoning:'처리 중 상태 표시줄 아래에 모델의 생각을 표시합니다.',
   staticAvatar:'정적 아바타',animatedAvatar:'애니메이션 아바타',chooseImage:'이미지 선택',remove:'제거',
   imageHint:'JPG, PNG, WebP, GIF, 최대 10 MB',voiceOutput:'음성 출력',primaryVoice:'기본 음성',
   auxiliary1:'보조 음성 1',auxiliary2:'보조 음성 2',lockLanguage:'이 음성 언어로 고정',
@@ -146,7 +146,7 @@ const ko: SettingsStrings = {
 const fr: SettingsStrings = {
   title:'Réglages',subtitle:'Personnaliser Pocket Agent',general:'Général',avatar:'Avatar',voice:'Voix',conversation:'Conversation',
   interruption:'Interruption',wake:'Mot de réveil',uiLanguage:"Langue de l’interface",recordKey:"Raccourci d’enregistrement",capture:'Capturer la touche',
-  capturing:'Appuyez sur une touche…',immediateHint:'Le raccourci et les entraînements sont enregistrés immédiatement.',doubleClick:'Double-clic pour enregistrer',
+  capturing:'Appuyez sur une touche…',immediateHint:'Le raccourci et les entraînements sont enregistrés immédiatement.',doubleClick:'Double-clic pour enregistrer',showReasoning:'Afficher le raisonnement',hintShowReasoning:'Affiche la réflexion du modèle sous le panneau d’état pendant le traitement.',
   staticAvatar:'Avatar statique',animatedAvatar:'Avatar animé',chooseImage:'Choisir une image',remove:'Supprimer',
   imageHint:'JPG, PNG, WebP ou GIF, 10 Mo maximum',voiceOutput:'Sortie vocale',primaryVoice:'Voix principale',
   auxiliary1:'Voix auxiliaire 1',auxiliary2:'Voix auxiliaire 2',lockLanguage:'Verrouiller sur cette langue',
@@ -179,7 +179,7 @@ const fr: SettingsStrings = {
 const de: SettingsStrings = {
   title:'Einstellungen',subtitle:'Pocket Agent anpassen',general:'Allgemein',avatar:'Avatar',voice:'Stimme',conversation:'Gespräch',
   interruption:'Unterbrechung',wake:'Aktivierungswort',uiLanguage:'Oberflächensprache',recordKey:'Aufnahmetaste',capture:'Taste erfassen',
-  capturing:'Beliebige Taste drücken…',immediateHint:'Hotkey und Sprachtraining werden sofort gespeichert.',doubleClick:'Doppelklick-Aufnahme',
+  capturing:'Beliebige Taste drücken…',immediateHint:'Hotkey und Sprachtraining werden sofort gespeichert.',doubleClick:'Doppelklick-Aufnahme',showReasoning:'Denkprozess anzeigen',hintShowReasoning:'Zeigt während der Bearbeitung die Überlegungen des Modells unter der Statusleiste.',
   staticAvatar:'Statischer Avatar',animatedAvatar:'Animierter Avatar',chooseImage:'Bild wählen',remove:'Entfernen',
   imageHint:'JPG, PNG, WebP oder GIF, maximal 10 MB',voiceOutput:'Sprachausgabe',primaryVoice:'Hauptstimme',
   auxiliary1:'Zusatzstimme 1',auxiliary2:'Zusatzstimme 2',lockLanguage:'Auf diese Sprache festlegen',
@@ -212,7 +212,7 @@ const de: SettingsStrings = {
 const es: SettingsStrings = {
   title:'Ajustes',subtitle:'Personaliza Pocket Agent',general:'General',avatar:'Avatar',voice:'Voz',conversation:'Conversación',
   interruption:'Interrupción',wake:'Palabra de activación',uiLanguage:'Idioma de la interfaz',recordKey:'Tecla de grabación',capture:'Capturar tecla',
-  capturing:'Pulsa cualquier tecla…',immediateHint:'La tecla y el entrenamiento se guardan inmediatamente.',doubleClick:'Doble clic para grabar',
+  capturing:'Pulsa cualquier tecla…',immediateHint:'La tecla y el entrenamiento se guardan inmediatamente.',doubleClick:'Doble clic para grabar',showReasoning:'Mostrar razonamiento',hintShowReasoning:'Muestra el razonamiento del modelo bajo el panel de estado mientras trabaja.',
   staticAvatar:'Avatar estático',animatedAvatar:'Avatar animado',chooseImage:'Elegir imagen',remove:'Eliminar',
   imageHint:'JPG, PNG, WebP o GIF, máximo 10 MB',voiceOutput:'Salida de voz',primaryVoice:'Voz principal',
   auxiliary1:'Voz auxiliar 1',auxiliary2:'Voz auxiliar 2',lockLanguage:'Fijar este idioma',

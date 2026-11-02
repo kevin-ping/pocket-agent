@@ -1,4 +1,5 @@
-import { writable } from 'svelte/store';
+import { derived, writable } from 'svelte/store';
+import { characterState } from './character';
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -394,4 +395,13 @@ function createChatStore() {
 }
 
 export const chatStore = createChatStore();
+
+/** The status panel shows; the reasoning panel only shows alongside it. */
+export const statusVisible = derived([chatStore, characterState], ([$chat, $character]) =>
+  $chat.voiceSetupState === 'installing' ||
+  $chat.voiceSetupState === 'error' ||
+  $chat.thinkingSteps.length > 0 ||
+  $character === 'thinking' ||
+  $chat.voiceStatus !== null
+);
 export { EMOTION_SPEEDS };

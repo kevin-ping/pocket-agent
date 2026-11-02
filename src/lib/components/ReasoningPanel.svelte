@@ -2,6 +2,8 @@
   import { chatStore } from '../stores/chat';
   import Icon from './Icon.svelte';
 
+  // App decides visibility: the setting, non-empty text and a visible status panel.
+  let { visible }: { visible: boolean } = $props();
   let text = $derived($chatStore.reasoningText.trim());
 
   let contentEl = $state<HTMLDivElement>();
@@ -29,7 +31,7 @@
   });
 </script>
 
-  <div class="reasoning-panel" class:visible={text !== ''}>
+  <div class="reasoning-panel" class:visible={visible}>
     <div
       class="reasoning-content"
       bind:this={contentEl}
@@ -56,6 +58,9 @@
     border: 1px solid rgba(160, 168, 255, 0.18);
     border-radius: 8px;
     overflow: hidden;
+    /* On the panel, not the scroller: scrolled text would otherwise run into the border. */
+    padding: 6px 10px;
+    box-sizing: border-box;
     /* Stays mounted; hide with opacity/visibility only. Toggling backdrop-filter on the
        transparent window leaves a stale white layer in WKWebView (same as StatusPanel). */
     opacity: 0;
@@ -69,9 +74,7 @@
   }
 
   .reasoning-content {
-    padding: 6px 10px;
-    box-sizing: border-box;
-    max-height: 88px; /* same cap as StatusPanel .status-content */
+    max-height: 150px;
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-width: thin;

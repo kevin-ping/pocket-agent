@@ -16,7 +16,7 @@
   import ComputerApproval from './lib/components/ComputerApproval.svelte';
 
   import { characterState } from './lib/stores/character';
-  import { chatStore } from './lib/stores/chat';
+  import { chatStore, statusVisible } from './lib/stores/chat';
   import { settingsStore } from './lib/stores/settings';
   import { layoutStore } from './lib/stores/layout';
   import { onBackgroundSubagents, onSpeechDetected, refreshComputerStatus, settleSubagents } from './lib/stores/status';
@@ -314,6 +314,7 @@
   // Measured: 0 while no STT text, else 6 px row padding + panel (content capped at 88 px).
   let sttRowH = 0;
   // Same as sttRowH, for the reasoning row below the status panel.
+  $: reasoningVisible = $settingsStore.show_reasoning && $statusVisible && $chatStore.reasoningText.trim() !== '';
   let reasoningRowH = 0;
   $: if ($layoutStore.expanded && !$layoutStore.resizing) {
     const targetH = STATUS_BASE_H + sttRowH + extraStatusH + reasoningRowH;
@@ -1255,7 +1256,7 @@
   {#if $layoutStore.expanded}
     <div class="stt-row" class:empty={$chatStore.sttText === null} bind:offsetHeight={sttRowH}><SttPanel /></div>
     <div class="status-row"><StatusPanel /></div>
-    <div class="reasoning-row" class:empty={!$chatStore.reasoningText.trim()} bind:offsetHeight={reasoningRowH}><ReasoningPanel /></div>
+    <div class="reasoning-row" class:empty={!reasoningVisible} bind:offsetHeight={reasoningRowH}><ReasoningPanel visible={reasoningVisible} /></div>
   {/if}
 
 

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { chatStore } from '../stores/chat';
+  import { chatStore, statusVisible } from '../stores/chat';
   import { characterState } from '../stores/character';
   import { settingsStore } from '../stores/settings';
   import { convLabelsLang } from '../i18n';
@@ -11,12 +11,6 @@
     $chatStore.voiceSetupState === 'error'
   );
 
-  let hasContent = $derived(
-    showSetup ||
-    $chatStore.thinkingSteps.length > 0 ||
-    $characterState === 'thinking' ||
-    $chatStore.voiceStatus !== null
-  );
 
   let statusContentEl = $state<HTMLDivElement>();
   let followLatest = $state(true);
@@ -48,7 +42,7 @@
   });
 </script>
 
-  <div class="status-panel" class:visible={hasContent}>
+  <div class="status-panel" class:visible={$statusVisible}>
     <div
       class="status-content"
       bind:this={statusContentEl}

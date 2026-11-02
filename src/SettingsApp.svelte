@@ -470,6 +470,7 @@
               </button>
             </Field>
             <Toggle label={text.doubleClick} value={local.double_click_to_record} change={() => local && (local.double_click_to_record = !local.double_click_to_record)} />
+            <Toggle label={text.showReasoning} hint={text.hintShowReasoning} value={local.show_reasoning} change={() => local && (local.show_reasoning = !local.show_reasoning)} />
           </section>
         {:else if active === 'avatar'}
           <section class="card mesh-card">
