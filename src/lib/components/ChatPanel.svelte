@@ -124,7 +124,7 @@
   /* ─── Panel ─── */
   .chat-panel {
     width: 280px;
-    height: 135px;
+    height: 131px;
     display: flex;
     flex-direction: column;
     background: rgba(10, 10, 22, 0.82);
@@ -135,9 +135,8 @@
     overflow: hidden;
     position: relative;
     flex-shrink: 0;
-    /* Bottom of the 146px avatar row: centered, it left 5.5px under the panel, so the first
-       panel below sat 11.5px away instead of the 6px used between the panels. */
-    align-self: flex-end;
+    /* Top-aligned so it spans the same 131px as the avatar + island block. */
+    align-self: flex-start;
   }
 
   /* ─── Floating close button ─── */

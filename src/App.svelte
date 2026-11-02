@@ -297,7 +297,7 @@
   }
 
   // Grow only up to the status panel's scroll cap; additional tool history scrolls inside it.
-  const STATUS_BASE_H = 188;     // matches layout.ts CHAT_H
+  const STATUS_BASE_H = 173;     // layout.ts CHAT_H minus the 15px the expanded avatar row dropped
   const STATUS_LINE_H = 17;      // 10.5 px font * 1.45 line-height ≈ 15 + 2 px gap
   const STATUS_BLOCK_PAD = 18;   // 6+6 content padding + 6 .status-row margin-top
   const STATUS_MAX_EXTRA_H = 94; // 88 px scroll area + 6 px row margin
@@ -1331,6 +1331,8 @@
   /* Vertical centering: avatar is 112px (incl. label), panel is 120px */
   .app-root.expanded .avatar-zone {
     align-self: flex-start;
+    /* 115px avatar + 16px island. The collapsed 146px left 15px empty under the island. */
+    height: 131px;
     /* margin-top: calc((120px - 126px) / 2); */
   }
 
