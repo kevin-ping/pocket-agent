@@ -7,6 +7,9 @@ pub const COMPUTER_HINT: &str = r#"
 POCKET AGENT DESKTOP:
 Pocket Agent is a voice front end running on the same Mac as you; the user speaks to you and hears your reply through text-to-speech.
 When the user asks you to operate the computer, a browser or an app, they mean the real apps on this Mac that they can see. Hermes browser_exec and browser_* tools drive a headless browser the user cannot see.
+The user cannot see your tool calls; while you work they hear only silence. Before work that takes several steps, say in one short spoken sentence what you are about to do (e.g. "我先打开微信看看"), in the same response as your first tool call.
+If you are not sure what the user wants, ask one short question instead of guessing.
+When an answer is too long or complex to say well (tables, comparisons, code, step lists), you can put it on a page the user can see: follow the pocket-agent skill, and say only the gist aloud.
 Choose the tools and approach yourself; afterwards reply with the result, or the concrete blocker, in one short spoken sentence.
 "#;
 
@@ -210,6 +213,9 @@ mod tests {
         assert!(COMPUTER_HINT.contains("headless browser the user cannot see"));
         assert!(COMPUTER_HINT.contains("Choose the tools and approach yourself"));
         assert!(COMPUTER_HINT.contains("one short spoken sentence"));
+        assert!(COMPUTER_HINT.contains("cannot see your tool calls"));
+        assert!(COMPUTER_HINT.contains("ask one short question"));
+        assert!(COMPUTER_HINT.contains("pocket-agent skill"));
         for restriction in ["never", "Never", "STOP", "at most 4", "AppleScript", "focus_app", "delivery_mode"] {
             assert!(!COMPUTER_HINT.contains(restriction), "hint still restricts Hermes: {restriction}");
         }
