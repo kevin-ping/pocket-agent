@@ -57,7 +57,7 @@ Install Hermes and Pocket Agent on each Mac, then enable the Hermes API computer
 2. **Recording starts** — pre-warmed cpal Stream Daemon activates instantly (~11ms latency)
 3. **Press hotkey again** — recording stops, WAV saved to temp file
 4. **STT** — faster-whisper transcribes locally (auto language detection, configurable model via `STT_MODEL`)
-5. **Send to backend** — text + voice hint streamed to configured gateway (Hermes :8642 or OpenClaw :18789) via `/v1/chat/completions`
+5. **Send to backend** — text + voice hint streamed to configured gateway (Hermes :8642 or OpenClaw :18789). A local Hermes gateway with `API_AGENT` empty and desktop integration available uses `/v1/runs` (tool progress, approvals, a real stop command); everything else uses `/v1/chat/completions`
 6. **TTS playback** — edge-tts generates audio, rodio plays it via system speakers
 
 Press **Escape** during recording to cancel. Minimum recording: 1.5s. Maximum: 30s (auto-cutoff).
@@ -100,6 +100,7 @@ always-on mic → sherpa-onnx KWS (wake phrase)
 
 - **Voice-first interaction** — push-to-talk with local Whisper STT, no cloud dependency for speech recognition
 - **Real-time streaming** — SSE streaming from LLM with live text display
+- **Tool status and reasoning panels** — tool steps (with Hermes' own preview, e.g. the terminal command) under the avatar row; the model's reasoning below them when **Show reasoning** is on (needs the local Hermes patch on `/v1/runs`, see [HERMES.md](HERMES.md))
 - **TTS voice response** — edge-tts with automatic language detection (Chinese, English, Japanese, Korean + more)
 - **Session memory** — daily auto-rotating sessions with compressed context summaries
 - **Language tracking** — auto-detects user language per message, follows user's language seamlessly
@@ -198,6 +199,8 @@ The responsibility for safe operation is shared across three layers:
 ## Getting Started
 
 > **For agent-driven installation** (PA and Hermes/OpenClaw on the same machine): see [README_AGENTS.md](README_AGENTS.md)
+>
+> **Agents: when installing, also read the guide for the backend you connect to** — [HERMES.md](HERMES.md) for Hermes, `OPENCLAW.md` for OpenClaw (once it exists) — and carry out its setup steps, such as copying PA's skills into the backend profile.
 
 ### Before You Run
 
@@ -223,7 +226,7 @@ pip install faster-whisper
 ```
 
 > For the **packaged app** (built `.dmg`), Python deps must be available globally or via `pipx`.  
-> If `edge-tts` is not in PATH, set `EDGE_TTS_BIN` in `~/.pocket-agent/.env`.  
+> PA runs `EDGE_TTS_BIN` if set, else the copy in its own venv (`~/.pocket-agent/venv/bin/edge-tts`), else `edge-tts` from PATH.  
 > If TTS fails with a WebSocket **403**, your `edge-tts` is outdated (Microsoft rejects old client versions) — run `pip install -U edge-tts` (or `~/.pocket-agent/venv/bin/pip install -U edge-tts`).  
 > If `faster-whisper` Python is not the system default, set `STT_PYTHON` in `~/.pocket-agent/.env`.
 
@@ -254,13 +257,15 @@ All server connection settings (`API_SERVER`, `API_SERVER_KEY`, `API_AGENT`) are
 # Required: backend connection
 API_SERVER=http://localhost:8642
 API_SERVER_KEY=           # leave empty for no auth
-API_AGENT=my-agent         # agent name
+API_AGENT=                 # OpenClaw agent name; leave empty for Hermes
 
 # Optional
 # EDGE_TTS_BIN=/path/to/edge-tts
 # STT_PYTHON=/path/to/python3
 # STT_MODEL=base  # Whisper model: tiny | base | small
 ```
+
+> **`API_AGENT` with Hermes:** leave it empty. Setting it sends every turn to `/v1/chat/completions`, which has no stop command: when PA interrupts a turn it can only disconnect, and Hermes keeps running the turn (and its tools) after the disconnect. It also replaces PA's desktop hint with "no local desktop integration".
 
 > **Hermes gateway mode:** point `API_SERVER` at a standalone gateway for your profile (e.g. `hermes -p <profile> gateway install`), with that profile's `API_SERVER_KEY`. Hermes multiplex mode (`gateway.multiplex_profiles: true`) is not supported: under `/p/<profile>/`, `/v1/runs` resolves the model with the default profile's config and fails, so every turn ends immediately. If a turn ends right after `[SSE] >>> sending to LLM`, look for `[SSE] turn failed:` in the Pocket Agent log and check `hermes gateway list` / `lsof -iTCP:8642`.
 
@@ -295,6 +300,7 @@ Open **Settings** from the tray menu.
 - **TTS voices** — primary, auxiliary 1, auxiliary 2 (grouped by language)
 - **Fixed language mode** — force LLM to always respond in a specific language
 - **Voice Output** — enable/disable TTS playback. When off, responses are text-only.
+- **Show reasoning** (General) — show the model's reasoning below the tool status panel. Off by default. The panel shows and hides together with the status panel.
 
 - **Wake-word detection** — hands-free activation via speaker recognition + keyword matching (see below)
 
@@ -342,7 +348,7 @@ Settings persist in a local **SQLite** database under `~/.pocket-agent/` (see `s
 
 ## Hermes Performance Tuning
 
-Almost all of a turn's latency is spent inside Hermes, not Pocket Agent. See [HERMES.md](HERMES.md) for the Hermes settings we use (context compression, auxiliary vision/compression without thinking, accessibility-tree verification, the agent cursor) and for `scripts/hermes-latency.py`, which measures where turns spend their time.
+Almost all of a turn's latency is spent inside Hermes, not Pocket Agent. See [HERMES.md](HERMES.md) for the Hermes settings we use (context compression, auxiliary vision/compression without thinking, accessibility-tree verification, the agent cursor), for installing PA's `pocket-agent` skill into the Hermes profile, and for `scripts/hermes-latency.py`, which measures where turns spend their time.
 
 ---
 

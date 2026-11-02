@@ -36,6 +36,7 @@ Pocket Agent 的受支持部署方式是 **Pocket Agent、Hermes 和 CuaDriver �
 ## 实际运行与权限边界
 
 - PA 只做传话筒(2026-10-28 起，见 decisions):提示词只告诉 Hermes 三件事——PA 是同机的语音前端、回复会被 TTS 念出;用户说的「电脑 / 浏览器 / 应用」指这台 Mac 上看得见的真实应用(`browser_exec` / `browser_*` 是用户看不见的无头浏览器);用什么工具、怎么做由 Hermes 自己决定，完成后用一句话说结果或阻碍。PA 不规定前台/后台投递、观察次数或失败后是否换方法，也不做逐轮分类或按路由拦截工具。
+- 内容太长太复杂、口头讲不清时，提示词提醒 Hermes 按 `pocket-agent` skill 做成网页(`~/.pocket-agent/html/`,用默认浏览器打开),口头只说要点。skill 源文件在仓库 `skills/pocket-agent/`,复制到 Hermes profile 使用,只在需要时读取；安装见 HERMES.md「Pocket Agent skill」。
 - 隐藏、最小化或未启动的应用：由 Hermes 自行处理。`computer_use` 本身不能启动或恢复窗口(见下节),但 Hermes 可以改用 `terminal` 执行 `osascript` / `open -a`(Hermes 自带的 macOS `open` 前置窗口步骤见 `tools/terminal_tool_macos_open.py`),和 Hermes Desktop 的行为一致。是否需要审批，由 Hermes 的审批策略决定。
 - 普通聊天、头脑风暴和知识解释不需要桌面访问;没有持续屏幕监视，也没有定时抓屏。何时读取界面由 Hermes 判断。
 - 本机且能力齐备时使用 Hermes `/v1/runs`，通过事件流显示回复/工具进度。具体操作要求审批时，弹窗显示 Hermes 的操作说明，并原样提供 Hermes 本次给出的选项(本次允许 / 本会话允许 / 始终允许 / 拒绝)。PA 只接受本次请求提供的选项，同一请求不能重复提交，也不能用于其他任务。Hermes 自己的审批策略决定是否弹窗(例如 `approvals.mode: off` 时不弹)。部分完成的回复会正常播报，包括 `run.failed` 中标记 `partial=true` 或 `completed=false`、无实际错误且未中断的结果；只有完全没有回复时才提示结果未确认。带实际错误的失败、取消和中断仍报错，不会因之前流式输出过文字而当作正常结束。
@@ -81,6 +82,8 @@ Pocket Agent 的受支持部署方式是 **Pocket Agent、Hermes 和 CuaDriver �
 | 视觉分析失败 | 核对 Hermes auxiliary.vision 和模型凭据，不能把工具 enabled 当作模型已验证。 |
 
 远程地址及 OpenClaw 等已有聊天兼容性保留，但 **PA 的本机 Computer Use 仅在本机 Hermes UI 路径生效**。配置 `API_AGENT` 的 OpenClaw、远程网关和 bridge 不会被当作用户本机桌面入口，也不会回退到旧命令执行。电脑工具操作驱动所在的机器，远程 Hermes 不会自动看到 PA 客户端。SSH 转发、代理或远程驱动即使用 localhost 地址，也不证明是同机；当前检测不是主机身份认证，请按同机方式部署。本功能不新建远程控制服务。
+
+本机 Hermes 不要设置 `API_AGENT`:设置后 PA 改走 `/v1/chat/completions`,该接口没有停止命令。PA 打断时只能断开连接，Hermes 记下 `SSE client disconnected; interrupted agent task` 后仍会继续执行这一轮和它的工具(2026-11-02 实测：断开后一轮继续操作 Chrome 二十多分钟，只能重启网关停止)。
 
 当前 Hermes `/v1/runs` 接口没有每回合工具白名单参数，PA 也不在客户端按路由停止 run；工具选择由提示词引导，执行前的把关依赖 Hermes 自身审批。PA 不修改用户的 Hermes 全局 toolset 配置。
 
