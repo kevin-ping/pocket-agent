@@ -215,6 +215,18 @@ pub async fn chat_stream(
                             }
                         }
                     }
+                    // Streamed reasoning (local Hermes patch, see HERMES.md); chunks join as-is.
+                    "reasoning.delta" => {
+                        if let Some(delta) = value["delta"].as_str().filter(|s| !s.is_empty()) {
+                            if tx
+                                .send(Ok(StreamEvent::Reasoning(delta.into())))
+                                .await
+                                .is_err()
+                            {
+                                return Ok(());
+                            }
+                        }
+                    }
                     "reasoning.available" => {
                         if let Some(text) = reasoning_text(&value) {
                             // Each event is a whole block; the newline keeps blocks apart.
