@@ -864,7 +864,7 @@ async fn run_hermes_turn(
                         reasoning_buffer.clear();
                     }
                 }
-                Ok(StreamEvent::ToolCallStart { id, name }) => {
+                Ok(StreamEvent::ToolCallStart { id, name, preview }) => {
                     if !reasoning_buffer.is_empty() {
                         let _ = app.emit(&evp("thinking"), reasoning_buffer.clone());
                         reasoning_buffer.clear();
@@ -873,12 +873,23 @@ async fn run_hermes_turn(
                         eprintln!("[SSE] <<< first tool call from LLM [{}]: {}", chrono::Local::now().format("%H:%M:%S%.3f"), name);
                     }
                     received_data = true;
+                    // Text before a tool call is a whole utterance even without end punctuation;
+                    // speak it now instead of after the tools finish.
+                    if let Some(ref cb) = request.on_sentence {
+                        let trimmed = sentence_buffer.trim();
+                        if !trimmed.is_empty() {
+                            eprintln!("[SSE] flushing sentence before tool call ({} chars)", trimmed.len());
+                            cb(trimmed);
+                        }
+                        sentence_buffer.clear();
+                    }
                     if name == "delegate_task" && request.mode == HermesTurnMode::Ui {
                         delegate_watch.armed = true;
                     }
                     let _ = app.emit(&evp("tool-call"), serde_json::json!({
                         "id": id,
-                        "name": name
+                        "name": name,
+                        "preview": preview
                     }).to_string());
                 }
                 Err(e) => {

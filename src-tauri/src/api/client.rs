@@ -19,7 +19,7 @@ pub enum StreamEvent {
     /// LLM reasoning/thinking text (e.g. DeepSeek R1 thinking process)
     Reasoning(String),
     /// Start of a new tool call
-    ToolCallStart { id: String, name: String },
+    ToolCallStart { id: String, name: String, preview: String },
 }
 
 impl HermesClient {
@@ -123,6 +123,7 @@ impl HermesClient {
                                         return Some(Ok(StreamEvent::ToolCallStart {
                                             id: id.to_string(),
                                             name: name.to_string(),
+                                            preview: String::new(),
                                         }));
                                     }
                                 }
@@ -162,6 +163,7 @@ impl HermesClient {
                                         return Some(Ok(StreamEvent::ToolCallStart {
                                             id: id.to_string(),
                                             name: name.to_string(),
+                                            preview: String::new(),
                                         }));
                                     }
                                 }

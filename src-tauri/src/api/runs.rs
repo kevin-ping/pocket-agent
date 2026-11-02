@@ -228,12 +228,8 @@ pub async fn chat_stream(
                         }
                     }
                     "tool.started" => {
-                        let name = value["tool"].as_str().unwrap_or("computer_use").to_string();
                         if tx
-                            .send(Ok(StreamEvent::ToolCallStart {
-                                id: format!("{}-{}", id, value["timestamp"]),
-                                name,
-                            }))
+                            .send(Ok(tool_started(&id, &value)))
                             .await
                             .is_err()
                         {
@@ -342,6 +338,13 @@ fn reasoning_text(value: &Value) -> Option<String> {
         .filter(|s| !s.trim().is_empty())
         .map(String::from)
 }
+fn tool_started(run_id: &str, value: &Value) -> StreamEvent {
+    StreamEvent::ToolCallStart {
+        id: format!("{}-{}", run_id, value["timestamp"]),
+        name: value["tool"].as_str().unwrap_or("computer_use").to_string(),
+        preview: value["preview"].as_str().unwrap_or("").to_string(),
+    }
+}
 fn valid_run_id(id: &str) -> bool {
     id.starts_with("run_")
         && id.len() <= 128
@@ -365,6 +368,21 @@ mod tests {
         assert_eq!(reasoning_text(&event), Some("先打开浏览器".into()));
         assert_eq!(reasoning_text(&json!({"text": "  \n"})), None);
         assert_eq!(reasoning_text(&json!({"event": "reasoning.available"})), None);
+    }
+    #[test]
+    fn tool_started_relays_hermes_preview() {
+        let event = json!({"event": "tool.started", "tool": "terminal",
+            "preview": "open -a WeChat", "timestamp": 1});
+        let StreamEvent::ToolCallStart { name, preview, .. } = tool_started("run_1", &event) else {
+            panic!("expected ToolCallStart");
+        };
+        assert_eq!((name.as_str(), preview.as_str()), ("terminal", "open -a WeChat"));
+        let StreamEvent::ToolCallStart { preview, .. } =
+            tool_started("run_1", &json!({"event": "tool.started", "tool": "terminal"}))
+        else {
+            panic!("expected ToolCallStart");
+        };
+        assert_eq!(preview, "");
     }
     #[test]
     fn partial_runs_still_relay_hermes_reply() {

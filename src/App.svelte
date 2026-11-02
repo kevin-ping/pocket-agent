@@ -252,6 +252,15 @@
     characterState.toThinking();
   }
 
+  // Shows Hermes' own tool preview (e.g. the terminal command) so the user can see what it is doing.
+  function toolStepLabel(toolName: string, preview: unknown): string {
+    const text = typeof preview === 'string'
+      ? preview.replace(/\s+/g, ' ').trim().replace(/(\.\.\.|…)$/, '')
+      : '';
+    if (!text) return `🔧 查询 ${toolName}...`;
+    return `🔧 ${toolName}: ${[...text].slice(0, 60).join('')}...`;
+  }
+
   function finishThinkingVisualsForReply() {
     chatStore.finishThinkingPhase();
     if (get(characterState) === 'thinking') {
@@ -704,7 +713,7 @@
             .replace(/^mcp_/, '')
             .replace(/_/g, ' ')
             .trim();
-          chatStore.addThinkingStep(`🔧 查询 ${toolName}...`);
+          chatStore.addThinkingStep(toolStepLabel(toolName, payload.preview));
           if (toolName) speakStatus({ kind: 'querying', name: toolName });
         } catch {
           chatStore.addThinkingStep(`🔧 正在执行操作...`);
@@ -763,7 +772,7 @@
             .replace(/^mcp_/, "")
             .replace(/_/g, " ")
             .trim();
-          chatStore.addThinkingStep(`🔧 查询 ${toolName}...`);
+          chatStore.addThinkingStep(toolStepLabel(toolName, payload.preview));
           if (toolName) speakStatus({ kind: 'querying', name: toolName });
         } catch {
           chatStore.addThinkingStep("🔧 正在执行操作...");

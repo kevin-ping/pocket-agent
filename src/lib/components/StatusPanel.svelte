@@ -76,7 +76,7 @@
         {/if}
         {#if $chatStore.thinkingSteps.length > 0}
           {#each $chatStore.thinkingSteps as step}
-            <span class="step">{step}</span>
+            <span class="step single-line">{step}</span>
           {/each}
         {:else if $characterState === 'thinking'}
           <span class="step placeholder">🤔 正在思考...</span>
@@ -131,6 +131,12 @@
     color: rgba(160, 168, 255, 0.65);
     word-break: break-word;
     animation: fade-in 0.25s ease-out;
+  }
+
+  .step.single-line {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .step.placeholder {
