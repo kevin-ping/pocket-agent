@@ -9,15 +9,19 @@
   import DynamicIsland from './lib/components/DynamicIsland.svelte';
   import Icon from './lib/components/Icon.svelte';
   import ChatPanel from './lib/components/ChatPanel.svelte';
-  import SettingsPanel from './lib/components/SettingsPanel.svelte';
   import StatusPanel from './lib/components/StatusPanel.svelte';
+  import SttPanel from './lib/components/SttPanel.svelte';
+  import ReasoningPanel from './lib/components/ReasoningPanel.svelte';
   import BreakConfirmModal from './lib/components/BreakConfirmModal.svelte';
+  import ComputerApproval from './lib/components/ComputerApproval.svelte';
 
   import { characterState } from './lib/stores/character';
-  import { chatStore } from './lib/stores/chat';
+  import { chatStore, statusVisible } from './lib/stores/chat';
   import { settingsStore } from './lib/stores/settings';
   import { layoutStore } from './lib/stores/layout';
-  import { STATUS_PHRASES, langFromVoice, detectLang, convLabels, type LangKey } from './lib/i18n';
+  import { onBackgroundSubagents, onSpeechDetected, refreshComputerStatus, settleSubagents } from './lib/stores/status';
+  import { STATUS_PHRASES, langFromVoice, detectLang, convLabels, convLabelsLang, type LangKey } from './lib/i18n';
+  import { wakeErrorMessage } from './lib/wakeErrors';
 
   const appWindow = getCurrentWindow();
 
@@ -46,6 +50,7 @@
     // Save user message to history
     invoke('save_chat_message', { role: 'user', content: text }).catch(e => console.error('Failed to save user message:', e));
 
+    chatStore.clearThinkingSteps();
     chatStore.startStream();
     characterState.toThinking();
     islandMode = 'thinking';
@@ -63,21 +68,38 @@
         ttsEnabled: get(settingsStore).tts_enabled,
       });
     } catch (e) {
-      chatStore.setError(`连接失败: ${e}`);
+      chatStore.setError(`请求未完成: ${e}`);
       characterState.toIdle();
       spiritPhase = 0;
     }
   }
 
   // ─── Context menu ───
-  let muted = false;
-  let islandMode: "idle" | "recording" | "thinking" | "waiting_for_wake" | "verifying_speaker" = "idle";
+  let islandMode: "idle" | "recording" | "thinking" | "speaking" | "waiting_for_wake" | "verifying_speaker" = "idle";
   let spiritPhase = 0;
   let audioLevel = 0;
   let audioLevelTimer: ReturnType<typeof setInterval> | null = null;
   let firstStreamDelta = false;
   let lastSpeakingHadAudio = true;
+  let avatarEmotion: string | null = null;
+  // Mouth follows per-sentence audio truth: on while a sentence plays, brief linger between sentences.
+  let mouthActive = false;
+  let mouthLingerTimer: ReturnType<typeof setTimeout> | null = null;
   let bridgeThinkingActive = false;
+  // Custom .mavatar lives outside AppConfig (it can be megabytes), so it is fetched on its own.
+  let meshCustom: string | null = null;
+  let meshCustomRequest = 0;
+
+  async function refreshMeshCustom() {
+    const request = ++meshCustomRequest;
+    try {
+      const data = await invoke<string | null>('get_setting_asset', { key: 'mesh_avatar' });
+      // Only the latest request applies, and an unchanged file must not reload the avatar.
+      if (request === meshCustomRequest && data !== meshCustom) meshCustom = data;
+    } catch (e) {
+      console.warn('[avatar] custom mesh avatar read failed:', e);
+    }
+  }
 
   // ─── Media skins: avatar content per state ───
   $: mediaSkins = {
@@ -101,6 +123,90 @@
   // ─── Continuous conversation mode ───
   let conversationActive = false;
   let bridgeFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  let conversationCueEpoch = 0;
+  let interruptedReply = false;
+  // Hermes compacts the session context before some turns (can take a couple of minutes).
+  const COMPACTING_STEP = '🗜️ 正在整理之前的对话，可能要一两分钟…';
+  let compactingThisTurn = false;
+
+  async function cueDurationMs(audio: HTMLAudioElement): Promise<number> {
+    if (Number.isFinite(audio.duration) && audio.duration > 0) {
+      return Math.ceil(audio.duration * 1000);
+    }
+    return await new Promise<number>((resolve) => {
+      const cleanup = () => {
+        clearTimeout(timeout);
+        audio.removeEventListener('loadedmetadata', loaded);
+      };
+      const loaded = () => {
+        cleanup();
+        resolve(Number.isFinite(audio.duration) && audio.duration > 0 ? Math.ceil(audio.duration * 1000) : 700);
+      };
+      const timeout = setTimeout(() => {
+        cleanup();
+        resolve(700);
+      }, 300);
+      audio.addEventListener('loadedmetadata', loaded, { once: true });
+    });
+  }
+
+  async function playReadyCue(onStarted: (durationMs: number) => Promise<void>): Promise<void> {
+    const audio = new Audio('user_input.mp3');
+    promptAudio?.pause();
+    promptAudio = audio;
+    const durationMs = await cueDurationMs(audio);
+    await audio.play();
+    await onStarted(Math.min(durationMs + 30, 5000));
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => { audio.pause(); reject(new Error('Cue timeout')); }, 5000);
+      audio.onended = () => { clearTimeout(timeout); resolve(); };
+      audio.onerror = () => { clearTimeout(timeout); reject(new Error('Cue playback failed')); };
+    });
+  }
+
+  /// Start or stop a continuous conversation. Shared by fn-key-down and
+  /// fn-key-up: the hotkey state machine alternates which of the two it emits,
+  /// so treating either as the toggle keeps one press = one action regardless
+  /// of which half of the cycle the key is currently on.
+  function toggleContinuousConversation() {
+    const cfg = get(settingsStore);
+    if (conversationActive) {
+      invoke('stop_continuous_conversation').catch(console.error);
+      conversationActive = false;
+      ++conversationCueEpoch;
+      promptAudio?.pause();
+      chatStore.setVoiceStatus(null);
+      islandMode = 'idle';
+      spiritPhase = 0;
+      characterState.toIdle();
+      return;
+    }
+    requestNewTurn(() => {
+      conversationActive = true;
+      interruptedReply = false;
+      islandMode = 'recording';
+      spiritPhase = 0;
+      firstStreamDelta = false;
+      chatStore.clear();
+      chatStore.setVoiceStatus(voiceListeningText());
+      characterState.toListening();
+      invoke('start_continuous_conversation', {
+        silenceTimeoutSecs: cfg.silence_timeout_secs,
+        pauseToleranceMs: cfg.pause_tolerance_ms,
+        speechRmsThreshold: cfg.speech_rms_threshold,
+        bargeInRmsThreshold: cfg.barge_in_rms_threshold,
+        wakeWordThreshold: cfg.wake_word_threshold,
+        bargeInEnabled: cfg.barge_in_enabled,
+      })
+        .catch((e) => {
+          console.error('[continuous] start failed', e);
+          conversationActive = false;
+          characterState.toIdle();
+          islandMode = 'idle';
+          chatStore.setError(`连续对话启动失败: ${e}`);
+        });
+    });
+  }
 
   function voiceListeningText(): string {
     return `🎤 ${convLabels(get(settingsStore).tts_primary_voice).voiceListening}`;
@@ -131,16 +237,50 @@
   function startBridgeThinking() {
     bridgeThinkingActive = true;
     clearBridgeFallbackTimer();
-    islandMode = 'thinking';
-    spiritPhase = 2;
-    firstStreamDelta = false;
-    characterState.toThinking();
+    enterThinkingVisuals();
+    chatStore.clearThinkingSteps();
+    chatStore.clearReasoning();
     chatStore.addThinkingStep('🤔 正在思考...');
     cancelPendingStatusSpeech();
     pendingStatusSpeech = setTimeout(() => speakStatus({ kind: 'thinking' }), 250);
     bridgeFallbackTimer = setTimeout(() => {
       stopBridgeThinking('暂时还没有收到 Hermes 回推');
     }, 30000);
+  }
+
+  function enterThinkingVisuals() {
+    islandMode = 'thinking';
+    spiritPhase = Math.max(spiritPhase, 2);
+    firstStreamDelta = false;
+    characterState.toThinking();
+  }
+
+  // Mid-turn thinking / tool calls must not cut off speech that is still playing;
+  // chat-audio-idle switches to thinking once the queue drains.
+  function enterMidTurnThinking() {
+    if (get(characterState) === 'speaking') {
+      firstStreamDelta = false;
+      return;
+    }
+    enterThinkingVisuals();
+  }
+
+  // Shows Hermes' own tool preview (e.g. the terminal command) so the user can see what it is doing.
+  function toolStepLabel(toolName: string, preview: unknown): string {
+    const text = typeof preview === 'string'
+      ? preview.replace(/\s+/g, ' ').trim().replace(/(\.\.\.|…)$/, '')
+      : '';
+    if (!text) return `🔧 查询 ${toolName}...`;
+    return `🔧 ${toolName}: ${[...text].slice(0, 60).join('')}...`;
+  }
+
+  function finishThinkingVisualsForReply() {
+    chatStore.finishThinkingPhase();
+    if (get(characterState) === 'thinking') {
+      characterState.toIdle();
+      islandMode = 'idle';
+      spiritPhase = 0;
+    }
   }
 
   const DEBUG_UI_STATE = String(import.meta.env.VITE_PA_DEBUG_UI || '').toLowerCase() === 'true';
@@ -169,30 +309,31 @@
     }
   }
 
-  // Grow window vertically to fit the status panel while expanded so 🤔 + 🔧 lines stay visible.
-  const STATUS_BASE_H = 188;     // matches layout.ts CHAT_H
+  // Grow only up to the status panel's scroll cap; additional tool history scrolls inside it.
+  const STATUS_BASE_H = 173;     // layout.ts CHAT_H minus the 15px the expanded avatar row dropped
   const STATUS_LINE_H = 17;      // 10.5 px font * 1.45 line-height ≈ 15 + 2 px gap
   const STATUS_BLOCK_PAD = 18;   // 6+6 content padding + 6 .status-row margin-top
+  const STATUS_MAX_EXTRA_H = 94; // 88 px scroll area + 6 px row margin
   const STATUS_EXPANDED_W = 400; // 108 (AVATAR_W) + 12 (GAP) + 280 (CHAT_W)
+  // The mouth no longer waits for the speaking state (status speech plays during thinking),
+  // so no path that leaves the turn may leave it open.
+  $: if ($characterState === 'idle' || $characterState === 'listening') mouthActive = false;
+  // A new listen starts a new utterance: drop the previous one (covers fn key, manual
+  // start and continuous-mode re-listen alike).
+  $: if ($characterState === 'listening') { chatStore.setSttText(null); chatStore.clearReasoning(); }
   $: extraStatusH = $chatStore.thinkingSteps.length === 0
     ? 0
-    : STATUS_BLOCK_PAD + $chatStore.thinkingSteps.length * STATUS_LINE_H;
+    : Math.min(STATUS_MAX_EXTRA_H, STATUS_BLOCK_PAD + $chatStore.thinkingSteps.length * STATUS_LINE_H);
+  // Measured: 0 while no STT text, else 6 px row padding + panel (content capped at 88 px).
+  let sttRowH = 0;
+  // Same as sttRowH, for the reasoning row below the status panel.
+  $: reasoningVisible = $settingsStore.show_reasoning && $statusVisible && $chatStore.reasoningText.trim() !== '';
+  let reasoningRowH = 0;
   $: if ($layoutStore.expanded && !$layoutStore.resizing) {
-    const targetH = STATUS_BASE_H + extraStatusH;
+    const targetH = STATUS_BASE_H + sttRowH + extraStatusH + reasoningRowH;
     queueMicrotask(() => {
       appWindow.setSize(new LogicalSize(STATUS_EXPANDED_W, targetH)).catch(() => {});
     });
-  }
-
-  // ─── Settings panel ───
-  let showSettings = false;
-  let prevWindowState: { x: number; y: number; w: number; h: number } | null = null;
-
-  async function openSettings() {
-    prevWindowState = await layoutStore.openSettings();
-    // Wait for WebView to process the window resize before rendering the panel
-    await new Promise<void>(resolve => requestAnimationFrame(resolve));
-    showSettings = true;
   }
 
   async function openChatHistory() {
@@ -200,14 +341,6 @@
       await invoke('open_chat_history');
     } catch (e) {
       console.error('Failed to open chat history:', e);
-    }
-  }
-
-  async function closeSettings() {
-    showSettings = false;
-    if (prevWindowState) {
-      await layoutStore.closeSettings(prevWindowState);
-      prevWindowState = null;
     }
   }
 
@@ -229,64 +362,126 @@
   }
 
   // ─── Wake-word state (FEAT-C4) ───
-  let wakeArmInFlight = false;
+  // Bumped by every disarm. An arm owns the epoch it started in; once the
+  // epoch moves or the switch is off, its awaits resolve into a world where
+  // the user already said "stop" — it must not start the mic or write status.
+  let wakeEpoch = 0;
+  let wakeArmInFlightEpoch: number | null = null;
+  // The voiceStatus text the wake path last wrote, so wake can clear its own
+  // stale error on recovery without wiping a conversation prompt.
+  let wakeOwnedStatus: string | null = null;
+
+  function setWakeStatus(text: string) {
+    wakeOwnedStatus = text;
+    chatStore.setVoiceStatus(text);
+  }
+
+  function clearWakeStatus() {
+    if (wakeOwnedStatus !== null && get(chatStore).voiceStatus === wakeOwnedStatus) {
+      chatStore.setVoiceStatus(null);
+    }
+    wakeOwnedStatus = null;
+  }
 
   // stt-server starts on a background thread and is not ready at app mount
-  // (Whisper model load + token file write take ~1-3 s). The wake listener's
-  // first connect attempt loses this race and fails with either
-  // "ws auth token: ... No such file" or "ws connect: Connection refused".
-  // Retry on those transient errors so wake comes up automatically once the
-  // server is healthy, without forcing the user to toggle the switch.
+  // (venv check + Whisper model load + token file write). Until it answers on
+  // :8651 the KWS session cannot be opened, so the first attempts fail with
+  // "Voice service is not ready" or "Wake service: ... Connection refused".
+  // Retry so wake comes up automatically once the server is healthy, without
+  // forcing the user to toggle the switch.
   async function armWakeListenerIfEnabled() {
     const s = get(settingsStore);
     if (!s.wake_word_enabled) return;
-    if (wakeArmInFlight) return;
-    wakeArmInFlight = true;
+    const epoch = wakeEpoch;
+    if (wakeArmInFlightEpoch === epoch) return;
+    wakeArmInFlightEpoch = epoch;
+    const stale = () => epoch !== wakeEpoch || !get(settingsStore).wake_word_enabled;
+    const labels = convLabelsLang(s.ui_lang);
     try {
+      // A missing wake phrase is a settled fact, not a race: the KWS session
+      // would be rejected on every one of the retries below. Say so instead.
+      if (!s.wake_phrase.trim()) {
+        if (!conversationActive) setWakeStatus(labels.wakeNeedsPhrase);
+        return;
+      }
       const MAX_ATTEMPTS = 20;
+      let modelConfirmed = false;
       for (let i = 0; i < MAX_ATTEMPTS; i++) {
+        // "Can't check" and "checked, not ready" are different answers. Only
+        // the latter is a config gap; a throw means stt-server isn't up yet,
+        // which is exactly what the retry loop below exists for. Stop asking
+        // once answered — the check costs a 5 s-timeout request per attempt.
+        if (!modelConfirmed) {
+          try {
+            const model = await invoke<{ ready: boolean; error?: { code: string; params: Record<string, string> } | null }>('wake_model_status');
+            if (stale()) return;
+            if (!model.ready) {
+              // An engine error (e.g. macOS too old) is not fixed by downloading the model.
+              const reason = model.error
+                ? labels.wakeStartFailed(wakeErrorMessage(s.ui_lang, JSON.stringify({ wake_error: model.error.code, params: model.error.params })))
+                : labels.wakeNeedsModel;
+              if (!conversationActive) setWakeStatus(reason);
+              return;
+            }
+            modelConfirmed = true;
+          } catch { /* not ready to answer — let the start attempt drive the retry */ }
+          if (stale()) return;
+        }
         try {
           await invoke('start_wake_word_listening', { threshold: s.wake_word_threshold, speakerName: s.last_enrolled_speaker || 'Me' });
-          if (!conversationActive && islandMode === 'idle') {
-            islandMode = 'waiting_for_wake';
+          if (stale()) {
+            // The start landed after the user turned wake off: undo it. If the
+            // switch is back on, a newer arm owns the listener — leave it.
+            if (!get(settingsStore).wake_word_enabled) {
+              await invoke('stop_wake_word_listening').catch((err) => console.warn('[wake] late stop failed', err));
+            }
+            return;
+          }
+          if (!conversationActive) {
+            chatStore.setVoiceStatus(null);
+            wakeOwnedStatus = null;
+            if (islandMode === 'idle') islandMode = 'waiting_for_wake';
           }
           return;
         } catch (e) {
+          if (stale()) return;
           const msg = String(e ?? '');
           // Idempotent ignore: "already active" races on conversation-ended.
-          if (msg.includes('already active')) return;
-          // Transient: stt-server not ready yet, or capture still held by
-          // previous owner (async release). Backoff 500 ms and retry.
-          if (
-            msg.includes('ws connect') ||
-            msg.includes('ws auth token') ||
-            msg.includes('read server token failed') ||
-            msg.includes('capture busy') ||
-            msg.includes('mic capture:')
-          ) {
-            if (i === MAX_ATTEMPTS - 1) {
-              console.warn('[wake] arm gave up after retries:', msg);
-              return;
-            }
-            await new Promise((r) => setTimeout(r, 500));
-            continue;
+          // The backend is listening, so the indicator must say so.
+          if (msg.includes('already active')) {
+            if (!conversationActive && islandMode === 'idle') islandMode = 'waiting_for_wake';
+            return;
           }
-          // Non-transient failure: surface once and stop.
-          console.warn('[wake] arm failed', e);
-          return;
+          // Everything else is retried. The two settled-config answers (no
+          // phrase / model not ready) already returned above, so a failure
+          // here is almost always stt-server still coming up or capture still
+          // held by the previous owner. Matching on error text is what rotted
+          // when the wake transport changed — retry by default instead.
+          if (i === MAX_ATTEMPTS - 1) {
+            console.warn('[wake] arm gave up after retries:', msg);
+            if (!conversationActive) setWakeStatus(labels.wakeStartFailed(wakeErrorMessage(s.ui_lang, msg)));
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 500));
+          if (stale()) return;
         }
       }
     } finally {
-      wakeArmInFlight = false;
+      if (wakeArmInFlightEpoch === epoch) wakeArmInFlightEpoch = null;
     }
   }
 
   async function disarmWakeListener() {
+    const epoch = ++wakeEpoch;
+    if (!conversationActive) clearWakeStatus();
     try {
       await invoke('stop_wake_word_listening');
     } catch (e) {
       console.warn('[wake] disarm failed', e);
     }
+    // A slow stop reply must not dim a listener the user already re-enabled.
+    // Re-enabling reuses this epoch, so the switch itself is checked too.
+    if (epoch !== wakeEpoch || get(settingsStore).wake_word_enabled || conversationActive) return;
     if (islandMode === 'waiting_for_wake') islandMode = 'idle';
   }
 
@@ -374,7 +569,7 @@
     return undefined;
   }
 
-  type StatusKind = { kind: 'thinking' } | { kind: 'querying'; name: string } | { kind: 'executing' } | { kind: 'running-command' };
+  type StatusKind = { kind: 'thinking' } | { kind: 'querying'; name: string } | { kind: 'executing' } | { kind: 'compacting' };
   function speakStatus(kind: StatusKind) {
     cancelPendingStatusSpeech();
     const s = get(settingsStore);
@@ -383,7 +578,7 @@
     const p = STATUS_PHRASES[lang] ?? STATUS_PHRASES.zh;
     const text = kind.kind === 'thinking' ? p.thinking
                : kind.kind === 'executing' ? p.executing
-               : kind.kind === 'running-command' ? p.runningCommand
+               : kind.kind === 'compacting' ? p.compacting
                : p.querying(kind.name);
     if (!text || text === lastSpokenStatus) return;
     lastSpokenStatus = text;
@@ -399,13 +594,12 @@
   }
 
   async function setupListeners() {
-    chatStore.setOnCmdDetected(() => {
-      chatStore.addThinkingStep('🔧 运行命令');
-      speakStatus({ kind: 'running-command' });
-    });
     unlisten = await Promise.all([
       listen('chat-thinking-start', () => {
-        characterState.toThinking();
+        compactingThisTurn = false;
+        enterThinkingVisuals();
+        chatStore.clearThinkingSteps();
+        chatStore.clearReasoning();
         chatStore.addThinkingStep('🤔 正在思考...');
         cancelPendingStatusSpeech();
         pendingStatusSpeech = setTimeout(() => speakStatus({ kind: 'thinking' }), 250);
@@ -415,6 +609,7 @@
         cancelPendingStatusSpeech();
         debugState('chat-speaking-start', e.payload as unknown as Record<string, unknown>);
         lastSpeakingHadAudio = e.payload.has_audio;
+        avatarEmotion = e.payload.emotion;
         if (!$chatStore.isStreaming) {
           chatStore.startStream();
         }
@@ -422,22 +617,50 @@
         if (!e.payload.has_audio && !$layoutStore.expanded) {
           layoutStore.toggle();
         }
-        if (conversationActive && e.payload.has_audio) {
-          invoke('notify_conversation_tts_started').catch(console.error);
-        }
       }),
-      listen('chat-audio-playing', () => {
+      listen<boolean | undefined>('chat-audio-playing', (e) => {
+        if (interruptedReply) return;
         cancelPendingStatusSpeech();
         lastSpokenStatus = null;
         debugState('chat-audio-playing');
-        islandMode = 'idle';
+        islandMode = 'speaking';
         characterState.toSpeaking();
-        chatStore.clearThinkingSteps();
+        chatStore.finishThinkingPhase();
         spiritPhase = 3;
+        // Payload carries has_audio: animate the mouth only for real audio, not the text-only fallback.
+        if (e.payload === true) {
+          if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
+          mouthActive = true;
+        } else {
+          mouthActive = false;
+        }
+        // Arm barge-in only once audio is actually playing. chat-speaking-start
+        // fires before the LLM request, so arming there burns the 600ms warmup
+        // during thinking and lets ambient speech kill a reply that never played.
+        if (conversationActive && lastSpeakingHadAudio) {
+          invoke('notify_conversation_tts_started').catch(console.error);
+        }
+      }),
+      listen('chat-status-audio-playing', () => {
+        if (interruptedReply) return;
+        // Status speech plays during thinking: open the mouth only, leave turn state alone.
+        if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
+        mouthActive = true;
+      }),
+      listen('chat-audio-sentence-end', () => {
+        if (interruptedReply) return;
+        // Sentence finished; next sentence's TTS may still be generating. Close the
+        // mouth after a short linger so brief gaps look natural but long ones don't flap.
+        if (mouthLingerTimer) clearTimeout(mouthLingerTimer);
+        mouthLingerTimer = setTimeout(() => { mouthActive = false; }, 300);
       }),
       listen<{ delta: string }>('chat-stream', (e) => {
+        if (interruptedReply) return;
         cancelPendingStatusSpeech();
         if (!firstStreamDelta) debugState('chat-stream:first-delta', { deltaPreview: e.payload.delta.slice(0, 40) });
+        if (!firstStreamDelta) {
+          finishThinkingVisualsForReply();
+        }
         chatStore.appendDelta(e.payload.delta);
         if (!firstStreamDelta) {
           firstStreamDelta = true;
@@ -445,11 +668,18 @@
         }
       }),
       listen('chat-stream-end', () => {
+        if (interruptedReply) return;
         cancelPendingStatusSpeech();
         lastSpokenStatus = null;
         debugState('chat-stream-end');
         islandMode = 'idle';
         chatStore.endStream();
+        if (!lastSpeakingHadAudio) {
+          chatStore.clearThinkingSteps();
+        } else {
+          // An empty reply gets no chat-audio-done; drop 🤔 so it can't pin the turn active.
+          chatStore.finishThinkingPhase();
+        }
         // If audio is expected, let chat-audio-playing / chat-audio-done drive the transition.
         if (!lastSpeakingHadAudio && get(characterState) !== 'speaking') {
           characterState.toIdle();
@@ -457,30 +687,69 @@
         }
         autoCloseBreakConfirm();
       }),
-      listen('chat-audio-done', () => {
+      listen<number>('chat-audio-done', (e) => {
+        settleSubagents();
+        avatarEmotion = null;
+        mouthActive = false;
+        if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
+        if (interruptedReply) return;
         debugState('chat-audio-done');
         chatStore.endStream();
+        chatStore.finishTypewriterNow();
+        chatStore.clearThinkingSteps();
         if (conversationActive) {
           // Hand control back to the conversation worker; it drives characterState via
           // conversation-state events. Skip the toIdle transition here.
-          invoke('notify_conversation_tts_done').catch(console.error);
+          invoke('notify_conversation_tts_done', { generation: e.payload }).catch(console.error);
           spiritPhase = 0;
         } else {
-          characterState.transition('speaking', 'idle');
+          // chat-audio-idle may have moved speaking → thinking just before the turn ended.
+          if (get(characterState) === 'thinking') characterState.toIdle();
+          else characterState.transition('speaking', 'idle');
           spiritPhase = 0;
           islandMode = 'idle';
           armWakeListenerIfEnabled();
         }
         autoCloseBreakConfirm();
       }),
+      // Everything queued has played but the turn is still running (tools / next part).
+      listen<number>('chat-audio-idle', () => {
+        if (interruptedReply) return;
+        mouthActive = false;
+        if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
+        debugState('chat-audio-idle');
+        if (get(characterState) === 'speaking') {
+          characterState.toThinking();
+          islandMode = 'thinking';
+          spiritPhase = 2;
+        }
+      }),
 
-      // LLM intermediate thinking/reasoning updates (in-place update of last 🤔 step)
+      // Hermes compaction status: announce once per turn; heartbeats repeat `true`.
+      listen<boolean>('chat-compacting', (e) => {
+        if (interruptedReply) return;
+        debugState('chat-compacting', { active: e.payload });
+        if (e.payload) {
+          if (compactingThisTurn) return;
+          compactingThisTurn = true;
+          chatStore.addThinkingStep(COMPACTING_STEP);
+          speakStatus({ kind: 'compacting' });
+        } else {
+          compactingThisTurn = false;
+          chatStore.removeThinkingStep(COMPACTING_STEP);
+        }
+      }),
+
+      // LLM intermediate thinking/reasoning updates (appended to ReasoningPanel)
       listen<string>('chat-thinking', (e) => {
-        chatStore.updateLastThinkingStep(e.payload);
+        enterMidTurnThinking();
+        chatStore.appendReasoning(e.payload);
       }),
 
       // Tool call start notification
       listen<string>('chat-tool-call', (e) => {
+        enterMidTurnThinking();
+        chatStore.endReasoningSegment();
         cancelPendingStatusSpeech();
         try {
           const payload = JSON.parse(e.payload);
@@ -490,7 +759,7 @@
             .replace(/^mcp_/, '')
             .replace(/_/g, ' ')
             .trim();
-          chatStore.addThinkingStep(`🔧 查询 ${toolName}...`);
+          chatStore.addThinkingStep(toolStepLabel(toolName, payload.preview));
           if (toolName) speakStatus({ kind: 'querying', name: toolName });
         } catch {
           chatStore.addThinkingStep(`🔧 正在执行操作...`);
@@ -498,6 +767,7 @@
         }
       }),
       listen<string>('chat-stream-error', (e) => {
+        settleSubagents();
         cancelPendingStatusSpeech();
         lastSpokenStatus = null;
         debugState('chat-stream-error', { error: e.payload });
@@ -511,6 +781,12 @@
       listen('bridge-thinking-start', () => {
         debugState('bridge-thinking-start');
         startBridgeThinking();
+      }),
+      listen<{ count: number }>('background-subagents', (e) => {
+        onBackgroundSubagents(e.payload.count);
+      }),
+      listen('conv-speech-detected', () => {
+        onSpeechDetected();
       }),
       listen('bridge-push-received', () => {
         debugState('bridge-push-received');
@@ -528,9 +804,13 @@
 
       // Bridge-mode intermediate events (reasoning + tool calls from Hermes via bridge)
       listen<string>("bridge-thinking", (e) => {
-        chatStore.updateLastThinkingStep(e.payload);
+        enterMidTurnThinking();
+        // Without bridge-thinking-start (show_thinking=false) the panel was never cleared.
+        if (bridgeThinkingActive) chatStore.appendReasoning(e.payload);
       }),
       listen<string>("bridge-tool-call", (e) => {
+        enterMidTurnThinking();
+        chatStore.endReasoningSegment();
         cancelPendingStatusSpeech();
         try {
           const payload = JSON.parse(e.payload);
@@ -539,7 +819,7 @@
             .replace(/^mcp_/, "")
             .replace(/_/g, " ")
             .trim();
-          chatStore.addThinkingStep(`🔧 查询 ${toolName}...`);
+          chatStore.addThinkingStep(toolStepLabel(toolName, payload.preview));
           if (toolName) speakStatus({ kind: 'querying', name: toolName });
         } catch {
           chatStore.addThinkingStep("🔧 正在执行操作...");
@@ -568,39 +848,7 @@
           return;
         }
         if (cfg.continuous_conversation) {
-          if (conversationActive) {
-            invoke('stop_continuous_conversation').catch(console.error);
-            conversationActive = false;
-            chatStore.setVoiceStatus(null);
-            islandMode = 'idle';
-            spiritPhase = 0;
-            characterState.toIdle();
-            return;
-          }
-          requestNewTurn(() => {
-            playPromptSound();
-            conversationActive = true;
-            islandMode = 'recording';
-            spiritPhase = 0;
-            firstStreamDelta = false;
-            chatStore.clear();
-            chatStore.setVoiceStatus(voiceListeningText());
-            characterState.toListening();
-            invoke('start_continuous_conversation', {
-              silenceTimeoutSecs: cfg.silence_timeout_secs,
-              pauseToleranceMs: cfg.pause_tolerance_ms,
-              speechRmsThreshold: cfg.speech_rms_threshold,
-              bargeInRmsThreshold: cfg.barge_in_rms_threshold,
-              bargeInEnabled: cfg.barge_in_enabled,
-            })
-              .catch((e) => {
-                console.error('[continuous] start failed', e);
-                conversationActive = false;
-                characterState.toIdle();
-                islandMode = 'idle';
-                chatStore.setError(`连续对话启动失败: ${e}`);
-              });
-          });
+          toggleContinuousConversation();
           return;
         }
         requestNewTurn(() => {
@@ -616,6 +864,7 @@
             pauseToleranceMs: cfg.pause_tolerance_ms,
             speechRmsThreshold: cfg.speech_rms_threshold,
             bargeInRmsThreshold: cfg.barge_in_rms_threshold,
+        wakeWordThreshold: cfg.wake_word_threshold,
             bargeInEnabled: cfg.barge_in_enabled,
             singleShot: true,
           }).catch((e) => {
@@ -630,7 +879,8 @@
       listen('fn-key-up', () => {
         debugState('fn-key-up');
         if (get(settingsStore).continuous_conversation) {
-          // In continuous mode, hotkey is a toggle on key-down; key-up is a no-op.
+          // Continuous mode: every press is a toggle, whichever event it emits.
+          toggleContinuousConversation();
           return;
         }
         // Single-shot mode: stop conversation worker and reset state immediately.
@@ -656,7 +906,11 @@
         debugState('voice-cancel');
         islandMode = 'idle';
         spiritPhase = 0;
+        mouthActive = false;
+        if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
         characterState.toIdle();
+        chatStore.clearThinkingSteps();
+        chatStore.setVoiceStatus(null);
         if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
         invoke('cancel_voice_recording').catch(console.error);
       }),
@@ -664,6 +918,7 @@
         debugState('stt-result', { language: e.payload.language, len: e.payload.text.length });
         islandMode = 'thinking';
         if (e.payload.text.trim()) {
+          chatStore.setSttText(e.payload.text.trim());
           handleSendMessage(e.payload.text, e.payload.language);
         } else if (conversationActive) {
           // Empty result in continuous mode: worker stays Listening, just ignore.
@@ -680,6 +935,7 @@
         islandMode = 'idle';
         spiritPhase = 0;
         console.warn('[STT]', e.payload.error);
+        chatStore.setSttText(null);
         chatStore.setError(`语音识别失败: ${e.payload.error}`);
         characterState.toIdle();
         if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
@@ -691,13 +947,12 @@
         debugState('conversation-state', { state: s });
         if (!conversationActive) return;
         if (s === 'listening') {
-          playPromptSound();
           chatStore.setVoiceStatus(voiceListeningText());
           characterState.toListening();
           islandMode = 'recording';
           spiritPhase = 0;
         } else if (s === 'transcribing') {
-          playPromptSound();
+          interruptedReply = false;
           chatStore.setVoiceStatus(null);
           characterState.toThinking();
           islandMode = 'thinking';
@@ -713,6 +968,8 @@
       listen('conversation-ended', () => {
         debugState('conversation-ended');
         conversationActive = false;
+        ++conversationCueEpoch;
+        promptAudio?.pause();
         chatStore.setVoiceStatus(null);
         // In single-shot mode, the LLM pipeline is still running (thinking → TTS).
         // Don't clobber islandMode — chat-audio-done will clean up and re-arm wake.
@@ -732,8 +989,29 @@
       listen<{ score: number }>('wake-word-detected', (e) => {
         debugState('wake-word-detected', { score: e.payload.score });
       }),
+      // The indicator must follow the backend, not the last thing this window
+      // asked for: the settings window saves wake fields by having Rust stop
+      // and restart the listener on its own (commands/config.rs), and the
+      // worker can also die on its own. Both only reach us as these events.
+      listen('wake-listener-started', () => {
+        if (conversationActive) return;
+        // A backend-side restart (settings save) is a recovery this window
+        // never asked for — drop wake's own stale "not ready / failed" text.
+        clearWakeStatus();
+        if (islandMode === 'idle') islandMode = 'waiting_for_wake';
+      }),
+      listen('wake-listener-stopped', () => {
+        if (islandMode === 'waiting_for_wake' || islandMode === 'verifying_speaker') islandMode = 'idle';
+      }),
       listen<{ error: string }>('wake-listener-error', (e) => {
         console.warn('[wake] listener error:', e.payload.error);
+        // The worker is gone on this path and emits no 'stopped' — turn the
+        // light off here or it keeps breathing over a dead listener.
+        if (islandMode === 'waiting_for_wake' || islandMode === 'verifying_speaker') islandMode = 'idle';
+        if (!conversationActive) {
+          const lang = get(settingsStore).ui_lang;
+          setWakeStatus(convLabelsLang(lang).wakeStartFailed(wakeErrorMessage(lang, e.payload.error)));
+        }
       }),
       // Wake check in-progress: dot 3 turns red while /wake/check HTTP call is running
       listen('wake-checking', () => {
@@ -742,13 +1020,42 @@
       listen('wake-check-done', () => {
         if (islandMode === 'verifying_speaker') islandMode = 'waiting_for_wake';
       }),
+      listen<number>('conversation-ready-prompt', async (e) => {
+        if (!conversationActive) return;
+        const epoch = ++conversationCueEpoch;
+        try {
+          // Explicit remote stop completes (or visibly fails) before accepting a
+          // new command. Local generations/sink were already stopped in Rust.
+          if (interruptedReply) await invoke('discard_pending_turn');
+          if (!conversationActive || epoch !== conversationCueEpoch) return;
+          let acknowledged = false;
+          await playReadyCue(async (readyDelayMs) => {
+            if (!conversationActive || epoch !== conversationCueEpoch) return;
+            await invoke('acknowledge_conversation_ready', {
+              id: e.payload,
+              played: true,
+              readyDelayMs,
+            });
+            acknowledged = true;
+          });
+          if (!acknowledged || !conversationActive || epoch !== conversationCueEpoch) return;
+        } catch (error) {
+          console.error('[conversation] readiness failed', error);
+          await invoke('acknowledge_conversation_ready', { id: e.payload, played: false });
+        }
+      }),
       listen('conversation-barge-in', () => {
         debugState('conversation-barge-in');
+        interruptedReply = true;
+        avatarEmotion = null;
+        // sentence-end is ignored while interrupted, so close the mouth here.
+        mouthActive = false;
+        if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
+        cancelPendingStatusSpeech();
         // TTS was cut; kill typewriter immediately so text stops mid-sentence.
         chatStore.abortTypewriter();
         chatStore.clearThinkingSteps();
-        chatStore.setVoiceStatus(voiceListeningText());
-        characterState.toListening();
+        chatStore.setVoiceStatus(null);
         spiritPhase = 0;
       }),
 
@@ -780,8 +1087,10 @@
       listen('accessibility-permission-required', () => {
         showAccessibilityGuide = true;
       }),
-      listen('tray-open-settings', () => {
-        openSettings();
+      listen('settings-changed', () => {
+        settingsStore.load();
+        void refreshMeshCustom();
+        void refreshComputerStatus();
       }),
       listen('tray-open-history', () => {
         openChatHistory();
@@ -794,6 +1103,7 @@
         debugState('api-push', { emotion: e.payload.emotion, hasVoice: !!e.payload.voice, len: e.payload.text.length });
         const { text, emotion, voice } = e.payload;
         if (!text.trim()) return;
+        avatarEmotion = emotion;
         currentInputLang = voice ? langFromVoice(voice) : detectLang(text);
         clearBridgeFallbackTimer();
         bridgeThinkingActive = false;
@@ -829,7 +1139,10 @@
       avatarX = pos.x / scale + (layoutStore.EXPANDED_W - layoutStore.AVATAR_W);
     }
     try {
-      await settingsStore.save({ window_x: Math.round(avatarX), window_y: Math.round(pos.y / scale) });
+      await invoke('save_window_position', {
+        x: Math.round(avatarX),
+        y: Math.round(pos.y / scale),
+      });
     } catch {}
   }
 
@@ -859,8 +1172,8 @@
     }
   }
 
-  // Track wake_word_enabled across settings changes so toggling the switch in
-  // SettingsPanel arms / disarms immediately, without requiring a PA restart.
+  // Track wake_word_enabled across settings changes so a settings-window save
+  // updates the main PA runtime without requiring a restart.
   let prevWakeEnabled = false;
   let unsubSettings: (() => void) | null = null;
 
@@ -882,10 +1195,23 @@
     if (ready) {
       playStartSound();
     } else {
-      listen('app-ready', () => playStartSound()).catch(console.error);
+      listen('app-ready', () => {
+        playStartSound();
+        // stt-server is only now healthy. The arm at the end of onMount may
+        // have burned its retry budget before /kws/session could answer —
+        // first run installs the venv, which takes minutes.
+        armWakeListenerIfEnabled();
+      }).catch(console.error);
     }
-    
-    await settingsStore.load();
+    // Old macOS: the sherpa compat build installs after startup, then stt-server
+    // reloads it. Wake could not start before — try again now.
+    listen('voice-engine-reloaded', () => armWakeListenerIfEnabled()).catch(console.error);
+
+    const settingsLoaded = await settingsStore.load();
+    void refreshMeshCustom();
+    if (!settingsLoaded) {
+      chatStore.setError('Settings database is unavailable. Pocket Agent is using safe defaults.');
+    }
     // Apply double-click mode setting to hotkey listener
     const s = $settingsStore;
     if (s.double_click_to_record) {
@@ -931,7 +1257,6 @@
     {#if $layoutStore.expanded && $layoutStore.avatarSide === 'right'}
       <ChatPanel
         side="left"
-        onSend={handleSendMessage}
         onCollapse={() => layoutStore.toggle()}
       />
       <div class="gap"></div>
@@ -947,7 +1272,18 @@
         avatarImage={$settingsStore.avatar_image ?? null}
         spiritPhase={spiritPhase}
         mediaSkins={mediaSkins}
+        emotion={avatarEmotion}
+        interrupted={interruptedReply}
+        mouthActive={mouthActive}
+        meshEnabled={$settingsStore.mesh_avatar_enabled}
+        meshScale={$settingsStore.mesh_avatar_scale}
+        meshOffsetX={$settingsStore.mesh_avatar_offset_x}
+        meshOffsetY={$settingsStore.mesh_avatar_offset_y}
+        meshExpressions={$settingsStore.mesh_avatar_expressions}
+        meshEmotions={$settingsStore.mesh_avatar_emotions}
+        {meshCustom}
         on:expand={() => layoutStore.toggle()}
+        on:contextmenu={() => invoke('open_settings_window')}
       />
       <DynamicIsland mode={islandMode} audioLevel={audioLevel} />
     </div>
@@ -957,7 +1293,6 @@
       <div class="gap"></div>
       <ChatPanel
         side="right"
-        onSend={handleSendMessage}
         onCollapse={() => layoutStore.toggle()}
       />
     {/if}
@@ -965,14 +1300,11 @@
 
   <!-- Status panel: spans avatar + chat width, only when expanded -->
   {#if $layoutStore.expanded}
+    <div class="stt-row" class:empty={$chatStore.sttText === null} bind:offsetHeight={sttRowH}><SttPanel /></div>
     <div class="status-row"><StatusPanel /></div>
+    <div class="reasoning-row" class:empty={!reasoningVisible} bind:offsetHeight={reasoningRowH}><ReasoningPanel visible={reasoningVisible} /></div>
   {/if}
 
-
-  <!-- Settings panel (takes over window when open) -->
-  {#if showSettings}
-    <SettingsPanel bind:visible={showSettings} onclose={closeSettings} />
-  {/if}
 
   <!-- Break confirm modal: shown when user triggers a new turn while one is in progress -->
   <BreakConfirmModal
@@ -980,6 +1312,7 @@
     onbreak={confirmBreak}
     oncancel={cancelBreak}
   />
+  <ComputerApproval />
 
   <!-- Accessibility guide overlay -->
   {#if showAccessibilityGuide}
@@ -1045,6 +1378,8 @@
   /* Vertical centering: avatar is 112px (incl. label), panel is 120px */
   .app-root.expanded .avatar-zone {
     align-self: flex-start;
+    /* 115px avatar + 16px island. The collapsed 146px left 15px empty under the island. */
+    height: 131px;
     /* margin-top: calc((120px - 126px) / 2); */
   }
 
@@ -1092,4 +1427,10 @@
   }
   .guide-btn:hover { background: rgba(160, 168, 255, 0.35); }
   .status-row { margin-top: 6px; width: 100%; flex-shrink: 0; }
+  /* Padding, not margin, so bind:offsetHeight covers the gap. Empty collapses the row
+     instead of unmounting the panel, so its backdrop-filter never toggles. */
+  .stt-row { padding-top: 6px; width: 100%; flex-shrink: 0; }
+  .stt-row.empty { height: 0; padding-top: 0; overflow: hidden; }
+  .reasoning-row { padding-top: 6px; width: 100%; flex-shrink: 0; }
+  .reasoning-row.empty { height: 0; padding-top: 0; overflow: hidden; }
 </style>

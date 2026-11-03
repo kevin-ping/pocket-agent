@@ -1,4 +1,5 @@
-import { writable } from 'svelte/store';
+import { derived, writable } from 'svelte/store';
+import { characterState } from './character';
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -11,12 +12,19 @@ interface ChatState {
   streamingContent: string;
   isStreaming: boolean;
   error: string | null;
-  /** Steps shown during LLM thinking/tool-calling phase (cleared when final text arrives) */
+  /** Steps shown during LLM thinking/tool-calling phase. Turn-scoped: cleared at turn
+   *  start and turn end, never by startStream/finalizeStream (those fire per sentence). */
   thinkingSteps: string[];
   /** Voice-mode status line (e.g. "🎤 听着…"). Lives alongside thinkingSteps in
    *  the StatusPanel but is orthogonal to LLM streaming — never cleared by
    *  startStream/finalizeStream, only by setVoiceStatus(null), clear, or setError. */
   voiceStatus: string | null;
+  /** Latest voice STT result, shown in SttPanel above the StatusPanel. Kept until
+   *  the next utterance replaces it; cleared only by setSttText(null) or clear. */
+  sttText: string | null;
+  /** Hermes' reasoning text for the current turn, shown in ReasoningPanel below the
+   *  StatusPanel. Appended chunk by chunk; kept until the next turn starts. */
+  reasoningText: string;
   /** First-launch PA venv bootstrap (~/.pocket-agent/venv) state. Rendered in
    *  StatusPanel as an extra row. `idle` and `ready` hide it; `installing` and
    *  `error` show it with phase + last log line. */
@@ -74,14 +82,17 @@ let scriptDetected: boolean = false;
 let streamEnding = false;
 // Collapse runs of 3+ newlines (LLM tool-call segment stitching) to a single blank line.
 let trailingNewlines = 0;
-// CMD-strip state: swallow [CMD:...] and [LOCAL_CMD ...] tokens from the displayed stream.
+// Set when a tool call ends a reasoning segment; the next chunk replaces the panel text.
+let reasoningSegmentDone = false;
+// CMD-strip state: swallow [CMD:...], [LOCAL_CMD ...] and [SUBAGENT_DONE:...] tokens from the displayed stream.
 // Tokens may straddle delta boundaries, so we buffer chars that might be opener prefixes.
 let inCmd = false;
 let cmdHold = '';
-let onCmdDetected: (() => void) | null = null;
 // hold refs to store functions so timer callbacks can use them
 let storeUpdate: any;
 let storeFinalize: (() => void) | null = null;
+
+const CMD_OPENERS = ['[CMD:', '[LOCAL_CMD', '[SUBAGENT_DONE:'];
 
 // Streaming filter that hides CMD tokens from chat display.
 // Backend still sends raw deltas; TTS and history are stripped server-side.
@@ -97,13 +108,12 @@ function filterCmd(delta: string): string {
       continue;
     }
     cmdHold += ch;
-    if (cmdHold === '[CMD:' || cmdHold === '[LOCAL_CMD') {
+    if (CMD_OPENERS.includes(cmdHold)) {
       cmdHold = '';
       inCmd = true;
-      onCmdDetected?.();
       continue;
     }
-    if (!'[CMD:'.startsWith(cmdHold) && !'[LOCAL_CMD'.startsWith(cmdHold)) {
+    if (!CMD_OPENERS.some((opener) => opener.startsWith(cmdHold))) {
       out += cmdHold;
       cmdHold = '';
     }
@@ -168,6 +178,8 @@ function createChatStore() {
     error: null,
     thinkingSteps: [],
     voiceStatus: null,
+    sttText: null,
+    reasoningText: '',
     voiceSetupState: 'idle',
     voiceSetupPhase: '',
     voiceSetupDetail: '',
@@ -187,7 +199,6 @@ function createChatStore() {
         streamingContent: '',
         isStreaming: false,
         error: null,
-        thinkingSteps: [],
       };
     });
   }
@@ -214,11 +225,7 @@ function createChatStore() {
     startStream: () => {
       trailingNewlines = 0;
       resetCmdState();
-      update((s) => ({ ...s, streamingContent: '', isStreaming: true, error: null, thinkingSteps: [] }));
-    },
-
-    setOnCmdDetected: (cb: (() => void) | null) => {
-      onCmdDetected = cb;
+      update((s) => ({ ...s, streamingContent: '', isStreaming: true, error: null }));
     },
 
     /** Add an intermediate step shown during LLM thinking/tool-calling phase */
@@ -231,26 +238,46 @@ function createChatStore() {
         return { ...s, thinkingSteps: [...s.thinkingSteps, step] };
       }),
 
-    /** Update the last thinking step in-place (reasoning comes as many tiny chunks).
-     *  Once a tool (🔧) step has been added, ignore further reasoning so the visible
-     *  sequence is 🤔 → 🔧 → 🔧 → 🔧 instead of 🤔 → 🔧 → 🤔 → 🔧 → 🤔. */
-    updateLastThinkingStep: (text: string) =>
-      update((s) => {
-        if (s.thinkingSteps.length === 0) {
-          return { ...s, thinkingSteps: [`🤔 ${text}`] };
-        }
-        const last = s.thinkingSteps[s.thinkingSteps.length - 1];
-        if (last.startsWith('🤔')) {
-          const updated = [...s.thinkingSteps];
-          updated[updated.length - 1] = `🤔 ${text}`;
-          return { ...s, thinkingSteps: updated };
-        }
-        return s;
-      }),
+    /** Append a reasoning chunk (reasoning comes as many tiny chunks). */
+    appendReasoning: (text: string) => {
+      const replace = reasoningSegmentDone;
+      reasoningSegmentDone = false;
+      update((s) => ({ ...s, reasoningText: replace ? text : s.reasoningText + text }));
+    },
+
+    /** A tool call ended the current reasoning segment. Keep it on screen until the
+     *  next segment's first chunk replaces it. */
+    endReasoningSegment: () => { reasoningSegmentDone = true; },
+
+    /** Drop the previous turn's reasoning — called only at turn start. */
+    clearReasoning: () => {
+      reasoningSegmentDone = false;
+      update((s) => (s.reasoningText === '' ? s : { ...s, reasoningText: '' }));
+    },
+
+    /** Remove one step, e.g. the compaction notice once Hermes has finished compacting. */
+    removeThinkingStep: (step: string) =>
+      update((s) => (s.thinkingSteps.includes(step)
+        ? { ...s, thinkingSteps: s.thinkingSteps.filter((item) => item !== step) }
+        : s)),
 
     /** Clear all thinking steps — called when final text arrives */
     clearThinkingSteps: () =>
       update((s) => ({ ...s, thinkingSteps: [] })),
+
+    /** The final answer has started. Remove reasoning text while keeping tool
+     *  activity visible until the text/audio response is fully finished. */
+    finishThinkingPhase: () =>
+      update((s) => {
+        const toolSteps = s.thinkingSteps.filter((step) => step.startsWith('🔧'));
+        if (
+          toolSteps.length === s.thinkingSteps.length &&
+          toolSteps.every((step, index) => step === s.thinkingSteps[index])
+        ) {
+          return s;
+        }
+        return { ...s, thinkingSteps: toolSteps };
+      }),
 
     /** Immediately stop the typewriter, dropping any unflushed pending chars.
      *  Used on barge-in so the user sees only what was already displayed. */
@@ -266,6 +293,10 @@ function createChatStore() {
     /** Set or clear the voice-mode status line (e.g. "🎤 听着…"). Pass null to clear. */
     setVoiceStatus: (text: string | null) =>
       update((s) => (s.voiceStatus === text ? s : { ...s, voiceStatus: text })),
+
+    /** Set or clear the latest voice STT result. Pass null to clear. */
+    setSttText: (text: string | null) =>
+      update((s) => (s.sttText === text ? s : { ...s, sttText: text })),
 
     setVoiceSetup: (patch: Partial<Pick<ChatState, 'voiceSetupState' | 'voiceSetupPhase' | 'voiceSetupDetail'>>) =>
       update((s) => ({ ...s, ...patch })),
@@ -334,6 +365,22 @@ function createChatStore() {
       if (!typewriterTimer) finalizeStream();
     },
 
+    /** TTS audio has finished playing — the fixed ms/char typewriter pace doesn't
+     *  track real speech duration, so it can still be mid-sentence at this point.
+     *  Flush any remaining buffered chars immediately so text never lags behind audio. */
+    finishTypewriterNow: () => {
+      if (typewriterTimer) { clearInterval(typewriterTimer); typewriterTimer = null; }
+      if (pendingChars.length > 0) {
+        const remaining = pendingChars.join('');
+        pendingChars = [];
+        update((s) => ({
+          ...s,
+          streamingContent: s.streamingContent ? s.streamingContent + remaining : remaining.replace(/^\s+/, ''),
+        }));
+      }
+      if (streamEnding) finalizeStream();
+    },
+
     setError: (msg: string) => {
       if (typewriterTimer) { clearInterval(typewriterTimer); typewriterTimer = null; }
       if (pendingChars.length > 0) pendingChars = [];
@@ -348,6 +395,7 @@ function createChatStore() {
       if (pendingChars.length > 0) pendingChars = [];
       streamEnding = false;
       trailingNewlines = 0;
+      reasoningSegmentDone = false;
       resetCmdState();
       update((s) => ({
         ...s,
@@ -357,10 +405,21 @@ function createChatStore() {
         error: null,
         thinkingSteps: [],
         voiceStatus: null,
+        sttText: null,
+        reasoningText: '',
       }));
     },
   };
 }
 
 export const chatStore = createChatStore();
+
+/** The status panel shows; the reasoning panel only shows alongside it. */
+export const statusVisible = derived([chatStore, characterState], ([$chat, $character]) =>
+  $chat.voiceSetupState === 'installing' ||
+  $chat.voiceSetupState === 'error' ||
+  $chat.thinkingSteps.length > 0 ||
+  $character === 'thinking' ||
+  $chat.voiceStatus !== null
+);
 export { EMOTION_SPEEDS };

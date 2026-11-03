@@ -29,6 +29,12 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle();
 
+            // settings.db is the single source of truth. Initialize and migrate
+            // the legacy Tauri settings.json before any service reads config.
+            if let Err(e) = commands::settings_repository::initialize(handle) {
+                eprintln!("[settings] database initialization failed: {}", e);
+            }
+
             // Initialize chat history database
             if let Err(e) = commands::history::init_db() {
                 eprintln!("[history] failed to init db: {}", e);
@@ -64,12 +70,23 @@ pub fn run() {
             // start the STT server once the venv is ready.
             {
                 let venv_handle = handle.clone();
+                let voice_for_stt = config.tts_primary_voice.clone();
                 std::thread::Builder::new()
                     .name("venv-bootstrap".to_string())
                     .spawn(move || {
                         match voice::venv::ensure_venv(&venv_handle) {
                             Ok(()) => {
-                                voice::stt::ensure_stt_server(Some(venv_handle.clone()));
+                                std::env::set_var("TTS_PRIMARY_VOICE", &voice_for_stt);
+                                #[cfg(target_os = "macos")]
+                                let repair = voice::sherpa_compat::ensure_compat;
+                                #[cfg(not(target_os = "macos"))]
+                                let repair = || Ok(false);
+                                let reload_handle = venv_handle.clone();
+                                start_voice_services(
+                                    || voice::stt::ensure_stt_server(Some(venv_handle.clone())),
+                                    repair,
+                                    || voice::stt::restart_when_idle(reload_handle),
+                                );
                             }
                             Err(e) => eprintln!("[venv] bootstrap failed: {}", e),
                         }
@@ -97,7 +114,7 @@ pub fn run() {
 
             app.on_menu_event(move |app, event| {
                 if event.id().as_ref() == "app-settings" {
-                    let _ = app.emit("tray-open-settings", ());
+                    let _ = commands::config::open_settings_window(app.clone());
                 }
             });
 
@@ -116,7 +133,7 @@ pub fn run() {
                 .on_menu_event(move |app, event| {
                     match event.id().as_ref() {
                         "tray-settings" => {
-                            let _ = app.emit("tray-open-settings", ());
+                            let _ = commands::config::open_settings_window(app.clone());
                         }
                         "tray-history" => {
                             let _ = app.emit("tray-open-history", ());
@@ -136,12 +153,22 @@ pub fn run() {
             commands::chat::send_message,
             commands::chat::speak,
             commands::chat::speak_text,
+            commands::chat::preview_voice,
             commands::chat::speak_status,
             commands::chat::discard_pending_turn,
             commands::chat::reset_hotkey_active_state,
             commands::config::get_config,
             commands::config::save_config,
+            commands::config::save_settings_page_config,
+            commands::config::open_settings_window,
+            commands::config::get_setting_asset,
+            commands::config::save_setting_asset,
+            commands::config::delete_setting_asset,
+            commands::config::save_window_position,
             commands::config::quit_app,
+            commands::computer::get_computer_status,
+            api::runs::respond_computer_approval,
+            api::subagents::settle_background_subagents,
             commands::history::open_chat_history,
             commands::history::save_chat_message,
 
@@ -153,6 +180,7 @@ pub fn run() {
             commands::voice::stop_continuous_conversation,
             commands::voice::notify_conversation_tts_started,
             commands::voice::notify_conversation_tts_done,
+            commands::voice::acknowledge_conversation_ready,
             commands::voice::is_continuous_conversation_active,
             commands::voice::start_wake_word_listening,
             commands::voice::stop_wake_word_listening,
@@ -161,8 +189,13 @@ pub fn run() {
             commands::voice::start_enroll_recording,
             commands::voice::stop_enroll_recording,
             commands::voice::enroll_speaker,
+            commands::voice::wake_model_status,
+            commands::voice::install_wake_model,
+            commands::voice::test_wake_word,
             commands::voice::train_speaker,
             commands::voice::get_wake_variant_count,
+            commands::voice::get_wake_words,
+            commands::voice::remove_wake_word,
             commands::voice::verify_speaker,
             commands::voice::list_speakers,
             commands::voice::remove_speaker,
@@ -172,11 +205,68 @@ pub fn run() {
             voice::hotkey::update_hotkey,
             voice::hotkey::set_double_click_mode,
         ])
-        .on_window_event(|_window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
                 voice::stt::shutdown_stt_server();
             }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// STT comes first so the main window never waits on the optional sherpa
+/// compat repair (a download on old macOS). A failed repair only leaves wake
+/// word / voiceprint unavailable; a fresh install reloads the running server.
+fn start_voice_services(
+    start_stt: impl FnOnce(),
+    repair: impl FnOnce() -> Result<bool, String>,
+    reload: impl FnOnce(),
+) {
+    start_stt();
+    match repair() {
+        Ok(true) => reload(),
+        Ok(false) => {}
+        Err(e) => eprintln!("[sherpa-compat] {e}; wake word and voiceprint checks stay unavailable"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::start_voice_services;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    #[test]
+    fn stalled_compat_download_does_not_block_stt_start() {
+        let (stt_tx, stt_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let reloaded = Arc::new(AtomicBool::new(false));
+        let reloaded_in = reloaded.clone();
+        let worker = std::thread::spawn(move || {
+            start_voice_services(
+                || stt_tx.send(()).unwrap(),
+                || {
+                    release_rx.recv().unwrap(); // the hung download
+                    Ok(true)
+                },
+                || reloaded_in.store(true, Ordering::SeqCst),
+            )
+        });
+        stt_rx.recv_timeout(Duration::from_secs(2)).expect("STT must start while the download hangs");
+        assert!(!reloaded.load(Ordering::SeqCst));
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(reloaded.load(Ordering::SeqCst), "a fresh install reloads the server");
+    }
+
+    #[test]
+    fn failed_or_unneeded_repair_does_not_reload() {
+        for result in [Ok(false), Err("download failed".to_string())] {
+            let mut stt = false;
+            let mut reloaded = false;
+            start_voice_services(|| stt = true, || result, || reloaded = true);
+            assert!(stt && !reloaded);
+        }
+    }
 }

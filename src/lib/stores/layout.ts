@@ -111,56 +111,11 @@ function createLayoutStore() {
     }
   }
 
-  // Resize window for settings panel (called by App.svelte)
-  async function openSettings(): Promise<{ x: number; y: number; w: number; h: number }> {
-    const win = getCurrentWindow();
-    const pos = await win.outerPosition();
-    const monitor = await currentMonitor();
-    const scale = monitor ? monitor.scaleFactor : 1;
-    const logicalX = pos.x / scale;
-    const logicalY = pos.y / scale;
-
-    const state = get({ subscribe });
-    const currentW = state.expanded ? EXPANDED_W : AVATAR_W;
-    const currentH = state.expanded ? CHAT_H : AVATAR_H;
-
-    const settingsW = 380;
-    const settingsH = 500;
-
-    // Get usable display area (respects macOS menu bar / dock)
-    const workW = monitor ? monitor.workArea.size.width  / scale : 1440;
-    const workH = monitor ? monitor.workArea.size.height / scale : 900;
-    const workX = monitor ? monitor.workArea.position.x  / scale : 0;
-    const workY = monitor ? monitor.workArea.position.y  / scale : 0;
-
-    // Center horizontally near widget; clamp so it never goes off-screen
-    let settingsX = logicalX - (settingsW - currentW) / 2;
-    settingsX = Math.max(workX + 8, Math.min(settingsX, workX + workW - settingsW - 8));
-
-    // Prefer above widget; clamp to fit within work area vertically
-    let settingsY = logicalY - 60;
-    settingsY = Math.max(workY + 8, Math.min(settingsY, workY + workH - settingsH - 8));
-
-    await win.setSize(new LogicalSize(settingsW, settingsH));
-    await win.setPosition(new LogicalPosition(settingsX, settingsY));
-
-    return { x: logicalX, y: logicalY, w: currentW, h: currentH };
-  }
-
-  // Restore window after settings close
-  async function closeSettings(prev: { x: number; y: number; w: number; h: number }) {
-    const win = getCurrentWindow();
-    await win.setSize(new LogicalSize(prev.w, prev.h));
-    await win.setPosition(new LogicalPosition(prev.x, prev.y));
-  }
-
   return {
     subscribe,
     toggle,
     expand,
     collapse,
-    openSettings,
-    closeSettings,
     AVATAR_W,
     AVATAR_H,
     CHAT_W,

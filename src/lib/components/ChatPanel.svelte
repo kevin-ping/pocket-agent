@@ -2,12 +2,11 @@
   import { fly } from 'svelte/transition';
   import { chatStore } from '../stores/chat';
   import { settingsStore } from '../stores/settings';
-  import { tLang } from '../i18n';
-  import { characterState } from '../stores/character';
+  import { idleHint } from '../i18n';
+  import StatusStrip from './StatusStrip.svelte';
 
-  let { side = 'right', onSend, onCollapse }: { side?: 'left' | 'right'; onSend: (text: string) => void; onCollapse: () => void } = $props();
+  let { side = 'right', onCollapse }: { side?: 'left' | 'right'; onCollapse: () => void } = $props();
 
-  let inputText = $state('');
   let contentEl: HTMLDivElement | undefined;
   let panelEl: HTMLDivElement | undefined;
 
@@ -59,7 +58,7 @@
   // During thinking/tool phase, show intermediate steps instead of empty box
   let displayContent = $derived($chatStore.isStreaming && !$chatStore.streamingContent
     ? ''
-    : ($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? tLang($settingsStore.ui_lang).hint.replace("{key}", $settingsStore.hotkey_name)));
+    : ($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? idleHint($settingsStore)));
 
   // Auto-scroll to bottom when streaming
   $effect(() => {
@@ -92,22 +91,6 @@
 
   let isError = $derived(!$chatStore.isStreaming && !!$chatStore.error);
   let isStreaming = $derived($chatStore.isStreaming);
-  let isBusy = $derived($chatStore.isStreaming || $characterState === 'thinking');
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey && inputText.trim()) {
-      e.preventDefault();
-      onSend(inputText.trim());
-      inputText = '';
-    }
-  }
-
-  function handleSendClick() {
-    if (inputText.trim()) {
-      onSend(inputText.trim());
-      inputText = '';
-    }
-  }
 </script>
 
 <div
@@ -128,40 +111,20 @@
         </p>
       {:else}
         <p class="message-text" class:error-text={isError}>
-          {@html sanitizeHtml($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? tLang($settingsStore.ui_lang).hint.replace("{key}", $settingsStore.hotkey_name))}
+          {@html sanitizeHtml($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? idleHint($settingsStore))}
         </p>
       {/if}
     </div>
   </div>
 
-  <!-- Input area -->
-  <div class="input-area">
-    <input
-      type="text"
-      placeholder={isBusy ? tLang($settingsStore.ui_lang).inputBusy : tLang($settingsStore.ui_lang).inputPlaceholder}
-      bind:value={inputText}
-      onkeydown={handleKeydown}
-      maxlength={500}
-      autocomplete="off"
-      spellcheck="false"
-      aria-label="消息输入"
-    />
-    <button
-      class="send-btn"
-      onclick={handleSendClick}
-      disabled={!inputText.trim()}
-      aria-label="发送"
-    >
-      ↑
-    </button>
-  </div>
+  <StatusStrip />
 </div>
 
 <style>
   /* ─── Panel ─── */
   .chat-panel {
     width: 280px;
-    height: 135px;
+    height: 131px;
     display: flex;
     flex-direction: column;
     background: rgba(10, 10, 22, 0.82);
@@ -172,7 +135,8 @@
     overflow: hidden;
     position: relative;
     flex-shrink: 0;
-    align-self: center;
+    /* Top-aligned so it spans the same 131px as the avatar + island block. */
+    align-self: flex-start;
   }
 
   /* ─── Floating close button ─── */
@@ -288,50 +252,4 @@
     color: var(--primary);
     animation: blink-cursor 0.75s ease-in-out infinite;
   }
-
-  /* ─── Input area ─── */
-  .input-area {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 6px 6px;
-    border-top: 1px solid rgba(255, 255, 255, 0.06);
-    flex-shrink: 0;
-  }
-
-  input {
-    flex: 1;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 7px;
-    padding: 4px 9px;
-    color: rgba(232, 232, 240, 0.92);
-    font-size: 11.5px;
-    outline: none;
-    transition: border-color 0.15s;
-    min-width: 0;
-  }
-  input:focus       { border-color: rgba(160, 168, 255, 0.5); }
-  input:disabled    { opacity: 0.4; cursor: not-allowed; }
-  input::placeholder { color: rgba(232, 232, 240, 0.28); }
-
-  .send-btn {
-    width: 26px;
-    height: 26px;
-    border-radius: 6px;
-    background: rgba(160, 168, 255, 0.18);
-    border: 1px solid rgba(160, 168, 255, 0.32);
-    color: #A0A8FF;
-    font-size: 14px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: background 0.12s, opacity 0.12s;
-    flex-shrink: 0;
-    line-height: 1;
-    padding: 0;
-  }
-  .send-btn:hover:not(:disabled) { background: rgba(160, 168, 255, 0.32); }
-  .send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 </style>

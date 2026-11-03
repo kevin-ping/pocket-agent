@@ -25,3 +25,10 @@ __pycache__/
 __pycache__/
 *.pyc
 codereview.md
+
+# BEGIN FRAMEWORK GITIGNORE - DO NOT EDIT THIS SECTION
+.claude/
+.agents/
+.skills/
+.auto-work/
+# END FRAMEWORK GITIGNORE

@@ -7,10 +7,13 @@ numpy<2.0
 # Pin av<13: PyAV>=13 drops x86_64 macOS prebuilt wheels, forcing source build
 # that requires pkg-config + ffmpeg. av 12.x has wheels for both x86_64 and arm64.
 av>=12.0.0,<13
+# torchaudio>=2.1 macOS wheels ship no built-in audio backend; without soundfile,
+# silero-vad's read_audio() fails with "Couldn't find appropriate backend".
+soundfile>=0.12.1
 faster-whisper>=1.0.0
 silero-vad>=5.1
 onnxruntime>=1.17
-edge-tts>=6.1
+edge-tts>=7.3.1
 
 # HTTP server framework (Phase B+C rewrite of stt-server.py).
 fastapi>=0.110
@@ -27,3 +30,7 @@ pypinyin>=0.51
 
 # Speaker embedding: fbank feature extraction for 3D-Speaker model.
 kaldi-native-fbank>=1.0
+
+# Offline Chinese/English keyword spotting and pronunciation conversion.
+sherpa-onnx==1.12.26
+sentencepiece>=0.2,<0.3

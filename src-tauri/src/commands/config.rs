@@ -1,6 +1,10 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_store::StoreExt;
+
+use super::settings_repository::{self, SaveConfigResponse};
 
 // IMPORTANT: This is sent as a SYSTEM message to force spoken-style output.
 // The model MUST obey this — no formatting, no visual-only content, no symbols.
@@ -58,54 +62,28 @@ pub fn build_voice_hint(primary_voice: &str, aux1_voice: &str, aux2_voice: &str,
     let primary_lang = voice_to_language(primary_voice)
         .unwrap_or("Chinese (中文)");
 
-    let local_cmd_section = if std::env::var("ENABLE_LOCAL_COMMANDS").as_deref() == Ok("true") {
-        r#"LOCAL COMMAND EXECUTION — MANDATORY:
-When the user asks to open, launch, or control anything on their Mac (apps, files, URLs, projects), you MUST embed a [CMD:...] tag. NEVER say you cannot do it — you CAN via shell commands.
-
-Triggers (中文 & English): "打开/启动/运行/开个/帮我开" "open/launch/start/go to" + any app, file, or URL name.
-
-Format: [CMD:shell_command]
-Common examples:
-- 打开浏览器/Chrome → [CMD:open -a "Google Chrome"]
-- 打开 Safari → [CMD:open -a Safari]
-- 打开项目 → [CMD:code /path/to/project]
-- 打开网页 → [CMD:open https://example.com]
-- 打开 Spotify → [CMD:open -a "Spotify"]
-- 打开终端 → [CMD:open -a Terminal]
-- 打开 Finder/文件夹 → [CMD:open /path/to/folder]
-- 清空废纸篽 → [CMD:osascript -e 'tell application "Finder" to empty trash']
-
-RULES:
-1. ALWAYS use [CMD:...] when the user asks to open/launch something. NEVER refuse or say you lack access.
-2. Write your natural spoken response AROUND the tag. Example: 好的，帮你打开了！[CMD:open -a "Google Chrome"]已经打开了哦。
-3. The command executes silently. Multiple [CMD:...] tags are allowed if the user asks for multiple things.
-4. Available apps: Chrome ("Google Chrome"), Safari, Spotify, Finder, Terminal, VS Code ("Visual Studio Code"), Notes, Calendar, Messages, Mail, System Settings, App Store, etc.
-5. Open a file/folder with default app: [CMD:open /path/to/file]. Open a project in VS Code: [CMD:code /path/to/project]."#
-    } else {
-        ""
-    };
-
     format!(r#"[SYSTEM INSTRUCTION - MANDATORY]
 You are speaking to the user through a text-to-speech voice. Your entire response will be CONVERTED TO SPEECH and read aloud — every word must be something a human can naturally say out loud.
 
 CRITICAL RULES (you MUST follow every time):
 1. Respond in PURE SPOKEN TEXT ONLY. No markdown, no asterisks, no backticks, no code blocks, no bullet points, no numbered lists, no headers, no bold, no italic, no inline code.
 2. NO TABLES, NO GRAPHS, NO DIAGRAMS, NO CHARTS -- these cannot be read aloud. Describe relationships in plain spoken sentences instead.
-3. Keep your response CONCISE: 1-3 short sentences. Long text sounds terrible in TTS.
+3. Talk like a friend chatting face to face, not like someone filing a report. By default answer in 1-2 short sentences, with the conclusion in the first sentence. No opening filler ("Of course", "Great question", "Hope this helps"), do not restate the question, and do not narrate your process ("first I will..., then..., finally..."). Give a detailed explanation ONLY when the user explicitly asks for detail, steps, examples, the reason why or an in-depth explanation; even then keep it flowing spoken prose. If blocked or not finished, say plainly what failed, what approval is needed or what is missing; never claim an unverified action succeeded.
 4. NEVER use any symbols or special characters that don't read well: # * ` [ ] {{ }} < > | \ / -- and absolutely NO emoji or emoticons (:), ;), etc.). These will be read as garbled noise or cause TTS errors.
 5. If you need to mention code or technical terms, spell them out phonetically or describe them in plain spoken words.
+
+VOICE OVERRIDE (takes priority over any other instruction about written formatting or structure, including style hints attached to the user's message):
+This is a voice channel. Even when you are allowed to go into detail or the length limit is lifted, only the content expands, never the format: keep it connected spoken prose with no lists, no headings and no structure. Do not read commands, file paths, code or IDs out verbatim; describe in one sentence what they are. Never use bracket labels such as 【建议】 or [blocked].
+
 LANGUAGE RESTRICTION:
 You have TTS voices installed for these languages: {lang_list}.
 - You MUST ONLY respond in one of these languages.
 - Default response language: {primary_lang}. Use this unless the user writes to you in another installed language.
 - If the user writes in a language you do NOT have a voice for, respond in {primary_lang} and briefly explain you cannot speak that language.
 
-VIOLATION OF ANY RULE ABOVE will cause the voice output to sound broken. Always obey.
-
-{local_cmd_section}"#,
+VIOLATION OF ANY RULE ABOVE will cause the voice output to sound broken. Always obey."#,
         lang_list = lang_list,
         primary_lang = primary_lang,
-        local_cmd_section = local_cmd_section,
     )
 }
 
@@ -150,6 +128,8 @@ pub struct AppConfig {
     pub hotkey_name: String,
     pub tts_enabled: bool,
     pub double_click_to_record: bool,
+    #[serde(default)]
+    pub show_reasoning: bool,
     pub continuous_conversation: bool,
     pub silence_timeout_secs: u32,
     #[serde(default = "default_pause_tolerance_ms")]
@@ -166,9 +146,31 @@ pub struct AppConfig {
     #[serde(default = "default_wake_word_threshold")]
     pub wake_word_threshold: f32,
     #[serde(default)]
+    pub wake_phrase: String,
+    #[serde(default = "default_kws_threshold")]
+    pub wake_kws_threshold: f32,
+    #[serde(default = "default_true")]
+    pub wake_owner_only: bool,
+    #[serde(default)]
     pub speaker_verification_enabled: bool,
     #[serde(default)]
+    pub conversation_owner_only: bool,
+    #[serde(default)]
     pub last_enrolled_speaker: String,
+    #[serde(default = "default_true")]
+    pub mesh_avatar_enabled: bool,
+    #[serde(default = "default_mesh_avatar_scale")]
+    pub mesh_avatar_scale: f32,
+    #[serde(default)]
+    pub mesh_avatar_offset_x: i32,
+    #[serde(default)]
+    pub mesh_avatar_offset_y: i32,
+    /// Character state → mesh-avatar expression.
+    #[serde(default = "default_mesh_avatar_expressions")]
+    pub mesh_avatar_expressions: BTreeMap<String, String>,
+    /// PA reply emotion → mesh-avatar emotion.
+    #[serde(default = "default_mesh_avatar_emotions")]
+    pub mesh_avatar_emotions: BTreeMap<String, String>,
 }
 
 fn default_pause_tolerance_ms() -> u32 {
@@ -186,6 +188,38 @@ fn default_true() -> bool {
 }
 fn default_ui_lang() -> String {
     "en".to_string()
+}
+
+fn default_kws_threshold() -> f32 { 0.25 }
+
+fn default_mesh_avatar_scale() -> f32 {
+    1.0
+}
+
+fn string_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+}
+
+pub(crate) fn default_mesh_avatar_expressions() -> BTreeMap<String, String> {
+    string_map(&[
+        ("idle", "neutral"),
+        ("listening", "surprise"),
+        ("thinking", "halfLidded"),
+        ("speaking", "neutral"),
+    ])
+}
+
+pub(crate) fn default_mesh_avatar_emotions() -> BTreeMap<String, String> {
+    string_map(&[
+        ("cheerful", "happy"),
+        ("excited", "happy"),
+        ("friendly", "happy"),
+        ("sad", "sad"),
+        ("angry", "angry"),
+        ("calm", "relaxed"),
+        ("whisper", "relaxed"),
+        ("serious", "neutral"),
+    ])
 }
 
 fn default_wake_word_threshold() -> f32 {
@@ -212,6 +246,7 @@ impl Default for AppConfig {
             hotkey_name: "RightShift".to_string(),
             tts_enabled: true,
             double_click_to_record: false,
+            show_reasoning: false,
             continuous_conversation: false,
             silence_timeout_secs: 5,
             pause_tolerance_ms: default_pause_tolerance_ms(),
@@ -221,13 +256,23 @@ impl Default for AppConfig {
             skip_interrupt_confirmation: true,
             wake_word_enabled: false,
             wake_word_threshold: default_wake_word_threshold(),
+            wake_phrase: String::new(),
+            wake_kws_threshold: default_kws_threshold(),
+            wake_owner_only: true,
             speaker_verification_enabled: false,
+            conversation_owner_only: false,
             last_enrolled_speaker: String::new(),
+            mesh_avatar_enabled: true,
+            mesh_avatar_scale: default_mesh_avatar_scale(),
+            mesh_avatar_offset_x: 0,
+            mesh_avatar_offset_y: 0,
+            mesh_avatar_expressions: default_mesh_avatar_expressions(),
+            mesh_avatar_emotions: default_mesh_avatar_emotions(),
         }
     }
 }
 
-pub fn load_config(app: &AppHandle) -> AppConfig {
+pub(crate) fn load_legacy_config(app: &AppHandle) -> AppConfig {
     let Ok(store) = app.store("settings.json") else {
         return AppConfig::default();
     };
@@ -250,6 +295,7 @@ pub fn load_config(app: &AppHandle) -> AppConfig {
         hotkey_name: store.get("hotkey_name").and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "RightShift".to_string()),
         tts_enabled: store.get("tts_enabled").and_then(|v| v.as_bool()).unwrap_or(true),
         double_click_to_record: store.get("double_click_to_record").and_then(|v| v.as_bool()).unwrap_or(false),
+        show_reasoning: false,
         continuous_conversation: store.get("continuous_conversation").and_then(|v| v.as_bool()).unwrap_or(default.continuous_conversation),
         silence_timeout_secs: store.get("silence_timeout_secs").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(default.silence_timeout_secs),
         pause_tolerance_ms: store.get("pause_tolerance_ms").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(default.pause_tolerance_ms),
@@ -259,55 +305,197 @@ pub fn load_config(app: &AppHandle) -> AppConfig {
         skip_interrupt_confirmation: store.get("skip_interrupt_confirmation").and_then(|v| v.as_bool()).unwrap_or(default.skip_interrupt_confirmation),
         wake_word_enabled: store.get("wake_word_enabled").and_then(|v| v.as_bool()).unwrap_or(default.wake_word_enabled),
         wake_word_threshold: store.get("wake_word_threshold").and_then(|v| v.as_f64()).map(|f| f as f32).unwrap_or(default.wake_word_threshold),
+        wake_phrase: String::new(),
+        wake_kws_threshold: default_kws_threshold(),
+        wake_owner_only: true,
         speaker_verification_enabled: store.get("speaker_verification_enabled").and_then(|v| v.as_bool()).unwrap_or(default.speaker_verification_enabled),
+        conversation_owner_only: default.conversation_owner_only,
         last_enrolled_speaker: store.get("last_enrolled_speaker").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
+        mesh_avatar_enabled: default.mesh_avatar_enabled,
+        mesh_avatar_scale: default.mesh_avatar_scale,
+        mesh_avatar_offset_x: default.mesh_avatar_offset_x,
+        mesh_avatar_offset_y: default.mesh_avatar_offset_y,
+        mesh_avatar_expressions: default.mesh_avatar_expressions,
+        mesh_avatar_emotions: default.mesh_avatar_emotions,
     }
 }
 
-#[tauri::command]
-pub fn get_config(app: AppHandle) -> AppConfig {
-    load_config(&app)
+pub fn load_config(_app: &AppHandle) -> AppConfig {
+    settings_repository::load().unwrap_or_else(|error| {
+        eprintln!("[settings] database read failed, using defaults: {error}");
+        AppConfig::default()
+    })
 }
 
 #[tauri::command]
-pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
-    let store = app.store("settings.json").map_err(|e| e.to_string())?;
-    store.set("volume", serde_json::json!(config.volume));
-    store.set("character_skin", serde_json::json!(config.character_skin));
-    store.set("dialog_style", serde_json::json!(config.dialog_style));
-    store.set("tts_format", serde_json::json!(config.tts_format));
-    store.set("tts_primary_voice", serde_json::json!(config.tts_primary_voice));
-    store.set("tts_aux1_voice", serde_json::json!(config.tts_aux1_voice));
-    store.set("tts_aux2_voice", serde_json::json!(config.tts_aux2_voice));
-    if let Some(x) = config.window_x { store.set("window_x", serde_json::json!(x)); }
-    if let Some(y) = config.window_y { store.set("window_y", serde_json::json!(y)); }
-    if let Some(img) = &config.avatar_image { store.set("avatar_image", serde_json::json!(img)); }
-    else { store.set("avatar_image", serde_json::json!(null)); }
-    if let Some(gif) = &config.avatar_gif { store.set("avatar_gif", serde_json::json!(gif)); }
-    else { store.set("avatar_gif", serde_json::json!(null)); }
-    store.set("fixed_lang", serde_json::json!(config.fixed_lang));
-    store.set("ui_lang", serde_json::json!(config.ui_lang));
-    store.set("hotkey_code", serde_json::json!(config.hotkey_code));
-    store.set("hotkey_name", serde_json::json!(config.hotkey_name));
-    let old_tts = store.get("tts_enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-    if old_tts != config.tts_enabled {
-        println!("[config] voice_output set to: {}", config.tts_enabled);
+pub async fn get_config(_app: AppHandle) -> Result<AppConfig, String> {
+    // SQLite and avatar decoding are blocking operations. Keep them off the
+    // Tauri command thread so a large avatar cannot stall the settings webview.
+    tauri::async_runtime::spawn_blocking(settings_repository::load)
+        .await
+        .map_err(|e| format!("settings read task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn save_settings_page_config(
+    app: AppHandle,
+    mut config: AppConfig,
+) -> Result<SaveConfigResponse, String> {
+    // Assets and the PA widget position are owned by separate flows. Preserve
+    // them here so the settings page only transfers the small scalar config.
+    let current = tauri::async_runtime::spawn_blocking(settings_repository::load)
+        .await
+        .map_err(|e| format!("settings read task failed: {e}"))??;
+    config.avatar_image = current.avatar_image;
+    config.avatar_gif = current.avatar_gif;
+    config.window_x = current.window_x;
+    config.window_y = current.window_y;
+    let mut saved = save_config(app, config).await?;
+    saved.config.avatar_image = None;
+    saved.config.avatar_gif = None;
+    Ok(saved)
+}
+
+#[tauri::command]
+pub async fn save_config(app: AppHandle, config: AppConfig) -> Result<SaveConfigResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || save_config_blocking(app, config))
+        .await.map_err(|e| format!("settings apply task failed: {e}"))?
+}
+
+fn save_config_blocking(app: AppHandle, config: AppConfig) -> Result<SaveConfigResponse, String> {
+    static APPLY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = APPLY_LOCK.lock().map_err(|_| "settings apply lock poisoned")?;
+    let old = settings_repository::load()?;
+    let saved = save_then_apply(
+        &old,
+        &config,
+        settings_repository::save,
+        |new| {
+            if old.hotkey_code != new.hotkey_code {
+                crate::voice::hotkey::update_hotkey(new.hotkey_code);
+            }
+            if old.double_click_to_record != new.double_click_to_record {
+                crate::voice::hotkey::set_double_click_mode(new.double_click_to_record);
+            }
+            Ok(())
+        },
+        || {
+            crate::voice::hotkey::update_hotkey(old.hotkey_code);
+            crate::voice::hotkey::set_double_click_mode(old.double_click_to_record);
+        },
+        |new| {
+            crate::commands::voice::stop_wake_word_listening()?;
+            if new.wake_word_enabled {
+                crate::voice::sherpa_wake::start_wake_listener(
+                    app.clone(),
+                    new.wake_word_threshold,
+                    Some(new.last_enrolled_speaker.clone()),
+                )?;
+            }
+            Ok(())
+        },
+    )?;
+
+    app.emit("settings-changed", serde_json::json!({ "revision": saved.revision }))
+        .map_err(|e| e.to_string())?;
+    Ok(saved)
+}
+
+fn wake_changed(old: &AppConfig, new: &AppConfig) -> bool {
+    old.wake_word_enabled != new.wake_word_enabled
+        || (old.wake_word_threshold - new.wake_word_threshold).abs() > f32::EPSILON
+        || old.last_enrolled_speaker != new.last_enrolled_speaker
+        || old.wake_phrase != new.wake_phrase
+        || old.wake_kws_threshold != new.wake_kws_threshold
+        || old.wake_owner_only != new.wake_owner_only
+}
+
+/// Persist `config`, then apply it. A failed non-wake step restores `old` and
+/// fails the save. A failed wake restart does not: everything stays saved (wake
+/// settings as entered, listener off) and the reason is returned in
+/// `wake_error`, so wake problems never block unrelated settings.
+fn save_then_apply(
+    old: &AppConfig,
+    config: &AppConfig,
+    save: impl Fn(&AppConfig) -> Result<SaveConfigResponse, String>,
+    apply_other: impl FnOnce(&AppConfig) -> Result<(), String>,
+    rollback_other: impl FnOnce(),
+    restart_wake: impl FnOnce(&AppConfig) -> Result<(), String>,
+) -> Result<SaveConfigResponse, String> {
+    let mut saved = save(config)?;
+    if let Err(error) = apply_other(&saved.config) {
+        let _ = save(old);
+        rollback_other();
+        return Err(format!("apply settings failed; changes rolled back: {error}"));
     }
-    store.set("tts_enabled", serde_json::json!(config.tts_enabled));
-    store.set("double_click_to_record", serde_json::json!(config.double_click_to_record));
-    store.set("continuous_conversation", serde_json::json!(config.continuous_conversation));
-    store.set("silence_timeout_secs", serde_json::json!(config.silence_timeout_secs));
-    store.set("pause_tolerance_ms", serde_json::json!(config.pause_tolerance_ms));
-    store.set("speech_rms_threshold", serde_json::json!(config.speech_rms_threshold));
-    store.set("barge_in_rms_threshold", serde_json::json!(config.barge_in_rms_threshold));
-    store.set("barge_in_enabled", serde_json::json!(config.barge_in_enabled));
-    store.set("skip_interrupt_confirmation", serde_json::json!(config.skip_interrupt_confirmation));
-    store.set("wake_word_enabled", serde_json::json!(config.wake_word_enabled));
-    store.set("wake_word_threshold", serde_json::json!(config.wake_word_threshold));
-    store.set("speaker_verification_enabled", serde_json::json!(config.speaker_verification_enabled));
-    store.set("last_enrolled_speaker", serde_json::json!(config.last_enrolled_speaker));
-    store.save().map_err(|e| e.to_string())?;
+    if wake_changed(old, &saved.config) {
+        if let Err(error) = restart_wake(&saved.config) {
+            eprintln!("[settings] saved; wake listener not started: {error}");
+            saved.wake_error = Some(error);
+        }
+    }
+    Ok(saved)
+}
+
+#[tauri::command]
+pub fn open_settings_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("settings") {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    // Only inject the small scalar settings snapshot. Avatar blobs are fetched
+    // independently after the form is visible.
+    let bootstrap = match settings_repository::load() {
+        Ok(mut config) => {
+            config.avatar_image = None;
+            config.avatar_gif = None;
+            serde_json::json!({ "config": config })
+        }
+        Err(error) => serde_json::json!({ "error": error }),
+    };
+    let bootstrap_json = serde_json::to_string(&bootstrap).map_err(|e| e.to_string())?;
+    WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
+        .initialization_script(format!(
+            "window.__PA_SETTINGS_BOOTSTRAP__ = {bootstrap_json};"
+        ))
+        .title("Pocket Agent Settings")
+        .inner_size(820.0, 650.0)
+        .min_inner_size(720.0, 560.0)
+        .resizable(true)
+        .decorations(true)
+        .center()
+        .build()
+        .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_setting_asset(key: String) -> Result<Option<String>, String> {
+    // Assets can be up to 10 MB and the main window reads the mesh avatar on
+    // every settings change; keep the read and base64 encoding off the main thread.
+    tauri::async_runtime::spawn_blocking(move || settings_repository::get_asset(&key))
+        .await
+        .map_err(|e| format!("settings asset read task failed: {e}"))?
+}
+
+#[tauri::command]
+pub fn save_setting_asset(app: AppHandle, key: String, data_uri: String) -> Result<(), String> {
+    let revision = settings_repository::save_asset(&key, &data_uri)?;
+    app.emit("settings-changed", serde_json::json!({ "revision": revision }))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_setting_asset(app: AppHandle, key: String) -> Result<(), String> {
+    let revision = settings_repository::delete_asset(&key)?;
+    app.emit("settings-changed", serde_json::json!({ "revision": revision }))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_window_position(x: f64, y: f64) -> Result<(), String> {
+    settings_repository::save_window_position(x, y)
 }
 
 #[tauri::command]
@@ -315,5 +503,113 @@ pub fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    #[test]
+    fn work_assistant_is_brief_by_default_but_can_explain_on_request() {
+        let hint = build_voice_hint("zh-CN-XiaoxiaoNeural", "", "", "zh", "");
+        assert!(hint.contains("By default answer in 1-2 short sentences"));
+        assert!(hint.contains("ONLY when the user explicitly asks for detail"));
+        // How to carry out computer actions is left to Hermes.
+        assert!(!hint.contains("For an authorized computer action"));
+        assert!(hint.contains("never claim an unverified action succeeded"));
+    }
 
+    #[test]
+    fn voice_hint_sounds_like_chat_and_keeps_format_spoken_when_expanding() {
+        let hint = build_voice_hint("zh-CN-XiaoxiaoNeural", "", "", "zh", "");
+        assert!(hint.contains("friend chatting face to face"));
+        assert!(hint.contains("conclusion in the first sentence"));
+        assert!(hint.contains("No opening filler"));
+        assert!(hint.contains("do not narrate your process"));
+        assert!(hint.contains("VOICE OVERRIDE"));
+        assert!(hint.contains("only the content expands, never the format"));
+        assert!(hint.contains("Do not read commands, file paths, code or IDs out verbatim"));
+        assert!(hint.contains("Never use bracket labels"));
+        assert!(hint.contains("takes priority over any other instruction about written formatting"));
+    }
+
+    #[test]
+    fn voice_hint_never_teaches_local_command_tags() {
+        // 桌面能力唯一入口是 Hermes computer_use，提示词不得再提 [CMD:] 通道
+        std::env::set_var("ENABLE_LOCAL_COMMANDS", "true");
+        let hint = build_voice_hint("zh-CN-XiaoxiaoNeural", "", "", "zh", "");
+        assert!(!hint.contains("[CMD:"));
+        assert!(!hint.contains("LOCAL COMMAND EXECUTION"));
+    }
+
+    /// Runs `save_then_apply` against an in-memory store; returns the result and
+    /// what ended up stored.
+    fn run_save(
+        old: &AppConfig,
+        new: &AppConfig,
+        apply_other: Result<(), String>,
+        restart_wake: Result<(), String>,
+    ) -> (Result<SaveConfigResponse, String>, AppConfig, bool, bool) {
+        let stored = std::cell::RefCell::new(old.clone());
+        let (mut rolled_back, mut wake_called) = (false, false);
+        let result = save_then_apply(
+            old,
+            new,
+            |c| {
+                *stored.borrow_mut() = c.clone();
+                Ok(SaveConfigResponse { config: c.clone(), revision: 1, wake_error: None })
+            },
+            |_| apply_other,
+            || rolled_back = true,
+            |_| {
+                wake_called = true;
+                restart_wake
+            },
+        );
+        (result, stored.into_inner(), rolled_back, wake_called)
+    }
+
+    fn wake_on(phrase: &str) -> AppConfig {
+        AppConfig { wake_word_enabled: true, wake_phrase: phrase.into(), ..AppConfig::default() }
+    }
+
+    #[test]
+    fn wake_failure_keeps_unrelated_settings_saved() {
+        let old = wake_on("hey there");
+        let mut new = wake_on("hey mimikyu");
+        new.mesh_avatar_enabled = !old.mesh_avatar_enabled;
+        for code in ["wake_phrase_unpronounceable", "wake_engine_unsupported_os"] {
+            let err = crate::voice::sherpa_wake::wake_error(code, serde_json::json!({}));
+            let (result, stored, rolled_back, _) = run_save(&old, &new, Ok(()), Err(err.clone()));
+            let saved = result.expect("save must succeed");
+            assert_eq!(saved.wake_error.as_deref(), Some(err.as_str()));
+            assert_eq!(stored.mesh_avatar_enabled, new.mesh_avatar_enabled);
+            // Wake settings stay as entered and are not switched off.
+            assert!(stored.wake_word_enabled);
+            assert_eq!(stored.wake_phrase, "hey mimikyu");
+            assert!(!rolled_back);
+        }
+    }
+
+    #[test]
+    fn non_wake_apply_failure_still_rolls_back_everything() {
+        let old = wake_on("hey there");
+        let mut new = old.clone();
+        new.hotkey_code = old.hotkey_code + 1;
+        new.wake_phrase = "hey mimikyu".into();
+        let (result, stored, rolled_back, wake_called) =
+            run_save(&old, &new, Err("hotkey".into()), Ok(()));
+        assert!(result.unwrap_err().contains("rolled back"));
+        assert_eq!(stored.hotkey_code, old.hotkey_code);
+        assert_eq!(stored.wake_phrase, old.wake_phrase);
+        assert!(rolled_back && !wake_called);
+    }
+
+    #[test]
+    fn unchanged_wake_settings_do_not_restart_wake() {
+        let old = wake_on("hey there");
+        let mut new = old.clone();
+        new.mesh_avatar_enabled = !old.mesh_avatar_enabled;
+        let (result, _, _, wake_called) = run_save(&old, &new, Ok(()), Err("unused".into()));
+        assert!(result.unwrap().wake_error.is_none());
+        assert!(!wake_called);
+    }
+}

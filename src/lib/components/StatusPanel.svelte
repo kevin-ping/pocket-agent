@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { chatStore } from '../stores/chat';
+  import { chatStore, statusVisible } from '../stores/chat';
   import { characterState } from '../stores/character';
   import { settingsStore } from '../stores/settings';
   import { convLabelsLang } from '../i18n';
@@ -11,17 +11,46 @@
     $chatStore.voiceSetupState === 'error'
   );
 
-  let hasContent = $derived(
-    showSetup ||
-    $chatStore.thinkingSteps.length > 0 ||
-    $chatStore.isStreaming ||
-    $characterState === 'thinking' ||
-    $chatStore.voiceStatus !== null
-  );
+
+  let statusContentEl = $state<HTMLDivElement>();
+  let followLatest = $state(true);
+  let previousStepCount = 0;
+
+  function handleStatusScroll() {
+    if (!statusContentEl) return;
+    const distanceFromBottom = statusContentEl.scrollHeight - statusContentEl.scrollTop - statusContentEl.clientHeight;
+    followLatest = distanceFromBottom <= 8;
+  }
+
+  $effect(() => {
+    const steps = $chatStore.thinkingSteps;
+    const stepCount = steps.length;
+    const latestStep = steps.at(-1) ?? '';
+    const currentVoiceStatus = $chatStore.voiceStatus;
+
+    if (stepCount < previousStepCount) followLatest = true;
+    previousStepCount = stepCount;
+    if (!statusContentEl || !followLatest) return;
+
+    void latestStep;
+    void currentVoiceStatus;
+    requestAnimationFrame(() => {
+      if (statusContentEl && followLatest) {
+        statusContentEl.scrollTop = statusContentEl.scrollHeight;
+      }
+    });
+  });
 </script>
 
-  <div class="status-panel" class:visible={hasContent}>
-    <div class="status-content">
+  <div class="status-panel" class:visible={$statusVisible}>
+    <div
+      class="status-content"
+      bind:this={statusContentEl}
+      onscroll={handleStatusScroll}
+      role="log"
+      aria-live="polite"
+      aria-relevant="additions text"
+    >
       <div class="steps">
         {#if showSetup}
           {#if $chatStore.voiceSetupState === 'error'}
@@ -41,9 +70,9 @@
         {/if}
         {#if $chatStore.thinkingSteps.length > 0}
           {#each $chatStore.thinkingSteps as step}
-            <span class="step">{step}</span>
+            <span class="step single-line">{step}</span>
           {/each}
-        {:else if $chatStore.isStreaming || $characterState === 'thinking'}
+        {:else if $characterState === 'thinking'}
           <span class="step placeholder">🤔 正在思考...</span>
         {/if}
       </div>
@@ -59,25 +88,30 @@
     border: 1px solid rgba(160, 168, 255, 0.18);
     border-radius: 8px;
     overflow: hidden;
-    /* Always take up space to prevent layout shift */
+    /* Always take up space to prevent layout shift. Hide with opacity/visibility only:
+       toggling backdrop-filter on the transparent window leaves a stale white layer in WKWebView. */
     opacity: 0;
-    border-color: transparent;
-    background: transparent;
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-    transition: opacity 0.2s ease;
+    visibility: hidden;
+    transition: opacity 0.2s ease, visibility 0s linear 0.2s;
   }
   .status-panel.visible {
     opacity: 1;
-    border-color: rgba(160, 168, 255, 0.18);
-    background: rgba(10, 10, 22, 0.72);
-    -webkit-backdrop-filter: blur(16px) saturate(140%);
-    backdrop-filter: blur(16px) saturate(140%);
+    visibility: visible;
+    transition: opacity 0.2s ease, visibility 0s;
   }
 
   .status-content {
     padding: 6px 10px;
+    box-sizing: border-box;
+    max-height: 88px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(160, 168, 255, 0.25) transparent;
   }
+  .status-content::-webkit-scrollbar       { width: 3px; }
+  .status-content::-webkit-scrollbar-track { background: transparent; }
+  .status-content::-webkit-scrollbar-thumb { background: rgba(160, 168, 255, 0.25); border-radius: 2px; }
 
   .steps {
     display: flex;
@@ -91,6 +125,12 @@
     color: rgba(160, 168, 255, 0.65);
     word-break: break-word;
     animation: fade-in 0.25s ease-out;
+  }
+
+  .step.single-line {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .step.placeholder {

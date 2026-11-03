@@ -1,6 +1,6 @@
 {
   "productName": "Pocket Agent",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "identifier": "com.hermes.pocket-agent",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -21,6 +21,7 @@
     "resources": {
       "resources/stt-helper": "resources/stt-helper",
       "resources/stt-server.py": "resources/stt-server.py",
+      "resources/wake_kws.py": "resources/wake_kws.py",
       "resources/requirements-stt.txt": "resources/requirements-stt.txt"
     },
     "macOS": {
@@ -45,7 +46,7 @@
         "decorations": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
-        "resizable": true,
+        "resizable": false,
         "visible": false,
         "center": false,
         "x": 60,

@@ -19,6 +19,7 @@ export interface AppSettings {
   hotkey_name: string;
   tts_enabled: boolean;
   double_click_to_record: boolean;
+  show_reasoning: boolean;
   continuous_conversation: boolean;
   silence_timeout_secs: number;
   pause_tolerance_ms: number;
@@ -28,11 +29,29 @@ export interface AppSettings {
   skip_interrupt_confirmation: boolean;
   wake_word_enabled: boolean;
   wake_word_threshold: number;
+  wake_phrase: string;
+  wake_kws_threshold: number;
+  wake_owner_only: boolean;
   speaker_verification_enabled: boolean;
+  conversation_owner_only: boolean;
   last_enrolled_speaker: string;
+  mesh_avatar_enabled: boolean;
+  mesh_avatar_scale: number;
+  mesh_avatar_offset_x: number;
+  mesh_avatar_offset_y: number;
+  /** Character state → mesh expression (see MESH_AVATAR_EXPRESSIONS). */
+  mesh_avatar_expressions: Record<string, string>;
+  /** PA reply emotion → mesh emotion (see MESH_AVATAR_EMOTIONS). */
+  mesh_avatar_emotions: Record<string, string>;
 }
 
-const defaults: AppSettings = {
+// Same whitelists as settings_repository::validate.
+export const MESH_AVATAR_STATES = ['idle', 'listening', 'thinking', 'speaking'] as const;
+export const MESH_AVATAR_EXPRESSIONS = ['neutral', 'smile', 'shy', 'surprise', 'halfLidded', 'angry', 'sad', 'wink'] as const;
+export const PA_EMOTIONS = ['cheerful', 'excited', 'friendly', 'sad', 'angry', 'calm', 'whisper', 'serious'] as const;
+export const MESH_AVATAR_EMOTIONS = ['happy', 'sad', 'angry', 'surprised', 'relaxed', 'neutral'] as const;
+
+export const SETTINGS_DEFAULTS: AppSettings = {
   volume: 0.8,
   character_skin: 'default-css',
   dialog_style: 'bubble',
@@ -50,6 +69,7 @@ const defaults: AppSettings = {
   hotkey_name: "RightShift",
   tts_enabled: true,
   double_click_to_record: false,
+  show_reasoning: false,
   continuous_conversation: false,
   silence_timeout_secs: 5,
   pause_tolerance_ms: 1500,
@@ -59,12 +79,25 @@ const defaults: AppSettings = {
   skip_interrupt_confirmation: true,
   wake_word_enabled: false,
   wake_word_threshold: 0.5,
+  wake_phrase: "",
+  wake_kws_threshold: 0.25,
+  wake_owner_only: true,
   speaker_verification_enabled: false,
+  conversation_owner_only: false,
   last_enrolled_speaker: '',
+  mesh_avatar_enabled: true,
+  mesh_avatar_scale: 1,
+  mesh_avatar_offset_x: 0,
+  mesh_avatar_offset_y: 0,
+  mesh_avatar_expressions: { idle: 'neutral', listening: 'surprise', thinking: 'halfLidded', speaking: 'neutral' },
+  mesh_avatar_emotions: {
+    cheerful: 'happy', excited: 'happy', friendly: 'happy', sad: 'sad',
+    angry: 'angry', calm: 'relaxed', whisper: 'relaxed', serious: 'neutral',
+  },
 };
 
 function createSettingsStore() {
-  const { subscribe, set, update } = writable<AppSettings>(defaults);
+  const { subscribe, set, update } = writable<AppSettings>(SETTINGS_DEFAULTS);
 
   return {
     subscribe,
@@ -73,19 +106,18 @@ function createSettingsStore() {
     load: async () => {
       try {
         const config = await invoke<AppSettings>('get_config');
-        set({ ...defaults, ...config });
+        set({ ...SETTINGS_DEFAULTS, ...config });
+        return true;
       } catch (e) {
         console.warn('[settings] load failed, using defaults:', e);
+        return false;
       }
     },
 
     save: async (partial: Partial<AppSettings>): Promise<void> => {
       let next: AppSettings | null = null;
-      let oldDoubleClickValue: boolean | undefined;
-      
       // Merge partial into current store state
       update((current) => {
-        oldDoubleClickValue = current.double_click_to_record;
         next = { ...current, ...partial };
         return current; // Don't update store until save succeeds
       });
@@ -96,18 +128,11 @@ function createSettingsStore() {
       }
       
       try {
-        // Save complete config to Rust
-        await invoke('save_config', { config: next });
-        
-        // Update store with merged result
-        set(next);
-        
-        
-        // Notify Rust if double-click mode changed
-        if (partial.double_click_to_record !== undefined && 
-            oldDoubleClickValue !== partial.double_click_to_record) {
-          await invoke('set_double_click_mode', { enabled: partial.double_click_to_record });
-        }
+        const result = await invoke<{ config: AppSettings; revision: number }>(
+          'save_config',
+          { config: next },
+        );
+        set({ ...SETTINGS_DEFAULTS, ...result.config });
       } catch (e) {
         console.error('[settings] save failed:', e);
         throw e;

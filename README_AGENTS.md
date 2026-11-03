@@ -88,12 +88,11 @@ Then edit .env with the correct values for your setup.
 **Required fields:**
 - `API_SERVER` — backend gateway URL (e.g. http://localhost:8642 for Hermes)
 - `API_SERVER_KEY` — authentication key, must match gateway config (leave empty for no auth)
-- `API_AGENT` — your agent name (e.g. my-agent, agent-2)
+- `API_AGENT` — OpenClaw agent name (e.g. my-agent, agent-2). **Leave it empty for Hermes**: when set, PA uses `/v1/chat/completions`, which has no stop command, so an interrupted turn keeps running in Hermes.
 
 **Optional fields:**
-- `EDGE_TTS_BIN` — path to edge-tts binary (auto-detected from PATH if omitted)
+- `EDGE_TTS_BIN` — path to edge-tts binary (if omitted: PA's venv copy `~/.pocket-agent/venv/bin/edge-tts`, else PATH)
 - `STT_PYTHON` — path to python3 with faster-whisper (auto-detected if omitted)
-- `ENABLE_LOCAL_COMMANDS` — set to `true` to enable [CMD:...] local command execution
 
 **Config file locations:**
 - Development (tauri dev): project root `.env`
@@ -116,6 +115,8 @@ PA needs a running AI gateway. Start the appropriate one before launching PA.
 - Verify gateway is responding on its health endpoint
 
 Ensure `API_SERVER` in .env matches the running gateway URL.
+
+Then read the guide for that backend and carry out its setup steps, such as copying PA's skills into the backend profile: [HERMES.md](HERMES.md) for Hermes, `OPENCLAW.md` for OpenClaw (once it exists).
 
 ---
 
@@ -153,7 +154,7 @@ On first launch, grant these in System Settings > Privacy and Security:
 - **fn works over SSH but double-triggers** — ensure you are on v0.2.4+, which suppresses the duplicate SSH `KEY_DOWN` after the `FLAGS_CHANGED` press path.
 - **PA keeps speaking after hotkey press** — ensure you are on v0.2.4+, which synchronously interrupts the active rodio sink instead of waiting for the playback thread queue.
 - **STT fails** — faster-whisper installed? STT_PYTHON path correct?
-- **No voice output** — edge-tts in PATH? EDGE_TTS_BIN correct?
+- **No voice output** — edge-tts in PATH? EDGE_TTS_BIN correct? A WebSocket **403** in the `[TTS]` log means the edge-tts that ran is outdated: `pip install -U edge-tts` for that copy.
 - **Cannot connect to backend** — Gateway running? API_SERVER and API_SERVER_KEY match?
 - **Build fails** — cargo check and npm run build both pass? Rust and Node versions current?
 
@@ -176,6 +177,10 @@ If Stop is only queued onto the audio thread, `rodio::Sink::sleep_until_end()` c
 ---
 
 ## Architecture Summary
+
+### On-demand Mac interaction
+
+Install Hermes, CuaDriver and Pocket Agent on each Mac. See [computer interaction setup](docs/computer-interaction.md) for per-profile `api_server` tool enablement, capability checks, macOS permissions, auxiliary vision, and the approval/stop protocol. A remote gateway does not automatically control the Pocket Agent client's Mac.
 
 ```
 PA (Tauri + Svelte)

@@ -8,9 +8,14 @@
 //        → on TtsDone (signalled from the frontend) → Listening
 //        → if Listening idle for `silence_timeout_s` → emit "conversation-ended" → Idle
 //
-// During Speaking, VAD keeps running: if the user starts talking, we trigger
-// barge-in (stop_audio_queue + emit "conversation-barge-in") and pre-load the
-// fresh utterance into a new Listening buffer.
+// During Speaking, check overlapping audio windows for the enrolled wake phrase.
+// A match enters Acknowledging: old output is invalidated, the frontend plays
+// the cue, and only a matching completion opens a fresh Listening buffer.
+// Wake audio and cue audio are never used as command pre-roll.
+//
+// With `conversation_owner_only`, every Listening utterance must match the
+// selected voiceprint before STT; mismatches and check errors are dropped
+// silently (fail closed) and listening resumes.
 //
 // All cross-thread coordination flows through a single mpsc channel into the
 // worker thread, so the worker is the sole owner of mutable state — no shared
@@ -35,9 +40,8 @@ use crate::voice::stt::{transcribe, SttResult};
 /// only used when the frontend omits it. Keep low enough that an unconfigured
 /// install still feels responsive.
 const SEGMENT_END_SILENCE_MS: u64 = 1500;
-/// Lowered from 600 ms because energy-VAD with hysteresis still occasionally
-/// produces short bursts (e.g. "嗯", "是"). 300 ms is long enough to filter
-/// stray clicks/coughs but short enough that brief replies still flush.
+/// Minimum speech for the Stop flush to send buffered audio to STT. The
+/// Listening silence flush deliberately ignores it (see `should_flush`).
 const MIN_UTTERANCE_MS: u64 = 300;
 const MAX_UTTERANCE_S: f32 = 30.0;
 /// Listening floor RMS (normalized to [0, 1]). ~ -36 dBFS. Tuned for typical
@@ -60,49 +64,33 @@ const SPEECH_RELEASE_RMS_THRESHOLD: f32 = 0.003;
 /// Release-threshold companion to NOISE_FLOOR_MARGIN: the effective release
 /// also scales with noise so a noisy room doesn't trap us in burst=true.
 const RELEASE_NOISE_FLOOR_MARGIN: f32 = 1.2;
-/// Window after TtsStarted during which Speaking-mode VAD is suppressed.
-/// Covers TTS playback ramp-up and the early speaker-echo burst.
-const BARGE_IN_WARMUP_MS: u64 = 600;
-/// Continuous above-threshold speech required to actually fire barge-in.
-/// Filters short TTS-echo bursts (typically < 200 ms) while letting real
-/// sustained speech interrupt.
-const BARGE_IN_MIN_SUSTAINED_MS: u64 = 350;
-/// Louder RMS bar applied in Speaking mode only, so TTS bleed must clear it
-/// continuously for BARGE_IN_MIN_SUSTAINED_MS before interrupting. ~ -28 dBFS.
-const BARGE_IN_RMS_THRESHOLD: f32 = 0.04;
-/// Release threshold for barge-in hysteresis.  Once barge-in accumulation
-/// starts, RMS must drop below this to reset the run counter.  Prevents
-/// syllable gaps in TTS echo (or user speech) from clearing the counter.
-/// Set well below BARGE_IN_RMS_THRESHOLD so normal inter-syllable dips
-/// (which briefly touch 0.035-0.039) don't break the sustained run.
-const BARGE_IN_RELEASE_RMS: f32 = 0.02;
-const SPEAKING_SAFETY_TIMEOUT_S: u64 = 30;
 const TICK_MS: u64 = 100;
 /// Max consecutive empty STT results before auto-ending the conversation.
 /// Each empty result means VAD detected sound but Silero/Whisper found no human speech
 /// (birds, clicks, background noise). After this many in a row, end the conversation
-/// and return to wake/Fn-key idle state.
-const MAX_CONSECUTIVE_EMPTY_STT: u32 = 1;
+/// and return to wake/Fn-key idle state. Kept at 3 so a single cough / "嗯"
+/// filtered by hallucination-suppression doesn't kill the session — the real
+/// session end is the silence_timeout_s idle deadline.
+const MAX_CONSECUTIVE_EMPTY_STT: u32 = 3;
 
-/// "Patient" idle deadline used at conversation start and immediately after
-/// TtsDone — gives the user time to think before the conversation auto-ends.
-/// The shorter `silence_timeout_s` from settings is only used after an empty
-/// STT result (user already failed to produce intelligible speech once).
-const POST_TTS_IDLE_TIMEOUT_S: u64 = 20;
-const CONVERSATION_WAV_PATH: &str = "/tmp/pocket-agent-conversation.wav";
+// Use the user-configured silence_timeout_s everywhere — no hardcoded override.
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Mode {
     Listening,
     Transcribing,
     Speaking,
+    Acknowledging,
 }
 
 enum Msg {
-    AudioChunk(Vec<i16>, u32),
+    AudioChunk(Vec<i16>, u32, Instant),
+    WakeResult(u64, bool),
+    Ready(u64, bool, Duration),
     SttResult(Result<SttResult, String>),
+    SpeakerRejected(f32),
     TtsStarted,
-    TtsDone,
+    TtsDone(u64),
     Stop,
 }
 
@@ -111,6 +99,7 @@ enum Msg {
 /// already been replaced and skip cleanup.
 static WORKER_TX: OnceLock<Mutex<Option<(u64, Sender<Msg>)>>> = OnceLock::new();
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+static READY_ID: AtomicU64 = AtomicU64::new(0);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 fn worker_tx_slot() -> &'static Mutex<Option<(u64, Sender<Msg>)>> {
@@ -134,8 +123,13 @@ pub fn on_tts_started() {
     let _ = send_msg(Msg::TtsStarted);
 }
 
-pub fn on_tts_done() {
-    let _ = send_msg(Msg::TtsDone);
+pub fn on_tts_done(generation: u64) {
+    let _ = send_msg(Msg::TtsDone(generation));
+}
+
+pub fn acknowledge_ready(id: u64, played: bool, ready_delay_ms: Option<u64>) {
+    let delay = Duration::from_millis(ready_delay_ms.unwrap_or(0).min(5_000));
+    let _ = send_msg(Msg::Ready(id, played, delay));
 }
 
 pub fn stop_conversation() {
@@ -148,7 +142,8 @@ pub fn start_conversation(
     pause_tolerance_ms: Option<u64>,
     speech_rms_threshold: Option<f32>,
     single_shot: Option<bool>,
-    barge_in_rms_threshold: Option<f32>,
+    _barge_in_rms_threshold: Option<f32>,
+    wake_word_threshold: Option<f32>,
     barge_in_enabled: Option<bool>,
 ) -> Result<(), String> {
     if ACTIVE
@@ -157,6 +152,14 @@ pub fn start_conversation(
     {
         return Err("conversation already active".into());
     }
+
+    let owner_gate = match owner_gate() {
+        Ok(gate) => gate,
+        Err(e) => {
+            ACTIVE.store(false, Ordering::Release);
+            return Err(e);
+        }
+    };
 
     // Owner-transition gate (record.rs file-header doc):
     //   SINGLE_SHOT  → CONVERSATION  ✗ refused (different active flow)
@@ -188,7 +191,7 @@ pub fn start_conversation(
     let tx_for_cpal = tx.clone();
 
     let stream_handle = match start_streaming_capture(OWNER_CONVERSATION, move |samples, sr| {
-        let _ = tx_for_cpal.send(Msg::AudioChunk(samples.to_vec(), sr));
+        let _ = tx_for_cpal.send(Msg::AudioChunk(samples.to_vec(), sr, Instant::now()));
     }) {
         Ok(h) => h,
         Err(e) => {
@@ -204,7 +207,7 @@ pub fn start_conversation(
         let mut guard = worker_tx_slot()
             .lock()
             .map_err(|_| "worker tx poisoned".to_string())?;
-        *guard = Some((my_gen, tx));
+        *guard = Some((my_gen, tx.clone()));
     }
 
     let timeout = silence_timeout_s.unwrap_or(5).clamp(2, 30);
@@ -214,6 +217,7 @@ pub fn start_conversation(
     let speech_threshold = speech_rms_threshold
         .unwrap_or(SPEECH_RMS_THRESHOLD)
         .clamp(0.003, 0.030);
+    let wake_threshold = wake_word_threshold.unwrap_or(0.5).clamp(0.1, 1.0);
     let app_clone = app.clone();
 
     std::thread::Builder::new()
@@ -222,13 +226,15 @@ pub fn start_conversation(
             worker_loop(
                 app_clone,
                 rx,
+                tx,
                 stream_handle,
                 timeout,
                 pause_tolerance,
                 speech_threshold,
                 single_shot.unwrap_or(false),
-                barge_in_rms_threshold.unwrap_or(BARGE_IN_RMS_THRESHOLD),
+                wake_threshold,
                 barge_in_enabled.unwrap_or(true),
+                owner_gate,
             );
             // Only clear shared state if our generation still owns the slot.
             // Otherwise, a newer start_conversation has already taken over.
@@ -237,6 +243,12 @@ pub fn start_conversation(
                 if still_mine {
                     *guard = None;
                     ACTIVE.store(false, Ordering::Release);
+                    // Sessions can end without a key press (idle timeout,
+                    // single-shot break, Stop). Clear the hotkey toggle so the
+                    // next press starts a session — but only while we still own
+                    // the slot, or a late exit would clobber a newer session's
+                    // active state and reintroduce the press/release mismatch.
+                    crate::voice::hotkey::set_active_state(false);
                 }
             }
         })
@@ -251,10 +263,9 @@ pub fn start_conversation(
             format!("worker spawn: {}", e)
         })?;
 
-    let _ = app.emit("conversation-state", "listening");
     eprintln!(
         "[conv] started — initial wait {}s, post-empty wait {}s, pause tolerance {}ms, mic sensitivity {:.4}",
-        POST_TTS_IDLE_TIMEOUT_S, timeout, pause_tolerance, speech_threshold
+        timeout, timeout, pause_tolerance, speech_threshold
     );
     Ok(())
 }
@@ -262,43 +273,38 @@ pub fn start_conversation(
 fn worker_loop(
     app: AppHandle,
     rx: std::sync::mpsc::Receiver<Msg>,
+    tx: Sender<Msg>,
     stream_handle: StreamingHandle,
     silence_timeout_s: u64,
     pause_tolerance_ms: u64,
     speech_rms_threshold: f32,
     single_shot: bool,
-    barge_in_rms_threshold: f32,
+    wake_threshold: f32,
     barge_in_enabled: bool,
+    owner_gate: Option<(String, f32)>,
 ) {
     let device_channels = stream_handle.channels.max(1);
-    let mut mode = Mode::Listening;
+    let mut mode = if single_shot {
+        Mode::Listening
+    } else {
+        Mode::Acknowledging
+    };
     let mut utter_buf: Vec<i16> = Vec::with_capacity(48_000);
     let mut utter_sr: u32 = stream_handle.sample_rate;
     let mut silence_run_ms: u64 = 0;
     let mut accumulated_speech_ms: u64 = 0;
     let mut listening_idle_ms: u64 = 0;
-    // Active idle deadline. Starts patient (POST_TTS) so the user has time to
-    // begin the first turn; switches to the shorter settings value only after
-    // an empty STT result.
-    let mut current_idle_target_ms: u64 = POST_TTS_IDLE_TIMEOUT_S * 1000;
-    let mut speaking_since: Option<Instant> = None;
+    // Active idle deadline — uses silence_timeout_s from user settings.
+    let mut current_idle_target_ms: u64 = silence_timeout_s * 1000;
     // Rolling EMA of RMS during quiet Listening — adapts threshold to room noise.
     let mut noise_floor: f32 = 0.0;
     let mut consecutive_empty_stt: u32 = 0;
-    // Set when Speaking begins (TtsStarted or non-empty SttResult). Used to
-    // suppress VAD during BARGE_IN_WARMUP_MS so the TTS ramp-up doesn't
-    // self-trigger.
-    let mut tts_started_at: Option<Instant> = None;
-    // Continuous above-BARGE_IN_RMS_THRESHOLD time in Speaking mode. Resets on
-    // any quiet chunk; barge-in fires only when this clears BARGE_IN_MIN_SUSTAINED_MS.
-    let mut barge_in_run_ms: u64 = 0;
-    // Hysteresis: once barge-in run starts, RMS must drop below BARGE_IN_RELEASE_RMS
-    // to reset the counter.  Prevents inter-syllable dips from clearing the tally.
-    let mut barge_in_active: bool = false;
-    // When true, the next completed utterance will be verified against enrolled
-    // speakers before sending to STT.  Set on barge-in so a stranger's voice
-    // doesn't hijack the conversation.
-    let mut verify_next_utterance: bool = false;
+    let mut wake_window = crate::voice::wake_window::WakeWindow::default();
+    let mut wake_epoch: u64 = 0;
+    let mut wake_pending = false;
+    let mut ready_id = READY_ID.fetch_add(1, Ordering::Relaxed) + 1;
+    let mut accept_after = Instant::now();
+    let mut ready_since = Instant::now();
     // Hysteresis state: once an above-threshold chunk flips this true, we stay
     // "in speech" through vowel valleys until RMS drops below effective_release.
     // Without this, single-threshold VAD misses inter-syllable dips and the
@@ -313,7 +319,18 @@ fn worker_loop(
         let _ = app.emit("conversation-state", s);
     };
 
+    if single_shot {
+        emit_state("listening");
+    } else {
+        let _ = app.emit("conversation-ready-prompt", ready_id);
+    }
+
     loop {
+        if mode == Mode::Acknowledging && ready_since.elapsed() > Duration::from_secs(30) {
+            let _ = app.emit("stt-error", serde_json::json!({"error": "等待确认音效超时，请重新开始对话"}));
+            let _ = app.emit("conversation-ended", ());
+            break;
+        }
         match rx.recv_timeout(Duration::from_millis(TICK_MS)) {
             Ok(Msg::Stop) => {
                 // Flush any buffered speech before stopping.
@@ -321,11 +338,12 @@ fn worker_loop(
                     let flushed = std::mem::take(&mut utter_buf);
                     eprintln!(
                         "[conv] Stop: flushing {} samples ({}ms speech)",
-                        flushed.len(), accumulated_speech_ms
+                        flushed.len(),
+                        accumulated_speech_ms
                     );
                     // Don't break yet — let the SttResult handler do it
                     // for single-shot, or transition to Speaking for continuous.
-                    spawn_transcribe(flushed, utter_sr, false, false);
+                    spawn_transcribe(flushed, utter_sr, tx.clone(), owner_gate.clone());
                     mode = Mode::Transcribing;
                     emit_state("transcribing");
                     // Continue the loop so SttResult can be processed.
@@ -334,9 +352,12 @@ fn worker_loop(
                 }
                 let _ = app.emit("conversation-ended", ());
                 break;
-            },
+            }
 
-            Ok(Msg::AudioChunk(samples, sr)) => {
+            Ok(Msg::AudioChunk(samples, sr, captured_at)) => {
+                if mode == Mode::Acknowledging || captured_at < accept_after {
+                    continue;
+                }
                 if samples.is_empty() {
                     continue;
                 }
@@ -350,8 +371,8 @@ fn worker_loop(
                 let effective_threshold = speech_rms_threshold
                     .max(noise_floor * NOISE_FLOOR_MARGIN)
                     .min(EFFECTIVE_THRESHOLD_CAP);
-                let effective_release = SPEECH_RELEASE_RMS_THRESHOLD
-                    .max(noise_floor * RELEASE_NOISE_FLOOR_MARGIN);
+                let effective_release =
+                    SPEECH_RELEASE_RMS_THRESHOLD.max(noise_floor * RELEASE_NOISE_FLOOR_MARGIN);
                 if rms > effective_threshold {
                     in_speech_burst = true;
                 } else if rms < effective_release {
@@ -362,7 +383,8 @@ fn worker_loop(
                 match mode {
                     Mode::Listening => {
                         if is_speech {
-                            listening_speech_run_ms = listening_speech_run_ms.saturating_add(chunk_ms);
+                            listening_speech_run_ms =
+                                listening_speech_run_ms.saturating_add(chunk_ms);
                             listening_speech_peak_rms = listening_speech_peak_rms.max(rms);
                             if !listening_speech_active {
                                 listening_speech_active = true;
@@ -370,6 +392,8 @@ fn worker_loop(
                                     "[conv] speech detected: rms={:.4} start={:.4} rel={:.4} floor={:.4}",
                                     rms, effective_threshold, effective_release, noise_floor
                                 );
+                                // Status strip pulses its speech dot on each burst start.
+                                let _ = app.emit("conv-speech-detected", ());
                             }
                         } else if listening_speech_active {
                             eprintln!(
@@ -393,9 +417,7 @@ fn worker_loop(
                             // Gate on rms well below threshold so quiet speech that
                             // sits just under the bar can't be absorbed as noise
                             // (which would raise effective_threshold and lock us out).
-                            if accumulated_speech_ms == 0
-                                && rms < speech_rms_threshold * 0.4
-                            {
+                            if accumulated_speech_ms == 0 && rms < speech_rms_threshold * 0.4 {
                                 noise_floor = 0.95 * noise_floor + 0.05 * rms;
                             }
                             // Padding silence inside an active utterance still
@@ -404,12 +426,8 @@ fn worker_loop(
                                 utter_buf.extend_from_slice(&mono);
                                 silence_run_ms += chunk_ms;
 
-                                let total_secs =
-                                    utter_buf.len() as f32 / utter_sr.max(1) as f32;
-                                if (silence_run_ms >= pause_tolerance_ms
-                                    && accumulated_speech_ms >= MIN_UTTERANCE_MS)
-                                    || total_secs >= MAX_UTTERANCE_S
-                                {
+                                let total_secs = utter_buf.len() as f32 / utter_sr.max(1) as f32;
+                                if should_flush(silence_run_ms, pause_tolerance_ms, total_secs) {
                                     if listening_speech_active {
                                         eprintln!(
                                             "[conv] speech ended: duration={}ms peak_rms={:.4}",
@@ -424,8 +442,7 @@ fn worker_loop(
                                     silence_run_ms = 0;
                                     mode = Mode::Transcribing;
                                     emit_state("transcribing");
-                                    spawn_transcribe(flushed, utter_sr, verify_next_utterance, barge_in_enabled);
-                                    verify_next_utterance = false;
+                                    spawn_transcribe(flushed, utter_sr, tx.clone(), owner_gate.clone());
                                 }
                             } else {
                                 listening_idle_ms += chunk_ms;
@@ -449,60 +466,24 @@ fn worker_loop(
                         listening_speech_peak_rms = 0.0;
                     }
                     Mode::Speaking => {
-                        if !barge_in_enabled {
-                            // Barge-in disabled by user — skip all VAD during TTS playback.
-                            continue;
-                        }
-                        // Suppress barge-in detection entirely until TTS audio
-                        // has actually started playing.  Before TtsStarted
-                        // arrives the LLM is still thinking — there is nothing
-                        // to barge into, and any high-RMS reading is ambient
-                        // noise or a race with the IPC round-trip.
-                        let tts_active = tts_started_at.is_some();
-                        let in_warmup = tts_started_at
-                            .map(|t| t.elapsed().as_millis() < BARGE_IN_WARMUP_MS as u128)
-                            .unwrap_or(false);
-
-                        if !tts_active || in_warmup {
-                            barge_in_run_ms = 0;
-                            barge_in_active = false;
-                        } else if rms > barge_in_rms_threshold {
-                            barge_in_active = true;
-                            barge_in_run_ms = barge_in_run_ms.saturating_add(chunk_ms);
-                        } else if barge_in_active && rms > BARGE_IN_RELEASE_RMS {
-                            // Hysteresis: still in active burst, inter-syllable dip
-                            // above release floor — don't reset the counter.
-                            barge_in_run_ms = barge_in_run_ms.saturating_add(chunk_ms);
-                        } else {
-                            // Below release floor — burst truly ended, reset.
-                            barge_in_active = false;
-                            barge_in_run_ms = 0;
-                        }
-
-                        if barge_in_run_ms >= BARGE_IN_MIN_SUSTAINED_MS {
-                            // Barge-in: cut TTS, switch to a fresh listening
-                            // buffer pre-loaded with this chunk.
-                            crate::commands::chat::stop_audio_queue();
-                            let _ = app.emit("conversation-barge-in", ());
-                            eprintln!("[conv] barge-in detected");
-
-                            utter_buf.clear();
-                            // Don't pre-load this chunk — it contains TTS echo.
-                            // The user must continue speaking into the fresh buffer.
-                            utter_sr = sr;
-                            accumulated_speech_ms = 0;
-                            silence_run_ms = 0;
-                            listening_idle_ms = 0;
-                            speaking_since = None;
-                            tts_started_at = None;
-                            barge_in_run_ms = 0;
-                            barge_in_active = false;
-                            in_speech_burst = false;
-                            verify_next_utterance = true;
-                            mode = Mode::Listening;
-                            emit_state("listening");
+                        if barge_in_enabled {
+                            if let Some(window) = wake_window.push(&mono, sr, !wake_pending) {
+                                wake_pending = true;
+                                let tx = tx.clone();
+                                let epoch = wake_epoch;
+                                std::thread::spawn(move || {
+                                    let matched = crate::voice::sherpa_wake::check_interrupt_wake(
+                                        &window,
+                                        sr,
+                                        wake_threshold,
+                                    )
+                                    .unwrap_or(false);
+                                    let _ = tx.send(Msg::WakeResult(epoch, matched));
+                                });
+                            }
                         }
                     }
+                    Mode::Acknowledging => {}
                 }
             }
 
@@ -524,8 +505,7 @@ fn worker_loop(
                     }
                     Err(e) => {
                         eprintln!("[conv] stt-error: {}", e);
-                        let _ =
-                            app.emit("stt-error", serde_json::json!({ "error": e }));
+                        let _ = app.emit("stt-error", serde_json::json!({ "error": e }));
                     }
                 }
                 if had_text {
@@ -539,23 +519,22 @@ fn worker_loop(
                         break;
                     }
                     mode = Mode::Speaking;
-                    speaking_since = Some(Instant::now());
-                    // Do NOT set tts_started_at here — TTS won't play for
-                    // several seconds while the LLM thinks.  Starting the
-                    // warmup now means it expires long before audio actually
-                    // reaches the speakers, leaving a window where mic echo
-                    // can trigger a false barge-in.  The real warmup is set by
-                    // Msg::TtsStarted, which fires only when audio begins.
-                    tts_started_at = None;
-                    barge_in_run_ms = 0;
+                    wake_epoch = wake_epoch.wrapping_add(1);
+                    wake_window.clear();
                     in_speech_burst = false;
                     emit_state("speaking");
                 } else {
                     // Empty result (VAD false-positive from birds/noise).
                     consecutive_empty_stt += 1;
-                    eprintln!("[conv] empty STT result ({}/{})", consecutive_empty_stt, MAX_CONSECUTIVE_EMPTY_STT);
+                    eprintln!(
+                        "[conv] empty STT result ({}/{})",
+                        consecutive_empty_stt, MAX_CONSECUTIVE_EMPTY_STT
+                    );
                     if consecutive_empty_stt >= MAX_CONSECUTIVE_EMPTY_STT {
-                        eprintln!("[conv] {} consecutive empty results, ending conversation", consecutive_empty_stt);
+                        eprintln!(
+                            "[conv] {} consecutive empty results, ending conversation",
+                            consecutive_empty_stt
+                        );
                         let _ = app.emit("conversation-ended", ());
                         break;
                     }
@@ -566,61 +545,92 @@ fn worker_loop(
                     silence_run_ms = 0;
                     accumulated_speech_ms = 0;
                     utter_buf.clear();
-                    speaking_since = None;
-                    tts_started_at = None;
-                    barge_in_run_ms = 0;
+
                     in_speech_burst = false;
                     emit_state("listening");
                 }
             }
 
-            Ok(Msg::TtsStarted) => {
-                if mode != Mode::Listening && mode != Mode::Transcribing {
-                    mode = Mode::Speaking;
-                    speaking_since = Some(Instant::now());
-                    emit_state("speaking");
+            Ok(Msg::SpeakerRejected(score)) => {
+                eprintln!("[conv] speaker rejected: score={:.3}", score);
+                if single_shot {
+                    let _ = app.emit("conversation-ended", ());
+                    break;
                 }
-                // Reset warmup window for the new chunk.  Do NOT reset
-                // barge_in_run_ms — if the user has been speaking across a
-                // chunk boundary we want to honour that accumulation.
-                tts_started_at = Some(Instant::now());
-            }
-
-            Ok(Msg::TtsDone) => {
+                // Not counted as an empty STT result and the idle clock keeps
+                // running, so a silent owner still times out normally.
                 mode = Mode::Listening;
-                listening_idle_ms = 0;
-                // Patient deadline: give the user time to think before the next turn.
-                current_idle_target_ms = POST_TTS_IDLE_TIMEOUT_S * 1000;
                 silence_run_ms = 0;
                 accumulated_speech_ms = 0;
-                tts_started_at = None;
-                barge_in_run_ms = 0;
-                in_speech_burst = false;
                 utter_buf.clear();
-                speaking_since = None;
+                in_speech_burst = false;
                 emit_state("listening");
             }
 
-            Err(RecvTimeoutError::Timeout) => {
-                if mode == Mode::Speaking {
-                    if let Some(since) = speaking_since {
-                        if since.elapsed().as_secs() >= SPEAKING_SAFETY_TIMEOUT_S {
-                            eprintln!(
-                                "[conv] speaking safety timeout {}s, returning to listening",
-                                SPEAKING_SAFETY_TIMEOUT_S
-                            );
-                            mode = Mode::Listening;
-                            listening_idle_ms = 0;
-                            current_idle_target_ms = POST_TTS_IDLE_TIMEOUT_S * 1000;
-                            speaking_since = None;
-                            tts_started_at = None;
-                            barge_in_run_ms = 0;
-                            in_speech_burst = false;
-                            emit_state("listening");
-                        }
-                    }
+            Ok(Msg::WakeResult(epoch, matched)) => {
+                wake_pending = false;
+                if mode != Mode::Speaking || epoch != wake_epoch || !matched {
+                    continue;
                 }
+                crate::commands::chat::stop_audio_queue();
+                mode = Mode::Acknowledging;
+                ready_since = Instant::now();
+                wake_epoch = wake_epoch.wrapping_add(1);
+                wake_window.clear();
+                utter_buf.clear();
+                accumulated_speech_ms = 0;
+                silence_run_ms = 0;
+                in_speech_burst = false;
+                ready_id = READY_ID.fetch_add(1, Ordering::Relaxed) + 1;
+                let _ = app.emit("conversation-barge-in", ());
+                let _ = app.emit("conversation-ready-prompt", ready_id);
             }
+            Ok(Msg::Ready(id, played, ready_delay)) => {
+                if mode != Mode::Acknowledging || id != ready_id {
+                    continue;
+                }
+                if !played {
+                    let _ = app.emit(
+                        "stt-error",
+                        serde_json::json!({"error": "确认音效播放失败，请重新开始对话"}),
+                    );
+                    let _ = app.emit("conversation-ended", ());
+                    break;
+                }
+                // Timestamp on capture, not processing: queued cue samples cannot leak.
+                // The frontend sends this as soon as the cue starts, with a delay that
+                // expires at the cue's end, so there is no post-cue IPC gap.
+                accept_after = Instant::now() + ready_delay;
+                mode = Mode::Listening;
+                listening_idle_ms = 0;
+                utter_buf.clear();
+                accumulated_speech_ms = 0;
+                silence_run_ms = 0;
+                in_speech_burst = false;
+                emit_state("listening");
+            }
+            Ok(Msg::TtsStarted) => {
+                // Speaking already covers generation and playback. Sentence boundaries
+                // must not reset keyword windows or reopen a completed interruption.
+            }
+            Ok(Msg::TtsDone(generation)) => {
+                if mode != Mode::Speaking || generation != crate::commands::chat::audio_generation()
+                {
+                    continue;
+                }
+                wake_epoch = wake_epoch.wrapping_add(1);
+                wake_window.clear();
+                mode = Mode::Listening;
+                accept_after = Instant::now() + Duration::from_millis(150);
+                listening_idle_ms = 0;
+                current_idle_target_ms = silence_timeout_s * 1000;
+                silence_run_ms = 0;
+                utter_buf.clear();
+                accumulated_speech_ms = 0;
+                in_speech_burst = false;
+                emit_state("listening");
+            }
+            Err(RecvTimeoutError::Timeout) => {}
 
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -630,60 +640,59 @@ fn worker_loop(
     eprintln!("[conv] worker exit");
 }
 
-fn spawn_transcribe(samples: Vec<i16>, sample_rate: u32, verify_speaker: bool, barge_in_enabled: bool) {
+/// `(speaker, threshold)` when every utterance must match the owner's voiceprint.
+fn owner_gate() -> Result<Option<(String, f32)>, String> {
+    let config = crate::commands::settings_repository::load()?;
+    if !config.conversation_owner_only {
+        return Ok(None);
+    }
+    let voiceprint = crate::voice::sherpa_wake::voiceprints_dir()
+        .join(format!("{}.bin", config.last_enrolled_speaker));
+    if config.last_enrolled_speaker.is_empty() || !voiceprint.is_file() {
+        return Err("已开启「连续对话仅识别本人」，请先录制声纹".into());
+    }
+    Ok(Some((config.last_enrolled_speaker, config.wake_word_threshold)))
+}
+
+fn spawn_transcribe(
+    samples: Vec<i16>,
+    sample_rate: u32,
+    tx: Sender<Msg>,
+    owner_gate: Option<(String, f32)>,
+) {
     std::thread::Builder::new()
         .name("conv-transcribe".into())
         .spawn(move || {
-            let wav_result = write_wav(&samples, sample_rate, CONVERSATION_WAV_PATH);
+            let path = format!(
+                "/tmp/pocket-agent-conversation-{}-{}.wav",
+                std::process::id(),
+                READY_ID.fetch_add(1, Ordering::Relaxed)
+            );
+            let wav_result = write_wav(&samples, sample_rate, &path);
             let wav_path = match wav_result {
-                Ok(()) => CONVERSATION_WAV_PATH,
+                Ok(()) => path.as_str(),
                 Err(e) => {
-                    let _ = send_msg(Msg::SttResult(Err(e)));
+                    let _ = tx.send(Msg::SttResult(Err(e)));
                     return;
                 }
             };
 
-            // If this utterance came right after a barge-in and the user has
-            // enrolled speakers, verify the voice before transcribing.
-            // Only runs when barge-in toggle is on.
-            if verify_speaker && barge_in_enabled {
-                let vp_dir = crate::voice::sherpa_wake::voiceprints_dir();
-                let has_speakers = vp_dir.exists() && std::fs::read_dir(&vp_dir)
-                    .map(|mut d| d.next().is_some())
-                    .unwrap_or(false);
-                if has_speakers {
-                    eprintln!("[conv] barge-in: verifying speaker...");
-                    match crate::voice::sherpa_wake::verify_speaker(wav_path, None) {
-                        Ok(vr) => {
-                            if vr.verified {
-                                eprintln!(
-                                    "[conv] barge-in speaker ✓ {} ({:.0}% confidence)",
-                                    vr.speaker.as_deref().unwrap_or("?"),
-                                    vr.confidence * 100.0
-                                );
-                            } else {
-                                eprintln!(
-                                    "[conv] barge-in speaker ✗ rejected (best match: {:.0}% — threshold: 70%)",
-                                    vr.confidence * 100.0
-                                );
-                                let _ = send_msg(Msg::SttResult(Ok(SttResult {
-                                    text: String::new(),
-                                    language: String::new(),
-                                })));
-                                return;
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[conv] barge-in speaker verify error: {} — allowing", e);
-                        }
-                    }
-                } else {
-                    eprintln!("[conv] barge-in: no enrolled speakers, skipping verification");
+            if let Some((speaker, threshold)) = owner_gate {
+                let score = crate::voice::sherpa_wake::owner_similarity(wav_path, &speaker)
+                    .unwrap_or_else(|e| {
+                        eprintln!("[conv] speaker check failed: {}", e);
+                        0.0
+                    });
+                if score < threshold {
+                    let _ = std::fs::remove_file(&path);
+                    let _ = tx.send(Msg::SpeakerRejected(score));
+                    return;
                 }
             }
 
             let result = transcribe(wav_path);
-            let _ = send_msg(Msg::SttResult(result));
+            let _ = std::fs::remove_file(&path);
+            let _ = tx.send(Msg::SttResult(result));
         })
         .ok();
 }
@@ -695,14 +704,15 @@ fn write_wav(samples: &[i16], sample_rate: u32, path: &str) -> Result<(), String
         bits_per_sample: 16,
         sample_format: HoundSampleFormat::Int,
     };
-    let mut writer =
-        WavWriter::create(path, spec).map_err(|e| format!("wav create: {}", e))?;
+    let mut writer = WavWriter::create(path, spec).map_err(|e| format!("wav create: {}", e))?;
     for &s in samples {
         writer
             .write_sample(s)
             .map_err(|e| format!("wav write: {}", e))?;
     }
-    writer.finalize().map_err(|e| format!("wav finalize: {}", e))
+    writer
+        .finalize()
+        .map_err(|e| format!("wav finalize: {}", e))
 }
 
 fn downmix_to_mono(samples: &[i16], channels: u16) -> Vec<i16> {
@@ -723,6 +733,15 @@ fn downmix_to_mono(samples: &[i16], channels: u16) -> Vec<i16> {
     out
 }
 
+/// Whether an utterance in progress should go to STT. No minimum-speech check:
+/// a quiet speaker can register under MIN_UTTERANCE_MS of bursts, and with
+/// speech > 0 the idle deadline is paused, so requiring it left the session
+/// stuck until noise or MAX_UTTERANCE_S. Noise flushes come back as empty STT
+/// results, which MAX_CONSECUTIVE_EMPTY_STT already bounds.
+fn should_flush(silence_run_ms: u64, pause_tolerance_ms: u64, total_secs: f32) -> bool {
+    silence_run_ms >= pause_tolerance_ms || total_secs >= MAX_UTTERANCE_S
+}
+
 fn rms_i16(samples: &[i16]) -> f32 {
     if samples.is_empty() {
         return 0.0;
@@ -735,4 +754,25 @@ fn rms_i16(samples: &[i16]) -> f32 {
         })
         .sum();
     (sum_sq / samples.len() as f64).sqrt() as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_quiet_speech_flushes_after_pause() {
+        // 264ms of bursts (< MIN_UTTERANCE_MS), then a full pause: must flush.
+        assert!(should_flush(2500, 2500, 3.0));
+    }
+
+    #[test]
+    fn no_flush_before_pause_tolerance() {
+        assert!(!should_flush(2400, 2500, 3.0));
+    }
+
+    #[test]
+    fn flushes_at_max_utterance_length() {
+        assert!(should_flush(0, 2500, MAX_UTTERANCE_S));
+    }
 }

@@ -3,7 +3,7 @@
   import { settingsStore } from '../stores/settings';
   import { convLabelsLang } from '../i18n';
 
-  export let mode: 'idle' | 'recording' | 'thinking' | 'waiting_for_wake' | 'verifying_speaker' = 'idle';
+  export let mode: 'idle' | 'recording' | 'thinking' | 'speaking' | 'waiting_for_wake' | 'verifying_speaker' = 'idle';
   export let audioLevel: number = 0;
 
   const dispatch = createEventDispatcher<{ click: void }>();
@@ -21,6 +21,7 @@
   class="island-wrap"
   class:waiting-for-wake={mode === 'waiting_for_wake'}
   class:verifying-speaker={mode === 'verifying_speaker'}
+  class:speaking={mode === 'speaking'}
   title={tooltip}
   on:click={() => dispatch('click')}
 >
@@ -166,6 +167,19 @@
   }
   @keyframes wake-pulse {
     0%, 100% { opacity: 0.55; }
+    50%      { opacity: 1; }
+  }
+
+  /* ── Speaking state: green breathing on dot 2 (TTS playing) ── */
+  .island-wrap.speaking .bar-2 {
+    border-color: rgba(80, 220, 120, 0.6);
+    animation: speaking-breathe 1.6s ease-in-out infinite;
+  }
+  .island-wrap.speaking .bar-2 .dot {
+    background: rgba(80, 220, 120, 0.9);
+  }
+  @keyframes speaking-breathe {
+    0%, 100% { opacity: 0.45; }
     50%      { opacity: 1; }
   }
 

@@ -5,7 +5,7 @@ use crate::AppState;
 use futures_util::StreamExt;
 use std::process::Command;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 static CURRENT_AUDIO_SINK: std::sync::OnceLock<std::sync::Mutex<Option<std::sync::Arc<rodio::Sink>>>> = std::sync::OnceLock::new();
@@ -52,8 +52,15 @@ static AUDIO_SENDER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sende
 static AUDIO_GENERATION: AtomicU64 = AtomicU64::new(0);
 static AUDIO_QUEUE_DEPTH: AtomicUsize = AtomicUsize::new(0);
 static TURN_GENERATION: AtomicU64 = AtomicU64::new(0);
-/// Tracks the generation of the last non-silent audio for chat-audio-done emit.
-static LAST_NON_SILENT_GEN: AtomicU64 = AtomicU64::new(0);
+/// Non-silent audio jobs submitted-but-not-yet-finished for the current AUDIO_GENERATION.
+/// Used to fire chat-audio-done exactly once, when the LAST sentence of a (possibly
+/// multi-sentence) turn finishes playing — not after every sentence.
+static PENDING_NON_SILENT: AtomicI64 = AtomicI64::new(0);
+/// True once the submitter (run_hermes_turn / speak_text) knows no more non-silent
+/// jobs will be submitted for the current generation.
+static SUBMISSION_DONE: AtomicBool = AtomicBool::new(true);
+/// Generation for which chat-audio-done has already been emitted (dedup guard); 0 = none yet.
+static AUDIO_DONE_EMITTED_GEN: AtomicU64 = AtomicU64::new(0);
 
 fn current_audio_sink() -> &'static Mutex<Option<std::sync::Arc<rodio::Sink>>> {
     CURRENT_AUDIO_SINK.get_or_init(|| Mutex::new(None))
@@ -87,11 +94,6 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
 
                                 let text_len = text.chars().count();
 
-                                // Track last non-silent audio generation for chat-audio-done emit
-                                if !silent {
-                                    LAST_NON_SILENT_GEN.store(generation, Ordering::SeqCst);
-                                }
-
                                 let _ = prep_tx.send(PreparedAudio {
                                     tts_file,
                                     text,
@@ -120,12 +122,14 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                         continue;
                     }
 
+                    let tts_ok = !prep.tts_file.is_empty() && Path::new(&prep.tts_file).exists();
+
                     // Emit text events for push API
                     if prep.show_text {
                         let _ = prep.app.emit("chat-speaking-start", TypewriterStartPayload {
                             emotion: prep.emotion.clone(),
                             total_chars: prep.text_len,
-                            has_audio: true,
+                            has_audio: tts_ok,
                         });
                         let _ = prep.app.emit("chat-stream", ChatStreamPayload {
                             delta: prep.text.clone(),
@@ -133,7 +137,6 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                         let _ = prep.app.emit("chat-stream-end", ());
                     }
 
-                    let tts_ok = !prep.tts_file.is_empty() && Path::new(&prep.tts_file).exists();
                     eprintln!("[PLAYER] gen={} chars={} audio={}", prep.generation, prep.text_len, tts_ok);
 
                     if tts_ok {
@@ -142,24 +145,43 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                                 match rodio::Sink::try_new(&stream_handle) {
                                     Ok(sink) => {
                                         let sink = std::sync::Arc::new(sink);
-                                        *current_audio_sink().lock().unwrap() = Some(sink.clone());
                                         if let Ok(file) = std::fs::File::open(&prep.tts_file) {
                                             match rodio::Decoder::new(std::io::BufReader::new(file)) {
                                                 Ok(source) => {
-                                                    // Signal real audio start — frontend uses this
-                                                    // (not chat-speaking-start) to switch to speaking animation.
-                                                    // Skip for status announcements so the StatusPanel
-                                                    // isn't cleared mid-turn.
-                                                    if !prep.silent {
-                                                        let _ = prep.app.emit("chat-audio-playing", ());
+                                                    let mut installed = false;
+                                                    {
+                                                        // Serialize installation with stop_audio_queue: a decoded
+                                                        // old sentence must not start after the stop took the sink.
+                                                        let mut current = current_audio_sink().lock().unwrap();
+                                                        if prep.generation == audio_generation() {
+                                                            sink.append(source);
+                                                            *current = Some(sink.clone());
+                                                            installed = true;
+                                                        }
                                                     }
-                                                    sink.append(source);
-                                                    sink.sleep_until_end();
+                                                    if installed {
+                                                        // Signal real audio start only after this generation wins the
+                                                        // sink race. The frontend treats this as playback truth.
+                                                        if !prep.silent {
+                                                            let _ = prep.app.emit("chat-audio-playing", true);
+                                                        } else {
+                                                            // Status speech (e.g. tool announcements) moves the mouth
+                                                            // without switching the UI into reply mode.
+                                                            let _ = prep.app.emit("chat-status-audio-playing", ());
+                                                        }
+                                                        sink.sleep_until_end();
+                                                        // Per-sentence end lets the frontend close the mouth during
+                                                        // the inter-sentence TTS generation gap instead of flapping.
+                                                        let _ = prep.app.emit("chat-audio-sentence-end", ());
+                                                    }
                                                 }
                                                 Err(e) => eprintln!("[AUDIO] decode: {}", e),
                                             }
                                         }
-                                        *current_audio_sink().lock().unwrap() = None;
+                                        let mut current = current_audio_sink().lock().unwrap();
+                                        if current.as_ref().map(|active| std::sync::Arc::ptr_eq(active, &sink)).unwrap_or(false) {
+                                            *current = None;
+                                        }
                                         drop(stream);
                                     }
                                     Err(e) => { eprintln!("[AUDIO] sink: {}", e); drop(stream); }
@@ -173,20 +195,19 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                     let remaining = AUDIO_QUEUE_DEPTH.load(Ordering::SeqCst);
                     eprintln!("[AUDIO] done (gen={}, remaining={})", prep.generation, remaining);
 
-                    // Emit chat-audio-done when the last non-silent audio finishes.
-                    // This ensures we emit even if the last audio was not the last in queue
-                    // (e.g., status announcements after the main response).
-                    let is_last_non_silent = !prep.silent && 
-                        prep.generation == LAST_NON_SILENT_GEN.load(Ordering::SeqCst) &&
-                        prep.generation == AUDIO_GENERATION.load(Ordering::SeqCst);
-
-                    if is_last_non_silent {
-                        eprintln!("[AUDIO] emitting chat-audio-done (gen={})", prep.generation);
-                        let _ = prep.app.emit("chat-audio-done", ());
-                    } else {
-                        eprintln!("[AUDIO] skip chat-audio-done (silent={} gen={} audio_gen={} remaining={} last_non_silent={})",
-                            prep.silent, prep.generation, AUDIO_GENERATION.load(Ordering::SeqCst), remaining,
-                            LAST_NON_SILENT_GEN.load(Ordering::SeqCst));
+                    // chat-audio-done fires once per turn, when every non-silent sentence
+                    // submitted for this generation (see PENDING_NON_SILENT) has finished
+                    // playing — not after each individual sentence.
+                    // Only decrement for the generation the counter belongs to;
+                    // a stale sentence finishing late would otherwise consume a
+                    // current-generation credit and fire chat-audio-done early
+                    // (or, symmetrically, never).
+                    if !prep.silent
+                        && prep.generation == AUDIO_GENERATION.load(Ordering::SeqCst)
+                    {
+                        PENDING_NON_SILENT.fetch_sub(1, Ordering::SeqCst);
+                        maybe_emit_audio_done(&prep.app, prep.generation);
+                        maybe_emit_audio_idle(&prep.app, prep.generation);
                     }
                 }
             })
@@ -195,10 +216,16 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
     })
 }
 
-/// Stop the pipeline and reset queue counter. Called on fn-key press.
+/// Stop the pipeline and reset queue counter. Called on fn-key press and barge-in.
+pub fn audio_generation() -> u64 { AUDIO_GENERATION.load(Ordering::SeqCst) }
+
 pub fn stop_audio_queue() {
     eprintln!("[AUDIO] stop requested");
     AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst);
+    // Supersede any in-flight SSE turn so its sentence callback stops
+    // reserving queue slots that will never be released (leak → queue
+    // full → new turn's TTS silently dropped).
+    TURN_GENERATION.fetch_add(1, Ordering::SeqCst);
     audio_queue_reset();
     let sink = current_audio_sink().lock().unwrap().take();
     if let Some(sink) = sink {
@@ -271,9 +298,70 @@ pub fn audio_queue_reset() {
     AUDIO_QUEUE_DEPTH.store(0, Ordering::SeqCst);
 }
 
-/// Get edge-tts binary path from env var, fallback to "edge-tts"
+/// Reset chat-audio-done tracking for a freshly allocated speak generation
+/// (called once per turn, before any sentences are submitted).
+fn begin_audio_submission() {
+    PENDING_NON_SILENT.store(0, Ordering::SeqCst);
+    SUBMISSION_DONE.store(false, Ordering::SeqCst);
+    AUDIO_DONE_EMITTED_GEN.store(0, Ordering::SeqCst);
+}
+
+/// Emit chat-audio-done exactly once for `generation`, once all of its non-silent
+/// sentences have been submitted (SUBMISSION_DONE) and finished playing (PENDING_NON_SILENT <= 0).
+fn maybe_emit_audio_done(app: &AppHandle, generation: u64) {
+    if generation != AUDIO_GENERATION.load(Ordering::SeqCst) {
+        return;
+    }
+    if !SUBMISSION_DONE.load(Ordering::SeqCst) {
+        return;
+    }
+    if PENDING_NON_SILENT.load(Ordering::SeqCst) > 0 {
+        return;
+    }
+    if AUDIO_DONE_EMITTED_GEN
+        .compare_exchange(0, generation, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        eprintln!("[AUDIO] emitting chat-audio-done (gen={})", generation);
+        let _ = app.emit("chat-audio-done", generation);
+    }
+}
+
+/// Emit chat-audio-idle when everything submitted for `generation` has played but the
+/// turn is still running (Hermes calling tools or composing the next part), so the
+/// avatar can leave SPEAKING. speak_text sets SUBMISSION_DONE right after submitting,
+/// so pushed / bridge speech never gets this event.
+fn maybe_emit_audio_idle(app: &AppHandle, generation: u64) {
+    if generation != AUDIO_GENERATION.load(Ordering::SeqCst) {
+        return;
+    }
+    if SUBMISSION_DONE.load(Ordering::SeqCst) {
+        return;
+    }
+    if PENDING_NON_SILENT.load(Ordering::SeqCst) > 0 {
+        return;
+    }
+    eprintln!("[AUDIO] emitting chat-audio-idle (gen={})", generation);
+    let _ = app.emit("chat-audio-idle", generation);
+}
+
+/// edge-tts binary: EDGE_TTS_BIN, else the PA venv's copy, else PATH. A PATH
+/// lookup can hit an outdated user-site install that Microsoft rejects with 403.
 fn edge_tts_bin() -> String {
-    std::env::var("EDGE_TTS_BIN").unwrap_or_else(|_| "edge-tts".to_string())
+    pick_edge_tts_bin(
+        std::env::var("EDGE_TTS_BIN").ok(),
+        &crate::voice::venv::venv_root().join("bin").join("edge-tts"),
+    )
+}
+
+fn pick_edge_tts_bin(env_override: Option<String>, venv_bin: &std::path::Path) -> String {
+    if let Some(bin) = env_override.filter(|b| !b.trim().is_empty()) {
+        return bin;
+    }
+    if venv_bin.is_file() {
+        return venv_bin.to_string_lossy().into_owned();
+    }
+    "edge-tts".to_string()
 }
 
 /// Detect language from text content using Unicode character ranges.
@@ -398,6 +486,9 @@ struct HermesTurnRequest {
     /// Generation captured at turn start. The streaming loop breaks out cleanly
     /// when `TURN_GENERATION` advances past this value.
     turn_gen: u64,
+    /// Audio generation owned by this UI turn. Bridge turns do not submit audio
+    /// directly, so they leave this empty.
+    audio_gen: Option<u64>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -437,8 +528,19 @@ fn emotion_to_prosody(emotion: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// edge-tts talks to Microsoft's cloud service, so a single socket timeout is
+/// common; retry once before dropping the sentence.
 fn generate_tts_to(text: &str, path: &str, voice: &str, rate: &str, volume: &str) -> bool {
     if text.trim().is_empty() { return false; }
+    if generate_tts_once(text, path, voice, rate, volume) {
+        return true;
+    }
+    eprintln!("[TTS] failed, retrying in 1s...");
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    generate_tts_once(text, path, voice, rate, volume)
+}
+
+fn generate_tts_once(text: &str, path: &str, voice: &str, rate: &str, volume: &str) -> bool {
     eprintln!("[TTS] generating for {} chars voice={} rate={} vol={}...", text.len(), voice, rate, volume);
     let rate_arg = format!("--rate={}", rate);
     let volume_arg = format!("--volume={}", volume);
@@ -451,15 +553,23 @@ fn generate_tts_to(text: &str, path: &str, voice: &str, rate: &str, volume: &str
         .output();
     match result {
         Ok(output) => {
-            if output.status.success() && Path::new(path).exists() {
-                eprintln!("[TTS] OK, {} bytes", std::fs::metadata(path).map(|m| m.len()).unwrap_or(0));
+            let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            if output.status.success() && bytes > 0 {
+                eprintln!("[TTS] OK, {} bytes", bytes);
                 true
             } else {
+                // edge-tts creates the --write-media file before it can fail; remove the
+                // empty leftover so the player's exists() check doesn't try to decode it.
+                let _ = std::fs::remove_file(path);
                 eprintln!("[TTS] failed: {}", String::from_utf8_lossy(&output.stderr));
                 false
             }
         }
-        Err(e) => { eprintln!("[TTS] error: {}", e); false }
+        Err(e) => {
+            let _ = std::fs::remove_file(path);
+            eprintln!("[TTS] error: {}", e);
+            false
+        }
     }
 }
 
@@ -588,6 +698,9 @@ fn speak_internal(
         show_text,
         silent: false,
     });
+    if generation == AUDIO_GENERATION.load(Ordering::SeqCst) {
+        PENDING_NON_SILENT.fetch_add(1, Ordering::SeqCst);
+    }
     true
 }
 
@@ -620,13 +733,17 @@ fn emit_text_without_tts(app: &AppHandle, full_response: &str, emotion: &str) {
     if cleaned.is_empty() { return; }
 
     // Text-only fallback: no audio plays, but UI still wants the "speaking" animation
-    // while text streams. Fire chat-audio-playing alongside speaking-start.
-    let _ = app.emit("chat-audio-playing", ());
+    // while text streams. speaking-start must come first — it carries has_audio,
+    // which the frontend reads when chat-audio-playing arrives to decide whether
+    // to arm barge-in. Reversed, this turn would inherit the previous turn's flag.
     let _ = app.emit("chat-speaking-start", TypewriterStartPayload {
         emotion: emotion.to_string(),
         total_chars: cleaned.chars().count(),
         has_audio: false,
     });
+    // Payload false = text-only fallback: keep the speaking expression and typewriter,
+    // but the frontend will not animate the mouth (nothing is audible).
+    let _ = app.emit("chat-audio-playing", false);
     for ch in cleaned.chars() {
         let _ = app.emit("chat-stream", ChatStreamPayload { delta: ch.to_string() });
     }
@@ -640,7 +757,31 @@ async fn run_hermes_turn(
 ) -> Result<String, String> {
     let mut full_response = String::new();
     let mut sentence_buffer = String::new();
-    let max_retries = 2;
+    // A disconnected request may already have changed the desktop. Never replay
+    // a local Hermes UI turn automatically, even before its first SSE event.
+    let desktop_tools = request.mode == HermesTurnMode::Ui
+        && get_api_agent().is_none()
+        && super::computer::is_local_gateway(&get_api_url());
+    let max_retries = if desktop_tools { 0 } else { 2 };
+    let mut effective_hint = request.voice_hint.clone().unwrap_or_default();
+    let use_runs = if desktop_tools {
+        match super::computer::get_computer_status(Some(false)).await {
+            Ok(status) if status.available => true,
+            status => {
+                let reason = match status { Ok(status) => status.message, Err(error) => error };
+                effective_hint.push_str(&format!("\nDesktop integration is unavailable: {}. Do not use computer_use this turn. If the user requests desktop work, explain this setup issue. Ordinary conversation can continue.", reason));
+                false
+            }
+        }
+    } else { false };
+    if request.mode == HermesTurnMode::Ui {
+        if let Some(reminder) = crate::api::subagents::before_turn(app).await {
+            effective_hint.push_str(&reminder);
+        }
+    }
+    // Registers background delegations at turn end, including superseded/early-return exits.
+    let mut delegate_watch = DelegateWatch { app: app.clone(), session: request.session_id.clone(), armed: false };
+    if request.turn_gen != TURN_GENERATION.load(Ordering::SeqCst) { return Ok(full_response); }
     // Event name prefix: bridge mode uses "bridge-" prefix, UI mode uses "chat-"
     let evp = |suffix: &str| -> String {
         match request.mode {
@@ -650,6 +791,7 @@ async fn run_hermes_turn(
     };
 
     for attempt in 0..=max_retries {
+        if request.turn_gen != TURN_GENERATION.load(Ordering::SeqCst) { return Ok(full_response); }
         if attempt > 0 {
             eprintln!("[SSE] retry {}/{}", attempt, max_retries);
             std::thread::sleep(std::time::Duration::from_secs(2));
@@ -661,15 +803,18 @@ async fn run_hermes_turn(
             request.mode,
             request.session_id,
         );
-        let mut stream = match client
+        let stream_result = if use_runs {
+            crate::api::runs::chat_stream(app, &request.text, Some(&effective_hint),
+                request.context.as_deref(), &request.session_id).await
+        } else { client
             .chat_stream(
                 &request.text,
-                request.voice_hint.as_deref(),
+                Some(&effective_hint),
                 request.context.as_deref(),
                 Some(&request.session_id),
             )
-            .await
-        {
+            .await };
+        let mut stream = match stream_result {
             Ok(s) => s,
             Err(e) => {
                 if attempt < max_retries {
@@ -681,7 +826,18 @@ async fn run_hermes_turn(
         let mut received_data = false;
         let mut reasoning_buffer = String::new();
 
-        while let Some(chunk) = stream.next().await {
+        if request.turn_gen != TURN_GENERATION.load(Ordering::SeqCst) {
+            return Ok(full_response); // dropping the run stream requests backend stop
+        }
+
+        loop {
+            let chunk = tokio::select! {
+                chunk = stream.next() => match chunk { Some(chunk) => chunk, None => break },
+                _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                    if request.turn_gen != TURN_GENERATION.load(Ordering::SeqCst) { return Ok(full_response); }
+                    continue;
+                }
+            };
             if request.turn_gen != TURN_GENERATION.load(Ordering::SeqCst) {
                 eprintln!("[SSE] turn superseded (gen={}, current={}) — exiting loop",
                     request.turn_gen, TURN_GENERATION.load(Ordering::SeqCst));
@@ -727,7 +883,7 @@ async fn run_hermes_turn(
                         reasoning_buffer.clear();
                     }
                 }
-                Ok(StreamEvent::ToolCallStart { id, name }) => {
+                Ok(StreamEvent::ToolCallStart { id, name, preview }) => {
                     if !reasoning_buffer.is_empty() {
                         let _ = app.emit(&evp("thinking"), reasoning_buffer.clone());
                         reasoning_buffer.clear();
@@ -736,10 +892,29 @@ async fn run_hermes_turn(
                         eprintln!("[SSE] <<< first tool call from LLM [{}]: {}", chrono::Local::now().format("%H:%M:%S%.3f"), name);
                     }
                     received_data = true;
+                    // Text before a tool call is a whole utterance even without end punctuation;
+                    // speak it now instead of after the tools finish.
+                    if let Some(ref cb) = request.on_sentence {
+                        let trimmed = sentence_buffer.trim();
+                        if !trimmed.is_empty() {
+                            eprintln!("[SSE] flushing sentence before tool call ({} chars)", trimmed.len());
+                            cb(trimmed);
+                        }
+                        sentence_buffer.clear();
+                    }
+                    if name == "delegate_task" && request.mode == HermesTurnMode::Ui {
+                        delegate_watch.armed = true;
+                    }
                     let _ = app.emit(&evp("tool-call"), serde_json::json!({
                         "id": id,
-                        "name": name
+                        "name": name,
+                        "preview": preview
                     }).to_string());
+                }
+                // Not model output: leaves received_data alone so the retry rule is unchanged.
+                Ok(StreamEvent::Compaction(active)) => {
+                    eprintln!("[SSE] hermes compaction {}", if active { "running" } else { "done" });
+                    let _ = app.emit(&evp("compacting"), active);
                 }
                 Err(e) => {
                     if !received_data && attempt < max_retries {
@@ -758,19 +933,42 @@ async fn run_hermes_turn(
                 eprintln!("[SSE] flushing last sentence ({} chars)", trimmed.len());
                 cb(trimmed);
             }
+            // No more sentences will be submitted for this generation — chat-audio-done
+            // can now fire once the already-submitted sentences finish playing (or
+            // immediately below, if they already have).
+            if let Some(audio_gen) = request.audio_gen {
+                SUBMISSION_DONE.store(true, Ordering::SeqCst);
+                maybe_emit_audio_done(app, audio_gen);
+            }
         }
 
         eprintln!("[SSE] <<< stream complete [{}] ({} chars)", chrono::Local::now().format("%H:%M:%S%.3f"), full_response.len());
         break;
     }
 
-    let full_response = if std::env::var("ENABLE_LOCAL_COMMANDS").as_deref() == Ok("true") {
-        execute_commands(&full_response)
-    } else {
-        strip_cmd_tags(&full_response)
-    };
+    if request.mode == HermesTurnMode::Ui {
+        crate::api::subagents::dismiss(&crate::api::subagents::dismiss_ids(&full_response));
+    }
+    let full_response = strip_cmd_tags(&full_response);
 
     Ok(full_response)
+}
+
+struct DelegateWatch {
+    app: AppHandle,
+    session: String,
+    armed: bool,
+}
+
+impl Drop for DelegateWatch {
+    fn drop(&mut self) {
+        if self.armed {
+            let (app, session) = (self.app.clone(), std::mem::take(&mut self.session));
+            tauri::async_runtime::spawn(async move {
+                crate::api::subagents::after_delegate(&app, &session).await;
+            });
+        }
+    }
 }
 
 pub async fn dispatch_bridge_message(
@@ -800,6 +998,7 @@ pub async fn dispatch_bridge_message(
         mode: HermesTurnMode::Bridge,
         on_sentence: None,
         turn_gen: my_turn_gen,
+        audio_gen: None,
     };
 
     match run_hermes_turn(&app, &client, &request).await {
@@ -828,6 +1027,7 @@ pub async fn dispatch_bridge_message(
             if my_turn_gen != TURN_GENERATION.load(Ordering::SeqCst) {
                 return Ok(());
             }
+            eprintln!("[SSE] turn failed: {}", e);
             let _ = app.emit("bridge-turn-error", e.clone());
             Err(e)
         }
@@ -857,6 +1057,11 @@ pub async fn send_message(
     let user_lang = user_language.unwrap_or_else(|| "zh".to_string());
     let fixed = fixed_lang.unwrap_or_default();
     let mut hint = build_voice_hint(&primary, &aux1, &aux2, &user_lang, &fixed);
+    if get_api_agent().is_none() && super::computer::is_local_gateway(&get_api_url()) {
+        hint.push_str(super::computer::COMPUTER_HINT);
+    } else {
+        hint.push_str("\nPocket Agent has no local desktop integration with this gateway. Gateway computer tools operate on the gateway/driver host, not automatically on this Mac. Do not claim to see or control this Mac.");
+    }
     if fixed.is_empty() {
         hint.push_str("
 
@@ -896,6 +1101,12 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
     }
 
     let speak_generation = AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    // Slots reserved by the superseded generation are never released (their
+    // release is generation-gated), so without this reset they leak. Ten leaked
+    // slots fill the queue and every later sentence blocks 30s then drops —
+    // the assistant "goes quiet mid-reply".
+    audio_queue_reset();
+    begin_audio_submission();
     let speak_app = app.clone();
     let speak_format = "wav".to_string();
 
@@ -907,7 +1118,8 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
     let on_sentence: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>> = if tts_on {
         Some(std::sync::Arc::new(move |sentence: &str| {
             // Strip [CMD:...] tags — they won't appear in chat box, so don't read them.
-            let clean_sentence = strip_all_cmd_tags(sentence);
+            // Then drop Markdown symbols so TTS doesn't read them aloud.
+            let clean_sentence = speakable(&strip_all_cmd_tags(sentence));
             if clean_sentence.is_empty() { return; }
 
             // Use first sentence's voice for all subsequent sentences.
@@ -935,6 +1147,7 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
         mode: HermesTurnMode::Ui,
         on_sentence,
         turn_gen: my_turn_gen,
+        audio_gen: Some(speak_generation),
     };
 
     let full_response = match run_hermes_turn(&app, &client, &request).await {
@@ -944,7 +1157,14 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
             if my_turn_gen != TURN_GENERATION.load(Ordering::SeqCst) {
                 return Ok(());
             }
+            eprintln!("[SSE] turn failed: {}", e);
             app.emit("chat-stream-error", e.clone()).map_err(|emit_err| emit_err.to_string())?;
+            if tts_on {
+                SUBMISSION_DONE.store(true, Ordering::SeqCst);
+                maybe_emit_audio_done(&app, speak_generation);
+            } else {
+                let _ = app.emit("chat-audio-done", speak_generation);
+            }
             return Err(e);
         }
     };
@@ -968,6 +1188,7 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
 
     if full_response.trim().is_empty() {
         let _ = app.emit("chat-stream-end", ());
+        if !tts_on { let _ = app.emit("chat-audio-done", speak_generation); }
         return Ok(());
     }
 
@@ -982,15 +1203,24 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
     } else {
         let emotion = detect_emotion(&full_response);
         emit_text_without_tts(&app, &full_response, &emotion);
+        // No audio will ever play for this turn, so nothing else would emit
+        // chat-audio-done — the continuous-conversation worker would sit in
+        // Speaking until its 30s safety timeout.
+        let _ = app.emit("chat-audio-done", speak_generation);
     }
 
     Ok(())
 }
 
 #[tauri::command]
-pub fn discard_pending_turn() {
+pub async fn discard_pending_turn(app: AppHandle) -> Result<(), String> {
     TURN_GENERATION.fetch_add(1, Ordering::SeqCst);
     AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst);
+    let result = crate::api::runs::cancel_all().await;
+    if let Err(error) = &result {
+        let _ = app.emit("computer-control-error", format!("{} 后台任务可能仍在运行。", error));
+    }
+    result
 }
 
 /// Reset the hotkey state machine's press/release toggle. Called by the frontend
@@ -1039,13 +1269,81 @@ pub async fn speak_text(
     let aux1 = tts_aux1_voice.unwrap_or_default();
     let aux2 = tts_aux2_voice.unwrap_or_default();
     let generation = AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    begin_audio_submission();
 
     let voice = override_voice.unwrap_or_else(|| select_voice(&text, &primary, &aux1, &aux2, "", ""));
     let emotion_str = emotion.unwrap_or_else(|| detect_emotion(&text));
 
     speak_internal(&app, &text, &emotion_str, &voice, &format, generation, true);
+    // Single-shot: the one (and only) sentence has already been submitted above.
+    SUBMISSION_DONE.store(true, Ordering::SeqCst);
+    maybe_emit_audio_done(&app, generation);
 
     Ok(())
+}
+
+/// Play a voice sample from the settings window without emitting chat events
+/// or changing the saved configuration.
+#[tauri::command]
+pub async fn preview_voice(
+    voice: String,
+    tts_format: Option<String>,
+    volume: Option<f32>,
+) -> Result<(), String> {
+    if voice.is_empty()
+        || !voice.ends_with("Neural")
+        || !voice.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err("invalid preview voice".to_string());
+    }
+    let format = tts_format.unwrap_or_else(|| "wav".to_string());
+    if !matches!(format.as_str(), "wav" | "mp3") {
+        return Err("invalid preview audio format".to_string());
+    }
+    let playback_volume = volume.unwrap_or(0.8).clamp(0.0, 1.0);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let text = if voice.starts_with("zh-HK-") {
+            "你好，我係你嘅語音智能助手，好高興可以同你一齊交流。"
+        } else if voice.starts_with("zh-TW-") {
+            "你好，我是你的語音智慧助理，很高興能和你一起交流。"
+        } else if voice.starts_with("zh-") {
+            "你好，我是你的语音智能助手，很高兴能和你一起交流。"
+        } else if voice.starts_with("ja-") {
+            "こんにちは、私はあなたの音声AIアシスタントです。あなたとお話しできてうれしいです。"
+        } else if voice.starts_with("ko-") {
+            "안녕하세요. 저는 당신의 음성 인공지능 비서입니다. 함께 이야기하게 되어 기쁩니다."
+        } else if voice.starts_with("fr-") {
+            "Bonjour, je suis votre assistant vocal intelligent. Je suis ravi de pouvoir échanger avec vous."
+        } else if voice.starts_with("de-") {
+            "Hallo, ich bin Ihr intelligenter Sprachassistent. Ich freue mich, mit Ihnen zu sprechen."
+        } else if voice.starts_with("es-") {
+            "Hola, soy tu asistente de voz inteligente. Me alegra mucho poder hablar contigo."
+        } else {
+            "Hello, I'm your intelligent voice assistant. I'm very happy to talk with you."
+        };
+        let path = tts_path(&format);
+        if !generate_tts_to(text, &path, &voice, "+0%", "+0%") {
+            return Err("voice preview generation failed".to_string());
+        }
+
+        let (stream, stream_handle) =
+            rodio::OutputStream::try_default().map_err(|e| format!("audio output: {e}"))?;
+        let sink = rodio::Sink::try_new(&stream_handle)
+            .map_err(|e| format!("audio preview sink: {e}"))?;
+        sink.set_volume(playback_volume);
+        let file = std::fs::File::open(&path)
+            .map_err(|e| format!("open voice preview: {e}"))?;
+        let source = rodio::Decoder::new(std::io::BufReader::new(file))
+            .map_err(|e| format!("decode voice preview: {e}"))?;
+        sink.append(source);
+        sink.sleep_until_end();
+        drop(stream);
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("voice preview task failed: {e}"))?
 }
 
 /// Speak a short status announcement (e.g. "正在思考", "查询 weather").
@@ -1100,7 +1398,7 @@ pub async fn speak_status(
 
 /// Strip [CMD:...] tags from text without executing them.
 fn strip_cmd_tags(text: &str) -> String {
-    let re = regex::Regex::new(r#"\[CMD:[^\]]+\]"#).unwrap();
+    let re = regex::Regex::new(r#"\[CMD:[^\]]+\]|\[SUBAGENT_DONE:[^\]]*\]"#).unwrap();
     let clean = re.replace_all(text, "").to_string();
     let space_re = regex::Regex::new(r"  +").unwrap();
     space_re.replace_all(&clean.trim(), " ").to_string()
@@ -1112,7 +1410,7 @@ fn strip_cmd_tags(text: &str) -> String {
 /// Returns cleaned text with multi-space collapsed.
 fn strip_all_cmd_tags(text: &str) -> String {
     let full_re = regex::Regex::new(r#"\[LOCAL_CMD[\s\S]*?\]"#).unwrap();
-    let cmd_re = regex::Regex::new(r#"\[CMD:[^\]]*\]"#).unwrap();
+    let cmd_re = regex::Regex::new(r#"\[CMD:[^\]]*\]|\[SUBAGENT_DONE:[^\]]*\]"#).unwrap();
     let resid_re = regex::Regex::new(r#"CMD\][^\n]*"#).unwrap();
     let kw_re = regex::Regex::new(r#"(?m)^(executing:|OK|ERROR|FAILED)\s[^\n]*\n?"#).unwrap();
 
@@ -1128,53 +1426,76 @@ fn strip_all_cmd_tags(text: &str) -> String {
     s.trim().to_string()
 }
 
-/// Extract [CMD:...] tags from text, execute them, return text with tags removed.
-///
-/// Commands are executed in detached threads to avoid blocking the async runtime.
-/// std::process::Command::output() waits for stdout/stderr pipes to close - GUI apps
-/// like Chrome inherit the pipe write-end and never close it, which blocks the tokio
-/// worker thread and freezes the UI (chat-stream-end never emits, PA stuck in SPEAKING).
-fn execute_commands(text: &str) -> String {
-    let re = regex::Regex::new(r#"\[CMD:([^\]]+)\]"#).unwrap();
+/// Turn Markdown-ish text into plain speech for TTS so edge-tts doesn't read
+/// `*`, `_`, `#`, list markers, backticks, table pipes or emoji aloud.
+/// Only affects what is spoken; the chat box still renders the original.
+/// Bare URLs are left untouched.
+fn speakable(text: &str) -> String {
+    let link_re = regex::Regex::new(r"!?\[([^\]]*)\]\([^)]*\)").unwrap();
+    let fence_re = regex::Regex::new(r"```[A-Za-z0-9_+-]*").unwrap();
+    let table_sep_re = regex::Regex::new(r"(?m)^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$").unwrap();
+    let marker_re = regex::Regex::new(r"(?m)^\s*(?:(?:#{1,6}|>|[-*+•]|\d+[.)])(?:\s+|$))+").unwrap();
+    let url_re = regex::Regex::new(r"https?://\S+").unwrap();
 
-    for cap in re.captures_iter(text) {
-        let cmd_str = cap[1].to_string();
-        eprintln!("[LOCAL_CMD] dispatching: {}", cmd_str);
+    let s = link_re.replace_all(text, "$1").to_string();
+    let s = fence_re.replace_all(&s, "").replace('`', "");
+    let s = table_sep_re.replace_all(&s, "").to_string();
+    let s = marker_re.replace_all(&s, "").to_string();
 
-        // Spawn a detached thread so .output() cannot block the async runtime.
-        if let Err(e) = std::thread::Builder::new()
-            .name("local-cmd".to_string())
-            .spawn(move || {
-                let result = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(&cmd_str)
-                    .output();
-
-                match result {
-                    Ok(output) => {
-                        if output.status.success() {
-                            eprintln!("[LOCAL_CMD] OK: {}", cmd_str);
-                        } else {
-                            eprintln!("[LOCAL_CMD] exit={}: {}", output.status, String::from_utf8_lossy(&output.stderr));
-                        }
-                    }
-                    Err(e) => eprintln!("[LOCAL_CMD] error: {}", e),
-                }
-            })
-        {
-            eprintln!("[LOCAL_CMD] thread spawn failed: {}", e);
-        }
+    // Inline symbols are cleaned only outside bare URLs.
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0;
+    for m in url_re.find_iter(&s) {
+        out.push_str(&speakable_inline(&s[last..m.start()]));
+        out.push_str(m.as_str());
+        last = m.end();
     }
+    out.push_str(&speakable_inline(&s[last..]));
 
-    let clean = re.replace_all(text, "").to_string();
-    let space_re = regex::Regex::new(r"  +").unwrap();
-    space_re.replace_all(&clean.trim(), " ").to_string()
+    let space_re = regex::Regex::new(r"[ \t]+").unwrap();
+    let punct_re = regex::Regex::new(r"[ \t]+([，。！？、；：）])").unwrap();
+    let s = space_re.replace_all(&out, " ").to_string();
+    let s = punct_re.replace_all(&s, "$1").to_string();
+    s.trim().to_string()
 }
 
+fn speakable_inline(text: &str) -> String {
+    let pipe_edge_re = regex::Regex::new(r"(?m)^[ \t]*\||\|[ \t]*$").unwrap();
+    let pipe_re = regex::Regex::new(r"[ \t]*\|[ \t]*").unwrap();
+    let times_re = regex::Regex::new(r"(\d)[ \t]*\*[ \t]*(\d)").unwrap();
+    let emoji_re = regex::Regex::new(r"[\p{Extended_Pictographic}\u{FE0F}\u{200D}\u{20E3}\u{1F3FB}-\u{1F3FF}]").unwrap();
+
+    let s = pipe_edge_re.replace_all(text, "").to_string();
+    let s = pipe_re.replace_all(&s, "，").to_string();
+    let s = times_re.replace_all(&s, "${1}×${2}").to_string();
+    let s = s.replace('*', "").replace("~~", "").replace('_', " ");
+    emoji_re.replace_all(&s, "").to_string()
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edge_tts_prefers_override_then_venv_then_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let venv_bin = dir.path().join("edge-tts");
+        assert_eq!(pick_edge_tts_bin(None, &venv_bin), "edge-tts");
+        std::fs::write(&venv_bin, "").unwrap();
+        assert_eq!(pick_edge_tts_bin(None, &venv_bin), venv_bin.to_string_lossy());
+        assert_eq!(pick_edge_tts_bin(Some(" ".into()), &venv_bin), venv_bin.to_string_lossy());
+        assert_eq!(pick_edge_tts_bin(Some("/opt/edge-tts".into()), &venv_bin), "/opt/edge-tts");
+    }
+
+    #[test]
+    fn subagent_done_marker_is_never_shown_or_spoken() {
+        let reply = "子代理已经结束了。[SUBAGENT_DONE:deleg_ab12]";
+        assert_eq!(strip_cmd_tags(reply), "子代理已经结束了。");
+        assert_eq!(strip_all_cmd_tags(reply), "子代理已经结束了。");
+        let (sentences, rest) = split_sentences("好的。[SUBAGENT_DONE:deleg_ab12] 还有呢？");
+        assert!(rest.is_empty());
+        assert_eq!(speakable(&strip_all_cmd_tags(&sentences[1])), "还有呢？");
+    }
 
     #[test]
     fn bridge_session_keys_are_namespaced() {
@@ -1191,5 +1512,78 @@ mod tests {
             "",
         );
         assert_eq!(text, "hello world Please reply in English.");
+    }
+
+    #[test]
+    fn speakable_drops_markdown_symbols() {
+        assert_eq!(speakable("**好的**，已打开 `foo_bar`"), "好的，已打开 foo bar");
+        assert_eq!(speakable("- 买菜"), "买菜");
+        assert_eq!(speakable("2. 写周报"), "写周报");
+        assert_eq!(speakable("## 今天的安排"), "今天的安排");
+        assert_eq!(speakable("> 引用一句话"), "引用一句话");
+        assert_eq!(speakable("详见[官方文档](https://example.com/a_b)。"), "详见官方文档。");
+        assert_eq!(speakable("| 项目 | 状态 |"), "项目，状态");
+        assert_eq!(speakable("|---|:---:|"), "");
+        assert_eq!(speakable("搞定了🎉👍🏻"), "搞定了");
+        assert_eq!(speakable("```rust"), "");
+        assert_eq!(speakable("~~旧方案~~ 不用了"), "旧方案 不用了");
+    }
+
+    #[test]
+    fn speakable_keeps_plain_text_and_urls() {
+        let zh = "今天天气不错，我们出去走走吧。";
+        assert_eq!(speakable(zh), zh);
+        let url = "地址是 https://example.com/foo_bar?a=1*2";
+        assert_eq!(speakable(url), url);
+        assert_eq!(speakable("3*4 等于 12"), "3×4 等于 12");
+        assert_eq!(speakable("C++ 和 Rust"), "C++ 和 Rust");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_or_empty_tts_leaves_no_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pa-tts-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Fake edge-tts: touch the --write-media path (like the real client does
+        // before its handshake), then write `body` into it and exit with `code`.
+        let fake = |name: &str, body: &str, code: i32| {
+            let bin = dir.join(name);
+            std::fs::write(&bin, format!(
+                "#!/bin/sh\nwhile [ \"$1\" != \"--write-media\" ]; do shift; done\n: > \"$2\"\nprintf '{}' > \"$2\"\nexit {}\n",
+                body, code
+            )).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            bin
+        };
+        let out = dir.join("out.mp3");
+        let out = out.to_str().unwrap();
+
+        for (bin, expect) in [
+            (fake("fail.sh", "", 1), false),
+            (fake("empty.sh", "", 0), false),
+            (fake("ok.sh", "ID3", 0), true),
+        ] {
+            std::env::set_var("EDGE_TTS_BIN", &bin);
+            assert_eq!(generate_tts_to("hi", out, "en-US-AriaNeural", "+0%", "+0%"), expect, "{:?}", bin);
+            assert_eq!(Path::new(out).exists(), expect, "{:?}", bin);
+            let _ = std::fs::remove_file(out);
+        }
+
+        // Flaky edge-tts: first run fails (like a socket timeout), second succeeds.
+        let runs = dir.join("runs");
+        let flaky = dir.join("flaky.sh");
+        std::fs::write(&flaky, format!(
+            "#!/bin/sh\necho x >> \"{}\"\nwhile [ \"$1\" != \"--write-media\" ]; do shift; done\n: > \"$2\"\n[ $(wc -l < \"{}\") -ge 2 ] || exit 1\nprintf 'ID3' > \"$2\"\n",
+            runs.display(), runs.display()
+        )).unwrap();
+        std::fs::set_permissions(&flaky, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("EDGE_TTS_BIN", &flaky);
+        assert!(generate_tts_to("hi", out, "en-US-AriaNeural", "+0%", "+0%"));
+        assert!(Path::new(out).exists());
+        assert_eq!(std::fs::read_to_string(&runs).unwrap().lines().count(), 2);
+        let _ = std::fs::remove_file(out);
+        std::env::remove_var("EDGE_TTS_BIN");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -330,16 +330,33 @@ pub fn get_audio_level() -> f32 {
 
 /// Check recent audio with Silero VAD via Python STT server.
 /// Returns true if human speech is detected in the last ~1s of audio.
-fn check_silero_vad() -> bool {
+/// Infrastructure failures are treated as "no speech" here (fail-closed): the
+/// wake path must never start a session on an unverified signal.
+pub(crate) fn check_silero_vad() -> bool {
     // Read ~1s of recent mono samples (16kHz = 16000 samples)
     let samples = crate::voice::record::read_vad_samples(16000);
     if samples.len() < 3200 {
         // Less than 200ms of audio, not enough for VAD
         return false;
     }
+    check_silero_vad_samples(&samples, 16000).unwrap_or(false)
+}
+
+/// Check raw audio samples with Silero VAD. Works with any sample rate — the
+/// Python server handles the actual analysis; we just build a valid WAV.
+///
+/// Returns `None` when the check could not be performed at all (stt-server
+/// down / busy / timed out / bad response), so callers can decide their own
+/// failure policy instead of being forced into a silent `false`. Callers that
+/// already hold independent evidence of speech (e.g. sustained RMS) should
+/// fail-open on `None`; callers with no other evidence should fail-closed.
+pub(crate) fn check_silero_vad_samples(samples: &[i16], sample_rate: u32) -> Option<bool> {
+    if samples.len() < 3200 {
+        return Some(false);
+    }
 
     // Build WAV bytes
-    let sr: u32 = 16000;
+    let sr: u32 = sample_rate;
     let data_len = samples.len() * 2;
     let mut wav = Vec::with_capacity(44 + data_len);
     wav.extend_from_slice(b"RIFF");
@@ -355,16 +372,22 @@ fn check_silero_vad() -> bool {
     wav.extend_from_slice(&16u16.to_le_bytes());  // bits per sample
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&(data_len as u32).to_le_bytes());
-    for &s in &samples {
+    for &s in samples {
         wav.extend_from_slice(&s.to_le_bytes());
     }
 
+    // Never wait out a reload here: the barge-in gate cannot stall for it.
+    let _txn = crate::voice::stt::try_voice_txn()?;
+
+    // 800ms: this call blocks the conversation worker thread during the
+    // barge-in confirmation gate, so a slow stt-server must not stall the
+    // interrupt. Past the deadline the caller applies its own failure policy.
     let client = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_millis(800))
         .build()
     {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(_) => return None,
     };
 
     let part = match reqwest::blocking::multipart::Part::bytes(wav)
@@ -372,7 +395,7 @@ fn check_silero_vad() -> bool {
         .mime_str("audio/wav")
     {
         Ok(p) => p,
-        Err(_) => return false,
+        Err(_) => return None,
     };
 
     let form = reqwest::blocking::multipart::Form::new().part("file", part);
@@ -382,14 +405,13 @@ fn check_silero_vad() -> bool {
         .multipart(form)
         .send()
     {
-        Ok(resp) => {
-            if let Ok(v) = resp.json::<serde_json::Value>() {
-                v["has_speech"].as_bool().unwrap_or(false)
-            } else {
-                false
-            }
-        }
-        Err(_) => false,
+        // A response without a usable has_speech field is an infrastructure
+        // failure too, not a "no speech" verdict.
+        Ok(resp) => match resp.json::<serde_json::Value>() {
+            Ok(v) => v["has_speech"].as_bool(),
+            Err(_) => None,
+        },
+        Err(_) => None,
     }
 }
 
@@ -401,6 +423,7 @@ pub fn start_continuous_conversation(
     speech_rms_threshold: Option<f32>,
     single_shot: Option<bool>,
     barge_in_rms_threshold: Option<f32>,
+    wake_word_threshold: Option<f32>,
     barge_in_enabled: Option<bool>,
 ) -> Result<(), String> {
     crate::voice::conversation::start_conversation(
@@ -410,12 +433,18 @@ pub fn start_continuous_conversation(
         speech_rms_threshold,
         single_shot,
         barge_in_rms_threshold,
+        wake_word_threshold,
         barge_in_enabled,
     )
 }
 
 #[tauri::command]
 pub fn stop_continuous_conversation() -> Result<(), String> {
+    // Stopping the conversation must also silence whatever is already queued —
+    // otherwise the assistant keeps reading a long reply after the user has
+    // explicitly ended the session. Safe for single-shot too: that path stops
+    // before send_message allocates its turn, so the generation bump is a no-op.
+    crate::commands::chat::stop_audio_queue();
     crate::voice::conversation::stop_conversation();
     Ok(())
 }
@@ -427,8 +456,8 @@ pub fn notify_conversation_tts_started() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn notify_conversation_tts_done() -> Result<(), String> {
-    crate::voice::conversation::on_tts_done();
+pub fn notify_conversation_tts_done(generation: u64) -> Result<(), String> {
+    crate::voice::conversation::on_tts_done(generation);
     Ok(())
 }
 
@@ -438,8 +467,9 @@ pub fn is_continuous_conversation_active() -> bool {
 }
 
 #[tauri::command]
-pub fn start_wake_word_listening(app: AppHandle, threshold: Option<f32>, speaker_name: Option<String>) -> Result<(), String> {
-    crate::voice::sherpa_wake::start_wake_listener(app, threshold.unwrap_or(0.65), speaker_name)
+pub async fn start_wake_word_listening(app: AppHandle, threshold: Option<f32>, speaker_name: Option<String>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || crate::voice::sherpa_wake::start_wake_listener(app, threshold.unwrap_or(0.65), speaker_name))
+        .await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -550,20 +580,25 @@ pub async fn stop_enroll_recording(
 }
 
 #[tauri::command]
-pub fn enroll_speaker(
+pub async fn enroll_speaker(
     name: String,
     audio_path: String,
 ) -> Result<crate::voice::sherpa_wake::EnrollResult, String> {
-    crate::voice::sherpa_wake::enroll_speaker(&name, &audio_path)
+    // Off the main thread: the request may wait out a voice-engine reload.
+    tokio::task::spawn_blocking(move || crate::voice::sherpa_wake::enroll_speaker(&name, &audio_path))
+        .await
+        .map_err(|e| format!("enroll task failed: {e}"))?
 }
 
 
 #[tauri::command]
-pub fn train_speaker(
+pub async fn train_speaker(
     name: String,
     audio_path: String,
 ) -> Result<crate::voice::sherpa_wake::EnrollResult, String> {
-    crate::voice::sherpa_wake::train_speaker(&name, &audio_path)
+    tokio::task::spawn_blocking(move || crate::voice::sherpa_wake::train_speaker(&name, &audio_path))
+        .await
+        .map_err(|e| format!("train task failed: {e}"))?
 }
 
 
@@ -573,11 +608,23 @@ pub fn get_wake_variant_count(name: String) -> usize {
 }
 
 #[tauri::command]
-pub fn verify_speaker(
+pub fn get_wake_words(name: String) -> Vec<String> {
+    crate::voice::sherpa_wake::get_wake_words(&name)
+}
+
+#[tauri::command]
+pub fn remove_wake_word(name: String, word: String) -> Vec<String> {
+    crate::voice::sherpa_wake::remove_wake_word(&name, &word)
+}
+
+#[tauri::command]
+pub async fn verify_speaker(
     audio_path: String,
     threshold: Option<f32>,
 ) -> Result<crate::voice::sherpa_wake::VerifyResult, String> {
-    crate::voice::sherpa_wake::verify_speaker(&audio_path, threshold)
+    tokio::task::spawn_blocking(move || crate::voice::sherpa_wake::verify_speaker(&audio_path, threshold))
+        .await
+        .map_err(|e| format!("verify task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -595,4 +642,26 @@ pub fn remove_speaker(name: String) -> Result<(), String> {
 #[tauri::command]
 pub fn consume_wake_probe(_path: String) -> Result<(), String> {
     Ok(())
+}
+#[tauri::command]
+pub fn acknowledge_conversation_ready(id: u64, played: bool, ready_delay_ms: Option<u64>) {
+    crate::voice::conversation::acknowledge_ready(id, played, ready_delay_ms);
+}
+
+#[tauri::command]
+pub async fn wake_model_status() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(|| crate::voice::sherpa_wake::kws_model_action(false))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn install_wake_model() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(|| crate::voice::sherpa_wake::kws_model_action(true))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn test_wake_word(audio_path: String, config: crate::commands::config::AppConfig) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || crate::voice::sherpa_wake::test_wake_audio(&audio_path, &config))
+        .await.map_err(|e| e.to_string())?
 }

@@ -4,6 +4,9 @@ type LangKey = 'zh' | 'en' | 'ja' | 'ko' | 'fr' | 'de' | 'es';
 
 interface Strings {
   hint: string;
+  hintWake: string;
+  talk: string;
+  talkDouble: string;
   inputPlaceholder: string;
   inputBusy: string;
   settings: string;
@@ -58,7 +61,10 @@ interface Strings {
 
 const translations: Record<string, Strings> = {
   zh: {
-    hint: '按下 {key} 说话，再按一次结束，或在下方输入文字',
+    hint: '{talk}',
+    hintWake: '说出唤醒词唤醒我，或{talk}',
+    talk: '按下 {key} 说话，再按一次结束',
+    talkDouble: '双击 {key} 说话，再双击结束',
     inputPlaceholder: '输入消息…',
     inputBusy: '处理中…',
     settings: '设置',
@@ -111,7 +117,10 @@ const translations: Record<string, Strings> = {
     animAvatar: '动画头像（思考/说话）',
   },
   en: {
-    hint: 'Press {key} to talk, press again to stop, or type below',
+    hint: '{talk}',
+    hintWake: 'Say the wake word to wake me. {talk}',
+    talk: 'Press {key} to talk, press again to stop',
+    talkDouble: 'Double-click {key} to talk, double-click again to stop',
     inputPlaceholder: 'Type a message…',
     inputBusy: 'Processing…',
     settings: 'Settings',
@@ -164,7 +173,10 @@ const translations: Record<string, Strings> = {
     animAvatar: 'Animated Avatar (thinking/speaking)',
   },
   ja: {
-    hint: '{key}キーで話す、もう一度で終了、または下に入力',
+    hint: '{talk}',
+    hintWake: 'ウェイクワードで起動、または{talk}',
+    talk: '{key}キーで話す、もう一度で終了',
+    talkDouble: '{key}キーをダブルクリックで話す、もう一度ダブルクリックで終了',
     inputPlaceholder: 'メッセージを入力…',
     inputBusy: '処理中…',
     settings: '設定',
@@ -217,7 +229,10 @@ const translations: Record<string, Strings> = {
     animAvatar: 'アニメーションアバター（思考/発話）',
   },
   ko: {
-    hint: '{key} 키를 눌러 말하기, 다시 눌러 끝내기, 또는 아래에 입력',
+    hint: '{talk}',
+    hintWake: '호출어로 깨우기, 또는 {talk}',
+    talk: '{key} 키를 눌러 말하기, 다시 눌러 끝내기',
+    talkDouble: '{key} 키를 더블클릭해 말하기, 다시 더블클릭해 끝내기',
     inputPlaceholder: '메시지 입력…',
     inputBusy: '처리 중…',
     settings: '설정',
@@ -269,6 +284,82 @@ const translations: Record<string, Strings> = {
     voiceOutput: '음성 출력',
     animAvatar: '애니메이션 아바타 (생각/말하기)',
   },
+  fr: {
+    hint: '{talk}',
+    hintWake: 'Dites le mot d’activation pour me réveiller. {talk}',
+    talk: 'Appuyez sur {key} pour parler, puis à nouveau pour arrêter',
+    talkDouble: 'Double-cliquez sur {key} pour parler, puis à nouveau pour arrêter',
+    inputPlaceholder: 'Saisissez un message…', inputBusy: 'Traitement…', settings: 'Réglages',
+    general: 'Général', voice: 'Voix', apiUrl: 'URL API', volume: 'Volume', skin: 'Thème',
+    primaryLang: 'Principale', aux1Lang: 'Auxiliaire 1', aux2Lang: 'Auxiliaire 2',
+    audioFormat: 'Format audio', fixedLang: 'Verrouiller', avatar: 'Avatar',
+    clearChat: 'Effacer la conversation', mute: 'Muet', unmute: 'Réactiver', exit: 'Quitter',
+    close: 'Fermer', save: 'Enregistrer', cancel: 'Annuler',
+    autoDetectHint: 'Détecter la langue et choisir la voix automatiquement',
+    connection: 'Connexion', appearance: 'Apparence', defaultOption: 'Par défaut',
+    upload: 'Importer', clickToUpload: 'Cliquer pour importer un avatar',
+    supportedFormats: 'JPG, PNG, GIF et WebP', removeAvatar: 'Supprimer l’avatar',
+    defaultAvatarHint: 'Le personnage par défaut sera utilisé', none: 'Aucune',
+    wavLossless: 'WAV (sans perte)', mp3Compact: 'MP3 (compact)', ariaSettings: 'Réglages',
+    ariaCloseSettings: 'Fermer les réglages', ariaAvatar: 'Avatar', ariaVolume: 'Volume',
+    breakConfirmTitle: 'Une conversation est en cours. L’interrompre ?',
+    breakConfirmBreak: 'Interrompre', breakConfirmContinue: 'Continuer à attendre',
+    language: 'Langue', uiLang: 'Langue de l’interface', uiLangAuto: 'Automatique',
+    hotkey: 'Raccourci', recordKey: 'Touche d’enregistrement',
+    capturingKey: 'Appuyez sur une touche…', applyingKey: 'Application…',
+    doubleClickRecord: 'Double-clic pour enregistrer', voiceOutput: 'Sortie vocale',
+    animAvatar: 'Avatar animé (réflexion/parole)',
+  },
+  de: {
+    hint: '{talk}',
+    hintWake: 'Sag das Aktivierungswort, um mich zu wecken. {talk}',
+    talk: '{key} zum Sprechen drücken, erneut zum Beenden',
+    talkDouble: '{key} zum Sprechen doppelt drücken, erneut doppelt zum Beenden',
+    inputPlaceholder: 'Nachricht eingeben…', inputBusy: 'Verarbeitung…', settings: 'Einstellungen',
+    general: 'Allgemein', voice: 'Stimme', apiUrl: 'API-URL', volume: 'Lautstärke', skin: 'Design',
+    primaryLang: 'Hauptstimme', aux1Lang: 'Zusatzstimme 1', aux2Lang: 'Zusatzstimme 2',
+    audioFormat: 'Audioformat', fixedLang: 'Festlegen', avatar: 'Avatar',
+    clearChat: 'Gespräch löschen', mute: 'Stumm', unmute: 'Ton an', exit: 'Beenden',
+    close: 'Schließen', save: 'Speichern', cancel: 'Abbrechen',
+    autoDetectHint: 'Antwortsprache erkennen und passende Stimme wählen',
+    connection: 'Verbindung', appearance: 'Darstellung', defaultOption: 'Standard',
+    upload: 'Hochladen', clickToUpload: 'Avatar hochladen',
+    supportedFormats: 'JPG, PNG, GIF und WebP', removeAvatar: 'Avatar entfernen',
+    defaultAvatarHint: 'Standardfigur wird angezeigt', none: 'Keine',
+    wavLossless: 'WAV (verlustfrei)', mp3Compact: 'MP3 (kompakt)', ariaSettings: 'Einstellungen',
+    ariaCloseSettings: 'Einstellungen schließen', ariaAvatar: 'Avatar', ariaVolume: 'Lautstärke',
+    breakConfirmTitle: 'Ein Gespräch läuft noch. Unterbrechen?',
+    breakConfirmBreak: 'Unterbrechen', breakConfirmContinue: 'Weiter warten',
+    language: 'Sprache', uiLang: 'Oberflächensprache', uiLangAuto: 'Automatisch',
+    hotkey: 'Hotkey', recordKey: 'Aufnahmetaste', capturingKey: 'Taste drücken…',
+    applyingKey: 'Wird angewendet…', doubleClickRecord: 'Doppelklick-Aufnahme',
+    voiceOutput: 'Sprachausgabe', animAvatar: 'Animierter Avatar (Denken/Sprechen)',
+  },
+  es: {
+    hint: '{talk}',
+    hintWake: 'Di la palabra de activación para despertarme. {talk}',
+    talk: 'Pulsa {key} para hablar y otra vez para terminar',
+    talkDouble: 'Haz doble clic en {key} para hablar y otra vez para terminar',
+    inputPlaceholder: 'Escribe un mensaje…', inputBusy: 'Procesando…', settings: 'Ajustes',
+    general: 'General', voice: 'Voz', apiUrl: 'URL de API', volume: 'Volumen', skin: 'Tema',
+    primaryLang: 'Principal', aux1Lang: 'Auxiliar 1', aux2Lang: 'Auxiliar 2',
+    audioFormat: 'Formato de audio', fixedLang: 'Fijar', avatar: 'Avatar',
+    clearChat: 'Borrar conversación', mute: 'Silenciar', unmute: 'Activar sonido', exit: 'Salir',
+    close: 'Cerrar', save: 'Guardar', cancel: 'Cancelar',
+    autoDetectHint: 'Detectar el idioma y elegir la voz automáticamente',
+    connection: 'Conexión', appearance: 'Apariencia', defaultOption: 'Predeterminado',
+    upload: 'Subir', clickToUpload: 'Haz clic para subir un avatar',
+    supportedFormats: 'JPG, PNG, GIF y WebP', removeAvatar: 'Eliminar avatar',
+    defaultAvatarHint: 'Se mostrará el personaje predeterminado', none: 'Ninguna',
+    wavLossless: 'WAV (sin pérdida)', mp3Compact: 'MP3 (compacto)', ariaSettings: 'Ajustes',
+    ariaCloseSettings: 'Cerrar ajustes', ariaAvatar: 'Avatar', ariaVolume: 'Volumen',
+    breakConfirmTitle: 'Hay una conversación en curso. ¿Interrumpirla?',
+    breakConfirmBreak: 'Interrumpir', breakConfirmContinue: 'Seguir esperando',
+    language: 'Idioma', uiLang: 'Idioma de la interfaz', uiLangAuto: 'Automático',
+    hotkey: 'Tecla rápida', recordKey: 'Tecla de grabación', capturingKey: 'Pulsa una tecla…',
+    applyingKey: 'Aplicando…', doubleClickRecord: 'Doble clic para grabar',
+    voiceOutput: 'Salida de voz', animAvatar: 'Avatar animado (pensando/hablando)',
+  },
 };
 
 // Fallback to zh for unsupported languages
@@ -295,6 +386,16 @@ export function resolveLang(uiLang: string, voice: string): LangKey {
 export function tLang(lang: string): Strings {
   const lk = (lang && lang in TRANSLATIONS) ? lang as LangKey : 'en';
   return TRANSLATIONS[lk] ?? TRANSLATIONS.zh;
+}
+
+/** Idle dialog hint, matching how the user can currently start talking. */
+export function idleHint(s: { ui_lang: string; hotkey_name: string; double_click_to_record: boolean; wake_word_enabled: boolean; wake_phrase: string }): string {
+  const tr = tLang(s.ui_lang);
+  // Mention the wake word without revealing it.
+  const template = s.wake_word_enabled && s.wake_phrase.trim() ? tr.hintWake : tr.hint;
+  return template
+    .replace('{talk}', s.double_click_to_record ? tr.talkDouble : tr.talk)
+    .replace('{key}', () => s.hotkey_name);
 }
 
 /** Conversation labels by explicit lang key. */
@@ -342,6 +443,14 @@ export interface ConversationLabels {
   speakerRejectedToast: string;
   waitingForWakeCaption: string;
   verifyingSpeakerCaption: string;
+  wakeNeedsPhrase: string;
+  wakeNeedsModel: string;
+  wakeStartFailed: (msg: string) => string;
+  // ── Status strip (replaces the chat input row) ──
+  statusSubagent: (running: number) => string;
+  statusComputer: string;
+  statusSpeech: string;
+  statusSpeechHint: string;
 }
 
 function fmtSeconds(ms: number): string {
@@ -384,6 +493,13 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     speakerRejectedToast: '唤醒词不匹配',
     waitingForWakeCaption: '等待唤醒词…',
     verifyingSpeakerCaption: '验证唤醒词中…',
+    wakeNeedsPhrase: '⚠ 唤醒未启动：请在设置 → 唤醒词 中填写目标唤醒词',
+    wakeNeedsModel: '⚠ 唤醒未启动：请在设置 → 唤醒词 中下载离线唤醒模型',
+    wakeStartFailed: (m) => `⚠ 唤醒启动失败：${m}`,
+    statusSubagent: (n) => (n > 0 ? `子代理 · 后台 ${n} 个` : '子代理'),
+    statusComputer: '电脑工具',
+    statusSpeech: '语音侦测',
+    statusSpeechHint: '侦测到你说话时闪红光',
   },
   en: {
     continuousMode: 'Continuous Conversation',
@@ -420,6 +536,13 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     speakerRejectedToast: 'Wake word not matched',
     waitingForWakeCaption: 'Waiting for wake word…',
     verifyingSpeakerCaption: 'Verifying wake word…',
+    wakeNeedsPhrase: '⚠ Wake word off: set a wake phrase in Settings → Wake word',
+    wakeNeedsModel: '⚠ Wake word off: download the offline wake model in Settings → Wake word',
+    wakeStartFailed: (m) => `⚠ Wake word failed to start: ${m}`,
+    statusSubagent: (n) => (n > 0 ? `Subagents · ${n} in background` : 'Subagents'),
+    statusComputer: 'Computer tools',
+    statusSpeech: 'Speech detection',
+    statusSpeechHint: 'Flashes red when it hears you speak',
   },
   ja: {
     continuousMode: '連続会話モード',
@@ -456,6 +579,13 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     speakerRejectedToast: 'ウェイクワード不一致',
     waitingForWakeCaption: 'ウェイクワード待機中…',
     verifyingSpeakerCaption: 'ウェイクワード照合中…',
+    wakeNeedsPhrase: '⚠ ウェイクワード停止中：設定 → ウェイクワード でウェイクワードを入力してください',
+    wakeNeedsModel: '⚠ ウェイクワード停止中：設定 → ウェイクワード でオフラインモデルをダウンロードしてください',
+    wakeStartFailed: (m) => `⚠ ウェイクワードの起動に失敗しました：${m}`,
+    statusSubagent: (n) => (n > 0 ? `サブエージェント · バックグラウンド ${n} 件` : 'サブエージェント'),
+    statusComputer: 'PC ツール',
+    statusSpeech: '音声検出',
+    statusSpeechHint: '話し声を検出すると赤く点滅します',
   },
   ko: {
     continuousMode: '연속 대화 모드',
@@ -492,6 +622,13 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     speakerRejectedToast: '인식되지 않은 화자',
     waitingForWakeCaption: '웨이크 워드 대기 중…',
     verifyingSpeakerCaption: '화자 인증 중…',
+    wakeNeedsPhrase: '⚠ 웨이크 워드 중지됨: 설정 → 웨이크 워드에서 웨이크 워드를 입력하세요',
+    wakeNeedsModel: '⚠ 웨이크 워드 중지됨: 설정 → 웨이크 워드에서 오프라인 모델을 내려받으세요',
+    wakeStartFailed: (m) => `⚠ 웨이크 워드 시작 실패: ${m}`,
+    statusSubagent: (n) => (n > 0 ? `하위 에이전트 · 백그라운드 ${n}개` : '하위 에이전트'),
+    statusComputer: '컴퓨터 도구',
+    statusSpeech: '음성 감지',
+    statusSpeechHint: '말소리를 감지하면 빨갛게 깜박입니다',
   },
   fr: {
     continuousMode: 'Conversation continue',
@@ -528,6 +665,13 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     speakerRejectedToast: 'Locuteur non reconnu',
     waitingForWakeCaption: 'En attente du mot de réveil…',
     verifyingSpeakerCaption: 'Vérification du locuteur…',
+    wakeNeedsPhrase: '⚠ Mot de réveil inactif : renseignez un mot de réveil dans Réglages → Mot de réveil',
+    wakeNeedsModel: '⚠ Mot de réveil inactif : téléchargez le modèle hors ligne dans Réglages → Mot de réveil',
+    wakeStartFailed: (m) => `⚠ Échec du démarrage du mot de réveil : ${m}`,
+    statusSubagent: (n) => (n > 0 ? `Sous-agents · ${n} en arrière-plan` : 'Sous-agents'),
+    statusComputer: 'Outils ordinateur',
+    statusSpeech: 'Détection de la voix',
+    statusSpeechHint: 'Clignote en rouge quand je vous entends parler',
   },
   de: {
     continuousMode: 'Fortlaufendes Gespräch',
@@ -564,6 +708,13 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     speakerRejectedToast: 'Sprecher nicht erkannt',
     waitingForWakeCaption: 'Warte auf Aktivierungswort…',
     verifyingSpeakerCaption: 'Verifiziere Sprecher…',
+    wakeNeedsPhrase: '⚠ Aktivierungswort inaktiv: Aktivierungswort unter Einstellungen → Aktivierungswort eintragen',
+    wakeNeedsModel: '⚠ Aktivierungswort inaktiv: Offline-Modell unter Einstellungen → Aktivierungswort herunterladen',
+    wakeStartFailed: (m) => `⚠ Aktivierungswort konnte nicht gestartet werden: ${m}`,
+    statusSubagent: (n) => (n > 0 ? `Subagenten · ${n} im Hintergrund` : 'Subagenten'),
+    statusComputer: 'Computer-Tools',
+    statusSpeech: 'Spracherkennung',
+    statusSpeechHint: 'Blinkt rot, wenn ich dich sprechen höre',
   },
   es: {
     continuousMode: 'Conversación continua',
@@ -600,6 +751,13 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     speakerRejectedToast: 'Hablante no reconocido',
     waitingForWakeCaption: 'Esperando palabra de activación…',
     verifyingSpeakerCaption: 'Verificando hablante…',
+    wakeNeedsPhrase: '⚠ Palabra de activación inactiva: escribe una palabra de activación en Ajustes → Palabra de activación',
+    wakeNeedsModel: '⚠ Palabra de activación inactiva: descarga el modelo sin conexión en Ajustes → Palabra de activación',
+    wakeStartFailed: (m) => `⚠ Error al iniciar la palabra de activación: ${m}`,
+    statusSubagent: (n) => (n > 0 ? `Subagentes · ${n} en segundo plano` : 'Subagentes'),
+    statusComputer: 'Herramientas del equipo',
+    statusSpeech: 'Detección de voz',
+    statusSpeechHint: 'Parpadea en rojo cuando te oye hablar',
   },
 };
 
@@ -608,14 +766,21 @@ export function convLabels(voice: string): ConversationLabels {
 }
 
 // ── Status TTS phrases (spoken; intentionally short and natural) ──
-export const STATUS_PHRASES: Record<LangKey, { thinking: string; querying: (n: string) => string; executing: string; runningCommand: string }> = {
-  zh: { thinking: '正在思考',  querying: (n) => `查询 ${n}`,            executing: '正在执行操作',    runningCommand: '运行命令' },
-  en: { thinking: 'Thinking', querying: (n) => `Calling ${n}`,         executing: 'Working on it',  runningCommand: 'Running command' },
-  ja: { thinking: '考え中',    querying: (n) => `${n} を呼び出し中`,   executing: '実行中',          runningCommand: 'コマンド実行中' },
-  ko: { thinking: '생각 중',   querying: (n) => `${n} 호출 중`,         executing: '실행 중',         runningCommand: '명령 실행 중' },
-  fr: { thinking: 'Réflexion', querying: (n) => `Appel de ${n}`,        executing: 'En cours',       runningCommand: 'Exécution de la commande' },
-  de: { thinking: 'Denke nach', querying: (n) => `${n} wird aufgerufen`, executing: 'In Arbeit',     runningCommand: 'Befehl wird ausgeführt' },
-  es: { thinking: 'Pensando',  querying: (n) => `Llamando a ${n}`,      executing: 'Procesando',     runningCommand: 'Ejecutando comando' },
+export const STATUS_PHRASES: Record<LangKey, { thinking: string; querying: (n: string) => string; executing: string; compacting: string }> = {
+  zh: { thinking: '正在思考',  querying: (n) => `查询 ${n}`,            executing: '正在执行操作',
+        compacting: '我先整理一下之前的对话，稍等' },
+  en: { thinking: 'Thinking', querying: (n) => `Calling ${n}`,         executing: 'Working on it',
+        compacting: 'Let me tidy up our earlier conversation first, one moment' },
+  ja: { thinking: '考え中',    querying: (n) => `${n} を呼び出し中`,   executing: '実行中',
+        compacting: 'これまでの会話を整理しますので、少々お待ちください' },
+  ko: { thinking: '생각 중',   querying: (n) => `${n} 호출 중`,         executing: '실행 중',
+        compacting: '이전 대화를 먼저 정리할게요, 잠시만요' },
+  fr: { thinking: 'Réflexion', querying: (n) => `Appel de ${n}`,        executing: 'En cours',
+        compacting: 'Je résume d’abord notre conversation, un instant' },
+  de: { thinking: 'Denke nach', querying: (n) => `${n} wird aufgerufen`, executing: 'In Arbeit',
+        compacting: 'Ich fasse kurz unser bisheriges Gespräch zusammen, einen Moment' },
+  es: { thinking: 'Pensando',  querying: (n) => `Llamando a ${n}`,      executing: 'Procesando',
+        compacting: 'Primero ordeno nuestra conversación anterior, un momento' },
 };
 
 /** Detect dominant language of a short text via Unicode ranges. */
