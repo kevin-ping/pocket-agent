@@ -65,11 +65,13 @@ The installed copy does not follow the repo. After the skill changes in the repo
 - The system prompt's skill index cuts descriptions to 60 characters, so the skill's `description` is kept under that.
 - Hermes builds the skill index once per session. Restart the gateway or wait for the next day's session (`<agent>-YYYY-MM-DD`) before Hermes sees a new or renamed skill. Changes to the body of the installed copy take effect on the next `skill_view`.
 
-## Reasoning on `/v1/runs` (local patch)
+## Reasoning and status on `/v1/runs` (local patch)
 
-PA's reasoning panel needs the model's reasoning in the stream. `/v1/chat/completions` sends it (`delta.reasoning_content`), but `/v1/runs`, which PA uses for local desktop turns, registers no `reasoning_callback`, so the run stream carries none. Do not switch PA to chat completions to get it back: that endpoint has no stop command, and after PA disconnects Hermes logs `SSE client disconnected; interrupted agent task` but keeps running the turn (seen 2026-11-02: one turn kept driving Chrome for over 20 minutes).
+PA's reasoning panel needs the model's reasoning in the stream, and its status panel needs Hermes' lifecycle status (e.g. context compaction). `/v1/chat/completions` sends it (`delta.reasoning_content`), but `/v1/runs`, which PA uses for local desktop turns, registers no `reasoning_callback`, so the run stream carries none. Do not switch PA to chat completions to get it back: that endpoint has no stop command, and after PA disconnects Hermes logs `SSE client disconnected; interrupted agent task` but keeps running the turn (seen 2026-11-02: one turn kept driving Chrome for over 20 minutes).
 
-Until Hermes ships this upstream, patch `gateway/platforms/api_server_runs.py` in the Hermes checkout (`~/.hermes/hermes-agent`). Add the callback next to `_text_cb` in `_execute_run`, and pass it to both turn paths:
+`/v1/runs` also registers no `status_callback`, so the compaction notices chat completions sends as `hermes.status` never reach PA, and a turn that starts with a minutes-long compaction just looks stuck.
+
+Until Hermes ships this upstream, patch `gateway/platforms/api_server_runs.py` in the Hermes checkout (`~/.hermes/hermes-agent`). Add both callbacks next to `_text_cb` in `_execute_run`, and pass them to both turn paths:
 
 ```diff
      def _text_cb(delta: Optional[str]) -> None:
@@ -81,19 +83,34 @@ Until Hermes ships this upstream, patch `gateway/platforms/api_server_runs.py` i
 +            return
 +        with suppress(Exception):
 +            loop.call_soon_threadsafe(run.put_event, _run_event(run_id, "reasoning.delta", delta=text))
++
++    def _status_cb(kind, message=None) -> None:
++        # Lifecycle status (compression, provider wait, fallback) as ``hermes.status``,
++        # the same event chat completions sends.
++        if run_id not in self._run_streams:
++            return
++        text = _redact_api_error_text(message if message is not None else kind or "").strip()
++        if not text:
++            return
++        with suppress(Exception):
++            loop.call_soon_threadsafe(run.put_event, _run_event(run_id, "hermes.status", kind=str(kind), text=text))
 
                  result, usage = await observe_api_turn(
 -                    run.admission, stream_delta_callback=_text_cb,
+-                    tool_start_callback=_tool_start, tool_complete_callback=_tool_complete)
 +                    run.admission, stream_delta_callback=_text_cb, reasoning_callback=_reasoning_cb,
-                     tool_start_callback=_tool_start, tool_complete_callback=_tool_complete)
++                    status_callback=_status_cb, tool_start_callback=_tool_start, tool_complete_callback=_tool_complete)
 
                  agent = self._create_agent(
                      stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
 -                    interim_assistant_callback=_interim_cb, **run.agent_kwargs)
-+                    interim_assistant_callback=_interim_cb, reasoning_callback=_reasoning_cb, **run.agent_kwargs)
++                    interim_assistant_callback=_interim_cb, reasoning_callback=_reasoning_cb,
++                    status_callback=_status_cb, **run.agent_kwargs)
 ```
 
-Both paths already accept the callback: `observe_api_turn` lists `reasoning_callback` in `_OBSERVER_KEYS` (`gateway/session_api_turn.py`), and `_create_agent` takes it as a keyword. PA reads each event as `{"event": "reasoning.delta", "delta": "<text>"}` and appends the chunks as they are (`src-tauri/src/api/runs.rs`); without the patch PA simply shows no reasoning. The panel also needs **Show reasoning** on in Settings → General.
+Both paths already accept the callbacks: `observe_api_turn` lists `reasoning_callback` and `status_callback` in `_OBSERVER_KEYS` (`gateway/session_api_turn.py`), and `_create_agent` takes them as keywords. `_redact_api_error_text` is already bound at the top of `_execute_run`. PA reads each event as `{"event": "reasoning.delta", "delta": "<text>"}` and appends the chunks as they are (`src-tauri/src/api/runs.rs`); without the patch PA simply shows no reasoning. The panel also needs **Show reasoning** on in Settings → General.
+
+Status arrives as `{"event": "hermes.status", "kind": "...", "text": "..."}`. PA only acts on compaction (`src-tauri/src/api/runs.rs` `compaction_status`): when it starts, the status panel shows that PA is tidying up the earlier conversation and says so once; `kind: "compacted"` removes the line. Other statuses are ignored, and without the patch nothing changes.
 
 - Restart the gateway after patching (`launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway-<profile>`), and patch each machine's checkout separately.
 - A Hermes update stashes local changes (`updates.non_interactive_local_changes: stash`), which drops the patch. After an update, check with `git -C ~/.hermes/hermes-agent diff --stat` and apply it again.

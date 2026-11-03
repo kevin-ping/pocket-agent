@@ -20,6 +20,8 @@ pub enum StreamEvent {
     Reasoning(String),
     /// Start of a new tool call
     ToolCallStart { id: String, name: String, preview: String },
+    /// Hermes is compacting the session context: true while it runs, false once done
+    Compaction(bool),
 }
 
 impl HermesClient {

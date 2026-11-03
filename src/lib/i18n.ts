@@ -766,14 +766,21 @@ export function convLabels(voice: string): ConversationLabels {
 }
 
 // ── Status TTS phrases (spoken; intentionally short and natural) ──
-export const STATUS_PHRASES: Record<LangKey, { thinking: string; querying: (n: string) => string; executing: string }> = {
-  zh: { thinking: '正在思考',  querying: (n) => `查询 ${n}`,            executing: '正在执行操作' },
-  en: { thinking: 'Thinking', querying: (n) => `Calling ${n}`,         executing: 'Working on it' },
-  ja: { thinking: '考え中',    querying: (n) => `${n} を呼び出し中`,   executing: '実行中' },
-  ko: { thinking: '생각 중',   querying: (n) => `${n} 호출 중`,         executing: '실행 중' },
-  fr: { thinking: 'Réflexion', querying: (n) => `Appel de ${n}`,        executing: 'En cours' },
-  de: { thinking: 'Denke nach', querying: (n) => `${n} wird aufgerufen`, executing: 'In Arbeit' },
-  es: { thinking: 'Pensando',  querying: (n) => `Llamando a ${n}`,      executing: 'Procesando' },
+export const STATUS_PHRASES: Record<LangKey, { thinking: string; querying: (n: string) => string; executing: string; compacting: string }> = {
+  zh: { thinking: '正在思考',  querying: (n) => `查询 ${n}`,            executing: '正在执行操作',
+        compacting: '我先整理一下之前的对话，稍等' },
+  en: { thinking: 'Thinking', querying: (n) => `Calling ${n}`,         executing: 'Working on it',
+        compacting: 'Let me tidy up our earlier conversation first, one moment' },
+  ja: { thinking: '考え中',    querying: (n) => `${n} を呼び出し中`,   executing: '実行中',
+        compacting: 'これまでの会話を整理しますので、少々お待ちください' },
+  ko: { thinking: '생각 중',   querying: (n) => `${n} 호출 중`,         executing: '실행 중',
+        compacting: '이전 대화를 먼저 정리할게요, 잠시만요' },
+  fr: { thinking: 'Réflexion', querying: (n) => `Appel de ${n}`,        executing: 'En cours',
+        compacting: 'Je résume d’abord notre conversation, un instant' },
+  de: { thinking: 'Denke nach', querying: (n) => `${n} wird aufgerufen`, executing: 'In Arbeit',
+        compacting: 'Ich fasse kurz unser bisheriges Gespräch zusammen, einen Moment' },
+  es: { thinking: 'Pensando',  querying: (n) => `Llamando a ${n}`,      executing: 'Procesando',
+        compacting: 'Primero ordeno nuestra conversación anterior, un momento' },
 };
 
 /** Detect dominant language of a short text via Unicode ranges. */

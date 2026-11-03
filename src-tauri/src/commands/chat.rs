@@ -911,6 +911,11 @@ async fn run_hermes_turn(
                         "preview": preview
                     }).to_string());
                 }
+                // Not model output: leaves received_data alone so the retry rule is unchanged.
+                Ok(StreamEvent::Compaction(active)) => {
+                    eprintln!("[SSE] hermes compaction {}", if active { "running" } else { "done" });
+                    let _ = app.emit(&evp("compacting"), active);
+                }
                 Err(e) => {
                     if !received_data && attempt < max_retries {
                         eprintln!("[SSE] no data received, will retry");

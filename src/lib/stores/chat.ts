@@ -255,6 +255,12 @@ function createChatStore() {
       update((s) => (s.reasoningText === '' ? s : { ...s, reasoningText: '' }));
     },
 
+    /** Remove one step, e.g. the compaction notice once Hermes has finished compacting. */
+    removeThinkingStep: (step: string) =>
+      update((s) => (s.thinkingSteps.includes(step)
+        ? { ...s, thinkingSteps: s.thinkingSteps.filter((item) => item !== step) }
+        : s)),
+
     /** Clear all thinking steps — called when final text arrives */
     clearThinkingSteps: () =>
       update((s) => ({ ...s, thinkingSteps: [] })),

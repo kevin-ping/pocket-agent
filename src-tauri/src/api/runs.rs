@@ -248,6 +248,14 @@ pub async fn chat_stream(
                             return Ok(());
                         }
                     }
+                    // Lifecycle status (local Hermes patch, see HERMES.md); only compaction is shown.
+                    "hermes.status" => {
+                        if let Some(active) = compaction_status(&value) {
+                            if tx.send(Ok(StreamEvent::Compaction(active))).await.is_err() {
+                                return Ok(());
+                            }
+                        }
+                    }
                     "approval.request" => {
                         let request_id = value["request_id"]
                             .as_str()
@@ -350,6 +358,18 @@ fn reasoning_text(value: &Value) -> Option<String> {
         .filter(|s| !s.trim().is_empty())
         .map(String::from)
 }
+/// Some(true) while Hermes compacts the context, Some(false) when it is done, None for
+/// any other status. Matches Hermes' status lines in agent/conversation_compression.py;
+/// warnings (e.g. a failed summary) are not progress.
+fn compaction_status(value: &Value) -> Option<bool> {
+    match value["kind"].as_str() {
+        Some("compacted") => return Some(false),
+        Some("warn" | "error") => return None,
+        _ => {}
+    }
+    let text = value["text"].as_str()?.to_lowercase();
+    (text.contains("compacting") || text.contains("compression")).then_some(true)
+}
 fn tool_started(run_id: &str, value: &Value) -> StreamEvent {
     StreamEvent::ToolCallStart {
         id: format!("{}-{}", run_id, value["timestamp"]),
@@ -368,6 +388,20 @@ mod tests {
     use super::*;
     // Registry-wide cancellation must not race unrelated tests sharing active().
     static REGISTRY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    #[test]
+    fn compaction_status_tracks_hermes_compaction_lines() {
+        let status = |kind: &str, text: &str| json!({"event": "hermes.status", "kind": kind, "text": text});
+        assert_eq!(compaction_status(&status("lifecycle",
+            "📦 Preflight compression: ~129,641 tokens >= 80,000 threshold. This may take a moment.")), Some(true));
+        assert_eq!(compaction_status(&status("lifecycle",
+            "🗜️ Compacting context — still summarizing earlier conversation so I can continue...")), Some(true));
+        assert_eq!(compaction_status(&status("compacted",
+            "✓ Context compaction complete — continuing turn...")), Some(false));
+        assert_eq!(compaction_status(&status("lifecycle", "⏳ Waiting for provider...")), None);
+        assert_eq!(compaction_status(&status("lifecycle", "")), None);
+        assert_eq!(compaction_status(&status("warn", "Context compression failed")), None);
+        assert_eq!(compaction_status(&json!({"event": "hermes.status"})), None);
+    }
     #[test]
     fn rejects_run_ids_that_can_escape_control_path() {
         assert!(valid_run_id("run_123abc"));

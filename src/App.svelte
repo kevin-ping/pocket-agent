@@ -125,6 +125,9 @@
   let bridgeFallbackTimer: ReturnType<typeof setTimeout> | null = null;
   let conversationCueEpoch = 0;
   let interruptedReply = false;
+  // Hermes compacts the session context before some turns (can take a couple of minutes).
+  const COMPACTING_STEP = '🗜️ 正在整理之前的对话，可能要一两分钟…';
+  let compactingThisTurn = false;
 
   async function cueDurationMs(audio: HTMLAudioElement): Promise<number> {
     if (Number.isFinite(audio.duration) && audio.duration > 0) {
@@ -566,7 +569,7 @@
     return undefined;
   }
 
-  type StatusKind = { kind: 'thinking' } | { kind: 'querying'; name: string } | { kind: 'executing' };
+  type StatusKind = { kind: 'thinking' } | { kind: 'querying'; name: string } | { kind: 'executing' } | { kind: 'compacting' };
   function speakStatus(kind: StatusKind) {
     cancelPendingStatusSpeech();
     const s = get(settingsStore);
@@ -575,6 +578,7 @@
     const p = STATUS_PHRASES[lang] ?? STATUS_PHRASES.zh;
     const text = kind.kind === 'thinking' ? p.thinking
                : kind.kind === 'executing' ? p.executing
+               : kind.kind === 'compacting' ? p.compacting
                : p.querying(kind.name);
     if (!text || text === lastSpokenStatus) return;
     lastSpokenStatus = text;
@@ -592,6 +596,7 @@
   async function setupListeners() {
     unlisten = await Promise.all([
       listen('chat-thinking-start', () => {
+        compactingThisTurn = false;
         enterThinkingVisuals();
         chatStore.clearThinkingSteps();
         chatStore.clearReasoning();
@@ -717,6 +722,21 @@
           characterState.toThinking();
           islandMode = 'thinking';
           spiritPhase = 2;
+        }
+      }),
+
+      // Hermes compaction status: announce once per turn; heartbeats repeat `true`.
+      listen<boolean>('chat-compacting', (e) => {
+        if (interruptedReply) return;
+        debugState('chat-compacting', { active: e.payload });
+        if (e.payload) {
+          if (compactingThisTurn) return;
+          compactingThisTurn = true;
+          chatStore.addThinkingStep(COMPACTING_STEP);
+          speakStatus({ kind: 'compacting' });
+        } else {
+          compactingThisTurn = false;
+          chatStore.removeThinkingStep(COMPACTING_STEP);
         }
       }),
 
