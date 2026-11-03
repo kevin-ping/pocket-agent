@@ -171,6 +171,9 @@ pub struct AppConfig {
     /// PA reply emotion → mesh-avatar emotion.
     #[serde(default = "default_mesh_avatar_emotions")]
     pub mesh_avatar_emotions: BTreeMap<String, String>,
+    /// Character state → avatar background colour (`#rrggbb`).
+    #[serde(default = "default_avatar_bg_colors")]
+    pub avatar_bg_colors: BTreeMap<String, String>,
 }
 
 fn default_pause_tolerance_ms() -> u32 {
@@ -222,6 +225,15 @@ pub(crate) fn default_mesh_avatar_emotions() -> BTreeMap<String, String> {
     ])
 }
 
+pub(crate) fn default_avatar_bg_colors() -> BTreeMap<String, String> {
+    string_map(&[
+        ("idle", "#6b8cff"),
+        ("listening", "#ff6b9d"),
+        ("thinking", "#ffd06b"),
+        ("speaking", "#6bffd0"),
+    ])
+}
+
 fn default_wake_word_threshold() -> f32 {
     0.5
 }
@@ -268,6 +280,7 @@ impl Default for AppConfig {
             mesh_avatar_offset_y: 0,
             mesh_avatar_expressions: default_mesh_avatar_expressions(),
             mesh_avatar_emotions: default_mesh_avatar_emotions(),
+            avatar_bg_colors: default_avatar_bg_colors(),
         }
     }
 }
@@ -317,6 +330,7 @@ pub(crate) fn load_legacy_config(app: &AppHandle) -> AppConfig {
         mesh_avatar_offset_y: default.mesh_avatar_offset_y,
         mesh_avatar_expressions: default.mesh_avatar_expressions,
         mesh_avatar_emotions: default.mesh_avatar_emotions,
+        avatar_bg_colors: default.avatar_bg_colors,
     }
 }
 

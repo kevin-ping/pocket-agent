@@ -1281,6 +1281,7 @@
         meshOffsetY={$settingsStore.mesh_avatar_offset_y}
         meshExpressions={$settingsStore.mesh_avatar_expressions}
         meshEmotions={$settingsStore.mesh_avatar_emotions}
+        bgColors={$settingsStore.avatar_bg_colors}
         {meshCustom}
         on:expand={() => layoutStore.toggle()}
         on:contextmenu={() => invoke('open_settings_window')}

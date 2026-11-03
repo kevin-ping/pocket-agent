@@ -43,6 +43,8 @@ export interface AppSettings {
   mesh_avatar_expressions: Record<string, string>;
   /** PA reply emotion → mesh emotion (see MESH_AVATAR_EMOTIONS). */
   mesh_avatar_emotions: Record<string, string>;
+  /** Character state → avatar background colour (`#rrggbb`). */
+  avatar_bg_colors: Record<string, string>;
 }
 
 // Same whitelists as settings_repository::validate.
@@ -50,6 +52,10 @@ export const MESH_AVATAR_STATES = ['idle', 'listening', 'thinking', 'speaking'] 
 export const MESH_AVATAR_EXPRESSIONS = ['neutral', 'smile', 'shy', 'surprise', 'halfLidded', 'angry', 'sad', 'wink'] as const;
 export const PA_EMOTIONS = ['cheerful', 'excited', 'friendly', 'sad', 'angry', 'calm', 'whisper', 'serious'] as const;
 export const MESH_AVATAR_EMOTIONS = ['happy', 'sad', 'angry', 'surprised', 'relaxed', 'neutral'] as const;
+
+export const AVATAR_BG_DEFAULTS: Record<string, string> = {
+  idle: '#6b8cff', listening: '#ff6b9d', thinking: '#ffd06b', speaking: '#6bffd0',
+};
 
 export const SETTINGS_DEFAULTS: AppSettings = {
   volume: 0.8,
@@ -94,6 +100,7 @@ export const SETTINGS_DEFAULTS: AppSettings = {
     cheerful: 'happy', excited: 'happy', friendly: 'happy', sad: 'sad',
     angry: 'angry', calm: 'relaxed', whisper: 'relaxed', serious: 'neutral',
   },
+  avatar_bg_colors: { ...AVATAR_BG_DEFAULTS },
 };
 
 function createSettingsStore() {

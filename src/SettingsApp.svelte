@@ -4,6 +4,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import {
     SETTINGS_DEFAULTS,
+    AVATAR_BG_DEFAULTS,
     MESH_AVATAR_STATES,
     MESH_AVATAR_EXPRESSIONS,
     PA_EMOTIONS,
@@ -12,6 +13,7 @@
   } from './lib/stores/settings';
   import type { CharacterState } from './lib/stores/character';
   import MeshFace from './lib/components/MeshFace.svelte';
+  import { avatarGradient } from './lib/avatarColors';
   import Field from './lib/components/settings/Field.svelte';
   import Toggle from './lib/components/settings/Toggle.svelte';
   import RangeField from './lib/components/settings/RangeField.svelte';
@@ -385,6 +387,15 @@
     local.mesh_avatar_offset_y = 0;
   }
 
+  function resetBgColors() {
+    if (local) local.avatar_bg_colors = { ...AVATAR_BG_DEFAULTS };
+  }
+
+  function previewBackground(state: string, color: string | undefined) {
+    const { grad1, grad2 } = avatarGradient(state, color);
+    return `radial-gradient(circle at 38% 35%, ${grad1} 0%, ${grad2} 100%)`;
+  }
+
   async function refreshVariantCount() {
     if (!local?.last_enrolled_speaker) { variantCount = 0; wakeWords = []; return; }
     try {
@@ -477,7 +488,7 @@
             <Toggle label={meshText.enabled} hint={meshText.enabledHint} value={local.mesh_avatar_enabled} change={() => local && (local.mesh_avatar_enabled = !local.mesh_avatar_enabled)} />
             <fieldset class="mesh-body" disabled={!local.mesh_avatar_enabled}>
               <div class="mesh-preview">
-                <div class="mesh-circle">
+                <div class="mesh-circle" style:background={previewBackground(meshPreviewState, local.avatar_bg_colors[meshPreviewState])}>
                   {#if meshPreviewStatus !== 'failed'}
                     <MeshFace state={meshPreviewState} mouth={meshPreviewState === 'speaking'} scale={local.mesh_avatar_scale}
                       offsetX={local.mesh_avatar_offset_x} offsetY={local.mesh_avatar_offset_y}
@@ -522,6 +533,17 @@
                 {/each}
               </details>
             </fieldset>
+          </section>
+          <section class="card mesh-card">
+            <div class="sample">
+              <div><strong>{meshText.bgColors}</strong><p>{meshText.bgColorsHint}</p></div>
+              <div class="actions"><button class="ghost" onclick={resetBgColors}>{meshText.resetColors}</button></div>
+            </div>
+            {#each MESH_AVATAR_STATES as s}
+              <Field label={meshText.states[s]}>
+                <input type="color" bind:value={local.avatar_bg_colors[s]} />
+              </Field>
+            {/each}
           </section>
           <section class="card asset-grid">
             <AssetCard title={text.staticAvatar} src={local.avatar_image} hint={text.imageHint}
@@ -632,7 +654,7 @@
 <style>
   .mesh-card{margin-bottom:14px}.mesh-body{border:0;margin:0;padding:0;min-width:0}.mesh-body:disabled{opacity:.45}
   .mesh-preview{display:flex;align-items:center;gap:18px;padding:16px;border-bottom:1px solid #e8eaf0}
-  .mesh-circle{position:relative;width:76px;height:76px;flex-shrink:0;border-radius:50%;overflow:hidden;display:grid;place-items:center;background:radial-gradient(circle at 38% 35%,#6b8cff 0%,#3d5af1 100%);color:#fff;font-weight:800}
+  .mesh-circle{position:relative;width:76px;height:76px;flex-shrink:0;border-radius:50%;overflow:hidden;display:grid;place-items:center;color:#fff;font-weight:800}
   .mesh-states{display:flex;flex-wrap:wrap;gap:6px}.mesh-states button.selected{background:#788cff22;border-color:#7589f4;color:#3a4566}
   .mesh-reset{display:flex;justify-content:flex-end;padding:8px 16px;border-bottom:1px solid #e8eaf0}
   .mesh-heading{padding:12px 16px 4px;font-size:11px;font-weight:600;color:#5a6178;border-top:1px solid #e8eaf0}
@@ -647,7 +669,7 @@
   h1,h2,h3,p{margin:0}.brand h1{font-size:14px;color:#1e2235}.brand p,header p{font-size:10px;color:#6a7185;margin-top:3px}nav{display:flex;flex-direction:column;gap:3px}nav button{border:0;background:transparent;color:#5a6178;padding:8px 10px;border-radius:8px;text-align:left;cursor:pointer;display:flex;gap:10px;align-items:center;font-size:12px}nav button span{width:18px;text-align:center;color:#8890a8;font-size:13px}nav button:hover{background:#0000000a;color:#2a2f42}nav button.active{background:#788cff18;color:#3a4566;box-shadow:inset 0 0 0 1px #8294ff30}nav button.active span{color:#7080ff}.immediate{margin-top:auto;padding:10px;font-size:9px;line-height:1.5;color:#939aab}
   main{min-width:0;min-height:0;height:100%;display:grid;grid-template-rows:58px minmax(0,1fr) 52px;overflow:hidden}header{padding:14px 28px;border-bottom:1px solid #e2e5ed;display:flex;align-items:center}header h2{font-size:17px;color:#1e2235}.content{min-height:0;padding:18px 28px;overflow:auto;overscroll-behavior:contain}.card{max-width:680px;border:1px solid #e2e5ed;border-radius:12px;background:#ffffff;overflow:hidden;box-shadow:0 3px 14px #0000000a}
   .field{min-height:46px;padding:9px 16px;display:flex;align-items:center;justify-content:space-between;gap:20px;border-bottom:1px solid #e8eaf0}.field:last-child{border-bottom:0}.field-label{font-size:12px;color:#2a2f42}.field small{display:block;color:#7a8298;margin-top:3px;font-size:10px;font-weight:500}.field-hint{display:block;color:#9aa3b8;margin-top:3px;font-size:10px;font-style:normal;line-height:1.4}.control{min-width:220px;display:flex;justify-content:flex-end}
-  select,input[type=text],.modal input{width:220px;border:1px solid #d4d8e0;background:#ffffff;color:#1e2235;border-radius:7px;padding:6px 10px;outline:none;font-size:12px}select:focus,input:focus{border-color:#7589f4}input[type=range]{width:220px;accent-color:#7589f4}.toggle{width:38px;height:22px;padding:2px;border:0;border-radius:18px;background:#d4d8e0;cursor:pointer;transition:.15s}.toggle span{display:block;width:18px;height:18px;border-radius:50%;background:#ffffff;transition:.15s;box-shadow:0 1px 3px #00000030}.toggle.on{background:#7589f4}.toggle.on span{transform:translateX(16px);background:white}
+  select,input[type=text],.modal input{width:220px;border:1px solid #d4d8e0;background:#ffffff;color:#1e2235;border-radius:7px;padding:6px 10px;outline:none;font-size:12px}select:focus,input:focus{border-color:#7589f4}input[type=range]{width:220px;accent-color:#7589f4}input[type=color]{width:44px;height:26px;border:1px solid #d4d8e0;border-radius:7px;padding:2px;background:#fff;cursor:pointer}.toggle{width:38px;height:22px;padding:2px;border:0;border-radius:18px;background:#d4d8e0;cursor:pointer;transition:.15s}.toggle span{display:block;width:18px;height:18px;border-radius:50%;background:#ffffff;transition:.15s;box-shadow:0 1px 3px #00000030}.toggle.on{background:#7589f4}.toggle.on span{transform:translateX(16px);background:white}
   button.primary,button.secondary,button.ghost{border-radius:7px;padding:6px 12px;cursor:pointer;border:1px solid transparent;color:#1e2235;font-size:12px}button.primary{background:#7589f4;color:#fff}button.primary:hover{background:#6478e8}button.primary:disabled{opacity:.4;cursor:default}button.secondary{background:#f0f2f8;border-color:#d4d8e0;color:#1e2235}button.secondary:disabled{opacity:.5;cursor:default}button:focus-visible{outline:2px solid #6478e8;outline-offset:3px}button.secondary:hover{background:#e8eaf2}button.ghost{background:transparent;border-color:#d4d8e0;color:#5a6178}button.ghost:hover{background:#0000000a}.danger{color:#e53e5c!important}.working{color:#c99700!important}
   footer{min-height:52px;border-top:1px solid #e2e5ed;padding:10px 28px;display:flex;gap:8px;align-items:center;justify-content:flex-end;background:#ffffff;position:relative;z-index:2}.message{margin-right:auto;color:#1a9d63;font-size:11px}.message .error{color:#e53e5c}
   .voice-field{border-bottom:1px solid #e8eaf0}.voice-field .field{border:0;padding-bottom:5px}.voice-control{display:flex;align-items:center;gap:6px}.voice-control select{width:165px}.preview-button{width:84px;min-width:84px;max-width:84px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid #d4d8e0;background:#f0f2f8;color:#1e2235;border-radius:7px;padding:6px 6px;cursor:pointer;font-size:11px}.preview-button:hover{background:#e8eaf2}.preview-button:disabled{opacity:.45;cursor:default}.check{display:flex;justify-content:flex-end;align-items:center;gap:6px;padding:0 16px 9px;color:#7a8298;font-size:10px}.check input{accent-color:#7589f4}.asset-grid{display:grid;grid-template-columns:1fr 1fr;gap:0}.asset{padding:18px;text-align:center}.asset+ .asset{border-left:1px solid #e2e5ed}.preview{width:84px;height:84px;margin:0 auto 12px;border-radius:18px;background:linear-gradient(145deg,#f0f2f8,#e8eaf2);border:1px solid #d4d8e0;display:grid;place-items:center;overflow:hidden;color:#7589f4;font-weight:800}.preview img{width:100%;height:100%;object-fit:cover}.asset h3{font-size:13px;color:#1e2235}.asset p{height:32px;margin:5px 0 10px;color:#7a8298;font-size:10px;line-height:1.5}.asset button+button{margin-left:6px}
