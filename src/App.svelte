@@ -19,7 +19,7 @@
   import { chatStore, statusVisible } from './lib/stores/chat';
   import { settingsStore } from './lib/stores/settings';
   import { layoutStore } from './lib/stores/layout';
-  import { onBackgroundSubagents, onSpeechDetected, refreshComputerStatus, settleSubagents } from './lib/stores/status';
+  import { onBackgroundSubagents, onSpeechDetected, onTurnEnd, onTurnStart, onTurnStep, refreshComputerStatus, settleSubagents } from './lib/stores/status';
   import { STATUS_PHRASES, langFromVoice, detectLang, convLabels, convLabelsLang, type LangKey } from './lib/i18n';
   import { wakeErrorMessage } from './lib/wakeErrors';
 
@@ -69,6 +69,7 @@
       });
     } catch (e) {
       chatStore.setError(`请求未完成: ${e}`);
+      onTurnEnd();
       characterState.toIdle();
       spiritPhase = 0;
     }
@@ -128,6 +129,24 @@
   // Hermes compacts the session context before some turns (can take a couple of minutes).
   const COMPACTING_STEP = '🗜️ 正在整理之前的对话，可能要一两分钟…';
   let compactingThisTurn = false;
+  // Long turns: after 45s with no sound, say "still working" (at most once per 90s).
+  let lastSoundAt = 0;
+  let lastStillWorkingAt = 0;
+  let lastUserSpeechAt = 0;
+
+  function startTurnProgress() {
+    lastSoundAt = Date.now();
+    lastStillWorkingAt = 0;
+    onTurnStart(checkStillWorking);
+  }
+
+  function checkStillWorking(elapsedSec: number) {
+    const now = Date.now();
+    if (islandMode === 'recording' || islandMode === 'speaking' || now - lastUserSpeechAt < 5000) return;
+    if (now - lastSoundAt < 45000 || now - lastStillWorkingAt < 90000) return;
+    lastStillWorkingAt = now;
+    speakStatus({ kind: 'stillWorking', min: Math.max(1, Math.round(elapsedSec / 60)) });
+  }
 
   async function cueDurationMs(audio: HTMLAudioElement): Promise<number> {
     if (Number.isFinite(audio.duration) && audio.duration > 0) {
@@ -511,6 +530,7 @@
     cancelPendingStatusSpeech();
     lastSpokenStatus = null;
     try { await invoke('discard_pending_turn'); } catch (e) { console.error(e); }
+    onTurnEnd();
     chatStore.endStream();
     chatStore.clearThinkingSteps();
     bridgeThinkingActive = false;
@@ -526,6 +546,7 @@
     cancelPendingStatusSpeech();
     lastSpokenStatus = null;
     try { await invoke('discard_pending_turn'); } catch (e) { console.error(e); }
+    onTurnEnd();
     chatStore.endStream();
     chatStore.clearThinkingSteps();
     bridgeThinkingActive = false;
@@ -569,7 +590,7 @@
     return undefined;
   }
 
-  type StatusKind = { kind: 'thinking' } | { kind: 'querying'; name: string } | { kind: 'executing' } | { kind: 'compacting' };
+  type StatusKind = { kind: 'thinking' } | { kind: 'querying'; name: string } | { kind: 'executing' } | { kind: 'compacting' } | { kind: 'stillWorking'; min: number };
   function speakStatus(kind: StatusKind) {
     cancelPendingStatusSpeech();
     const s = get(settingsStore);
@@ -579,6 +600,7 @@
     const text = kind.kind === 'thinking' ? p.thinking
                : kind.kind === 'executing' ? p.executing
                : kind.kind === 'compacting' ? p.compacting
+               : kind.kind === 'stillWorking' ? p.stillWorking(kind.min)
                : p.querying(kind.name);
     if (!text || text === lastSpokenStatus) return;
     lastSpokenStatus = text;
@@ -597,6 +619,7 @@
     unlisten = await Promise.all([
       listen('chat-thinking-start', () => {
         compactingThisTurn = false;
+        startTurnProgress();
         enterThinkingVisuals();
         chatStore.clearThinkingSteps();
         chatStore.clearReasoning();
@@ -620,6 +643,7 @@
       }),
       listen<boolean | undefined>('chat-audio-playing', (e) => {
         if (interruptedReply) return;
+        lastSoundAt = Date.now();
         cancelPendingStatusSpeech();
         lastSpokenStatus = null;
         debugState('chat-audio-playing');
@@ -643,12 +667,14 @@
       }),
       listen('chat-status-audio-playing', () => {
         if (interruptedReply) return;
+        lastSoundAt = Date.now();
         // Status speech plays during thinking: open the mouth only, leave turn state alone.
         if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
         mouthActive = true;
       }),
       listen('chat-audio-sentence-end', () => {
         if (interruptedReply) return;
+        lastSoundAt = Date.now();
         // Sentence finished; next sentence's TTS may still be generating. Close the
         // mouth after a short linger so brief gaps look natural but long ones don't flap.
         if (mouthLingerTimer) clearTimeout(mouthLingerTimer);
@@ -676,6 +702,7 @@
         chatStore.endStream();
         if (!lastSpeakingHadAudio) {
           chatStore.clearThinkingSteps();
+          onTurnEnd();
         } else {
           // An empty reply gets no chat-audio-done; drop 🤔 so it can't pin the turn active.
           chatStore.finishThinkingPhase();
@@ -689,6 +716,7 @@
       }),
       listen<number>('chat-audio-done', (e) => {
         settleSubagents();
+        onTurnEnd();
         avatarEmotion = null;
         mouthActive = false;
         if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
@@ -748,6 +776,7 @@
 
       // Tool call start notification
       listen<string>('chat-tool-call', (e) => {
+        onTurnStep();
         enterMidTurnThinking();
         chatStore.endReasoningSegment();
         cancelPendingStatusSpeech();
@@ -768,6 +797,7 @@
       }),
       listen<string>('chat-stream-error', (e) => {
         settleSubagents();
+        onTurnEnd();
         cancelPendingStatusSpeech();
         lastSpokenStatus = null;
         debugState('chat-stream-error', { error: e.payload });
@@ -786,6 +816,7 @@
         onBackgroundSubagents(e.payload.count);
       }),
       listen('conv-speech-detected', () => {
+        lastUserSpeechAt = Date.now();
         onSpeechDetected();
       }),
       listen('bridge-push-received', () => {
@@ -1047,6 +1078,7 @@
       listen('conversation-barge-in', () => {
         debugState('conversation-barge-in');
         interruptedReply = true;
+        onTurnEnd();
         avatarEmotion = null;
         // sentence-end is ignored while interrupted, so close the mouth here.
         mouthActive = false;
@@ -1237,6 +1269,7 @@
     unlisten.forEach((fn) => fn());
     if (audioLevelTimer) clearInterval(audioLevelTimer);
     clearBridgeFallbackTimer();
+    onTurnEnd();
     if (unsubSettings) unsubSettings();
     if (conversationActive) {
       invoke('stop_continuous_conversation').catch(() => {});

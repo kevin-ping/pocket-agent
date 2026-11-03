@@ -448,6 +448,7 @@ export interface ConversationLabels {
   wakeStartFailed: (msg: string) => string;
   // ── Status strip (replaces the chat input row) ──
   statusSubagent: (running: number) => string;
+  statusTurn: (elapsed: string, steps: number) => string;
   statusComputer: string;
   statusSpeech: string;
   statusSpeechHint: string;
@@ -497,6 +498,7 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsModel: '⚠ 唤醒未启动：请在设置 → 唤醒词 中下载离线唤醒模型',
     wakeStartFailed: (m) => `⚠ 唤醒启动失败：${m}`,
     statusSubagent: (n) => (n > 0 ? `子代理 · 后台 ${n} 个` : '子代理'),
+    statusTurn: (t, n) => `工作中 · ${t} · ${n} 步`,
     statusComputer: '电脑工具',
     statusSpeech: '语音侦测',
     statusSpeechHint: '侦测到你说话时闪红光',
@@ -540,6 +542,7 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsModel: '⚠ Wake word off: download the offline wake model in Settings → Wake word',
     wakeStartFailed: (m) => `⚠ Wake word failed to start: ${m}`,
     statusSubagent: (n) => (n > 0 ? `Subagents · ${n} in background` : 'Subagents'),
+    statusTurn: (t, n) => `Working · ${t} · ${n} ${n === 1 ? 'step' : 'steps'}`,
     statusComputer: 'Computer tools',
     statusSpeech: 'Speech detection',
     statusSpeechHint: 'Flashes red when it hears you speak',
@@ -583,6 +586,7 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsModel: '⚠ ウェイクワード停止中：設定 → ウェイクワード でオフラインモデルをダウンロードしてください',
     wakeStartFailed: (m) => `⚠ ウェイクワードの起動に失敗しました：${m}`,
     statusSubagent: (n) => (n > 0 ? `サブエージェント · バックグラウンド ${n} 件` : 'サブエージェント'),
+    statusTurn: (t, n) => `作業中 · ${t} · ${n} ステップ`,
     statusComputer: 'PC ツール',
     statusSpeech: '音声検出',
     statusSpeechHint: '話し声を検出すると赤く点滅します',
@@ -626,6 +630,7 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsModel: '⚠ 웨이크 워드 중지됨: 설정 → 웨이크 워드에서 오프라인 모델을 내려받으세요',
     wakeStartFailed: (m) => `⚠ 웨이크 워드 시작 실패: ${m}`,
     statusSubagent: (n) => (n > 0 ? `하위 에이전트 · 백그라운드 ${n}개` : '하위 에이전트'),
+    statusTurn: (t, n) => `작업 중 · ${t} · ${n}단계`,
     statusComputer: '컴퓨터 도구',
     statusSpeech: '음성 감지',
     statusSpeechHint: '말소리를 감지하면 빨갛게 깜박입니다',
@@ -669,6 +674,7 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsModel: '⚠ Mot de réveil inactif : téléchargez le modèle hors ligne dans Réglages → Mot de réveil',
     wakeStartFailed: (m) => `⚠ Échec du démarrage du mot de réveil : ${m}`,
     statusSubagent: (n) => (n > 0 ? `Sous-agents · ${n} en arrière-plan` : 'Sous-agents'),
+    statusTurn: (t, n) => `En cours · ${t} · ${n} étape${n > 1 ? 's' : ''}`,
     statusComputer: 'Outils ordinateur',
     statusSpeech: 'Détection de la voix',
     statusSpeechHint: 'Clignote en rouge quand je vous entends parler',
@@ -712,6 +718,7 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsModel: '⚠ Aktivierungswort inaktiv: Offline-Modell unter Einstellungen → Aktivierungswort herunterladen',
     wakeStartFailed: (m) => `⚠ Aktivierungswort konnte nicht gestartet werden: ${m}`,
     statusSubagent: (n) => (n > 0 ? `Subagenten · ${n} im Hintergrund` : 'Subagenten'),
+    statusTurn: (t, n) => `In Arbeit · ${t} · ${n} ${n === 1 ? 'Schritt' : 'Schritte'}`,
     statusComputer: 'Computer-Tools',
     statusSpeech: 'Spracherkennung',
     statusSpeechHint: 'Blinkt rot, wenn ich dich sprechen höre',
@@ -755,6 +762,7 @@ export const CONVERSATION_LABELS: Record<LangKey, ConversationLabels> = {
     wakeNeedsModel: '⚠ Palabra de activación inactiva: descarga el modelo sin conexión en Ajustes → Palabra de activación',
     wakeStartFailed: (m) => `⚠ Error al iniciar la palabra de activación: ${m}`,
     statusSubagent: (n) => (n > 0 ? `Subagentes · ${n} en segundo plano` : 'Subagentes'),
+    statusTurn: (t, n) => `Trabajando · ${t} · ${n} ${n === 1 ? 'paso' : 'pasos'}`,
     statusComputer: 'Herramientas del equipo',
     statusSpeech: 'Detección de voz',
     statusSpeechHint: 'Parpadea en rojo cuando te oye hablar',
@@ -766,21 +774,28 @@ export function convLabels(voice: string): ConversationLabels {
 }
 
 // ── Status TTS phrases (spoken; intentionally short and natural) ──
-export const STATUS_PHRASES: Record<LangKey, { thinking: string; querying: (n: string) => string; executing: string; compacting: string }> = {
+export const STATUS_PHRASES: Record<LangKey, { thinking: string; querying: (n: string) => string; executing: string; compacting: string; stillWorking: (min: number) => string }> = {
   zh: { thinking: '正在思考',  querying: (n) => `查询 ${n}`,            executing: '正在执行操作',
-        compacting: '我先整理一下之前的对话，稍等' },
+        compacting: '我先整理一下之前的对话，稍等',
+        stillWorking: (m) => `还在处理，已经 ${m} 分钟了` },
   en: { thinking: 'Thinking', querying: (n) => `Calling ${n}`,         executing: 'Working on it',
-        compacting: 'Let me tidy up our earlier conversation first, one moment' },
+        compacting: 'Let me tidy up our earlier conversation first, one moment',
+        stillWorking: (m) => `Still working on it, ${m} ${m === 1 ? 'minute' : 'minutes'} so far` },
   ja: { thinking: '考え中',    querying: (n) => `${n} を呼び出し中`,   executing: '実行中',
-        compacting: 'これまでの会話を整理しますので、少々お待ちください' },
+        compacting: 'これまでの会話を整理しますので、少々お待ちください',
+        stillWorking: (m) => `まだ処理中です、${m} 分経ちました` },
   ko: { thinking: '생각 중',   querying: (n) => `${n} 호출 중`,         executing: '실행 중',
-        compacting: '이전 대화를 먼저 정리할게요, 잠시만요' },
+        compacting: '이전 대화를 먼저 정리할게요, 잠시만요',
+        stillWorking: (m) => `아직 처리 중이에요, ${m}분 지났어요` },
   fr: { thinking: 'Réflexion', querying: (n) => `Appel de ${n}`,        executing: 'En cours',
-        compacting: 'Je résume d’abord notre conversation, un instant' },
+        compacting: 'Je résume d’abord notre conversation, un instant',
+        stillWorking: (m) => `Toujours en cours, déjà ${m} minute${m > 1 ? 's' : ''}` },
   de: { thinking: 'Denke nach', querying: (n) => `${n} wird aufgerufen`, executing: 'In Arbeit',
-        compacting: 'Ich fasse kurz unser bisheriges Gespräch zusammen, einen Moment' },
+        compacting: 'Ich fasse kurz unser bisheriges Gespräch zusammen, einen Moment',
+        stillWorking: (m) => `Ich arbeite noch daran, schon ${m} ${m === 1 ? 'Minute' : 'Minuten'}` },
   es: { thinking: 'Pensando',  querying: (n) => `Llamando a ${n}`,      executing: 'Procesando',
-        compacting: 'Primero ordeno nuestra conversación anterior, un momento' },
+        compacting: 'Primero ordeno nuestra conversación anterior, un momento',
+        stillWorking: (m) => `Sigo trabajando, ya ${m} ${m === 1 ? 'minuto' : 'minutos'}` },
 };
 
 /** Detect dominant language of a short text via Unicode ranges. */
