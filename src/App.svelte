@@ -705,6 +705,7 @@
       // Tool call start notification
       listen<string>('chat-tool-call', (e) => {
         enterThinkingVisuals();
+        chatStore.endReasoningSegment();
         cancelPendingStatusSpeech();
         try {
           const payload = JSON.parse(e.payload);
@@ -765,6 +766,7 @@
       }),
       listen<string>("bridge-tool-call", (e) => {
         enterThinkingVisuals();
+        chatStore.endReasoningSegment();
         cancelPendingStatusSpeech();
         try {
           const payload = JSON.parse(e.payload);

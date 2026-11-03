@@ -82,6 +82,8 @@ let scriptDetected: boolean = false;
 let streamEnding = false;
 // Collapse runs of 3+ newlines (LLM tool-call segment stitching) to a single blank line.
 let trailingNewlines = 0;
+// Set when a tool call ends a reasoning segment; the next chunk replaces the panel text.
+let reasoningSegmentDone = false;
 // CMD-strip state: swallow [CMD:...], [LOCAL_CMD ...] and [SUBAGENT_DONE:...] tokens from the displayed stream.
 // Tokens may straddle delta boundaries, so we buffer chars that might be opener prefixes.
 let inCmd = false;
@@ -237,12 +239,21 @@ function createChatStore() {
       }),
 
     /** Append a reasoning chunk (reasoning comes as many tiny chunks). */
-    appendReasoning: (text: string) =>
-      update((s) => ({ ...s, reasoningText: s.reasoningText + text })),
+    appendReasoning: (text: string) => {
+      const replace = reasoningSegmentDone;
+      reasoningSegmentDone = false;
+      update((s) => ({ ...s, reasoningText: replace ? text : s.reasoningText + text }));
+    },
+
+    /** A tool call ended the current reasoning segment. Keep it on screen until the
+     *  next segment's first chunk replaces it. */
+    endReasoningSegment: () => { reasoningSegmentDone = true; },
 
     /** Drop the previous turn's reasoning — called only at turn start. */
-    clearReasoning: () =>
-      update((s) => (s.reasoningText === '' ? s : { ...s, reasoningText: '' })),
+    clearReasoning: () => {
+      reasoningSegmentDone = false;
+      update((s) => (s.reasoningText === '' ? s : { ...s, reasoningText: '' }));
+    },
 
     /** Clear all thinking steps — called when final text arrives */
     clearThinkingSteps: () =>
@@ -378,6 +389,7 @@ function createChatStore() {
       if (pendingChars.length > 0) pendingChars = [];
       streamEnding = false;
       trailingNewlines = 0;
+      reasoningSegmentDone = false;
       resetCmdState();
       update((s) => ({
         ...s,

@@ -9,11 +9,17 @@
   let contentEl = $state<HTMLDivElement>();
   let followLatest = $state(true);
   let previousLength = 0;
+  let lastScrollTop = 0;
 
+  // Only an upward scroll stops following. Our own scroll-to-bottom fires its scroll event
+  // late; by then new chunks may have grown the text, so "not at the bottom" alone is not
+  // the user scrolling away.
   function handleScroll() {
     if (!contentEl) return;
     const distanceFromBottom = contentEl.scrollHeight - contentEl.scrollTop - contentEl.clientHeight;
-    followLatest = distanceFromBottom <= 8;
+    if (distanceFromBottom <= 8) followLatest = true;
+    else if (contentEl.scrollTop < lastScrollTop) followLatest = false;
+    lastScrollTop = contentEl.scrollTop;
   }
 
   $effect(() => {
