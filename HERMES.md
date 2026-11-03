@@ -79,6 +79,16 @@ The installed copy does not follow the repo. After the skill changes in the repo
 - The system prompt's skill index cuts descriptions to 60 characters, so the skill's `description` is kept under that.
 - Hermes builds the skill index once per session. Restart the gateway or wait for the next day's session (`<agent>-YYYY-MM-DD`) before Hermes sees a new or renamed skill. Changes to the body of the installed copy take effect on the next `skill_view`.
 
+## Long tasks and background subagents
+
+While Hermes works, the user only hears silence. On every UI turn PA appends a `LONG RESEARCH` hint (`DELEGATE_HINT` in `src-tauri/src/commands/chat.rs`; bridge turns do not get it): research that will likely take more than about a minute goes to a background subagent with `delegate_task`, Hermes says one sentence that it has started, and ends the turn. Desktop tasks the user watches (`computer_use`) stay in the foreground. This is the one place PA suggests how Hermes should work instead of only relaying facts (agreed with the user on 2026-11-03).
+
+The gateway does not start a turn when an async delegation finishes; it only stores an `async_delegation_complete` row in the session. So while a delegation is out, PA reads the session's latest messages every 15 seconds (`src-tauri/src/api/subagents.rs`). When the completion row appears, PA starts a turn itself as soon as it is idle, with a fixed text asking Hermes to tell the user the result; the result row is already in the session, so Hermes sees it in that turn. If the user speaks first, that turn carries the result instead and no extra turn is sent.
+
+- Top-level `delegate_task` always runs in the background (`tools/delegate_tool.py`); the profile's `delegation` section sets `child_timeout_seconds` and `max_concurrent_children`. Without that section Hermes uses its defaults.
+- PA keeps only delegation ids, never the subagent's text; the result reaches the user through Hermes' reply.
+- The page for the details follows the [Pocket Agent skill](#pocket-agent-skill) ("Background research").
+
 ## Reasoning and status on `/v1/runs` (local patch)
 
 PA's reasoning panel needs the model's reasoning in the stream, and its status panel needs Hermes' lifecycle status (e.g. context compaction). `/v1/chat/completions` sends it (`delta.reasoning_content`), but `/v1/runs`, which PA uses for local desktop turns, registers no `reasoning_callback`, so the run stream carries none. Do not switch PA to chat completions to get it back: that endpoint has no stop command, and after PA disconnects Hermes logs `SSE client disconnected; interrupted agent task` but keeps running the turn (seen 2026-11-02: one turn kept driving Chrome for over 20 minutes).

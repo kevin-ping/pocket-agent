@@ -33,3 +33,11 @@ computer_use cannot launch apps or open files (it only switches to windows that 
 ### What to say
 
 Say the conclusion in one or two sentences, then mention that the details are in the browser (e.g. "详细的我放在浏览器里了"). Do not read the file path aloud.
+
+## Background research
+
+The user hears only silence while you work. When research or compiling material will likely take more than about a minute (several searches, reading several pages, multi-step analysis), hand it to a background subagent with `delegate_task`:
+
+- In the same response, say in one short sentence that you have started and the user can keep talking about other things (e.g. "我在后台查一下，你可以先聊别的。"), then end the turn.
+- When the result is in, PA starts a turn for you. Say the conclusion in one or two sentences and put the details on a page (see "Showing a page").
+- Desktop tasks the user watches (computer_use) stay in the foreground.

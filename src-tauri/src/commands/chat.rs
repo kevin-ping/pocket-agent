@@ -475,6 +475,20 @@ enum HermesTurnMode {
     Bridge,
 }
 
+/// UI turns only (same scope as the subagent lamp): a user-approved exception (2026-11-03)
+/// to "PA only relays facts" — long research goes to a background subagent and PA
+/// starts a turn when its result is in.
+const DELEGATE_HINT: &str = "
+LONG RESEARCH:
+While you work the user hears only silence. Research or compiling material that will likely take more than about a minute (several searches, reading several pages, multi-step analysis) should go to a background subagent with delegate_task: first tell the user in one short spoken sentence that you have started and they can keep talking about other things, then end this turn. When the result is in, Pocket Agent will start a turn for you; then say the conclusion briefly and put the details on a page as the pocket-agent skill describes. Desktop tasks the user watches (computer_use) still run in the foreground.";
+
+fn mode_hint(mode: HermesTurnMode) -> &'static str {
+    match mode {
+        HermesTurnMode::Ui => DELEGATE_HINT,
+        HermesTurnMode::Bridge => "",
+    }
+}
+
 struct HermesTurnRequest {
     text: String,
     session_id: String,
@@ -774,6 +788,7 @@ async fn run_hermes_turn(
             }
         }
     } else { false };
+    effective_hint.push_str(mode_hint(request.mode));
     if request.mode == HermesTurnMode::Ui {
         if let Some(reminder) = crate::api::subagents::before_turn(app).await {
             effective_hint.push_str(&reminder);
@@ -1495,6 +1510,13 @@ mod tests {
         let (sentences, rest) = split_sentences("好的。[SUBAGENT_DONE:deleg_ab12] 还有呢？");
         assert!(rest.is_empty());
         assert_eq!(speakable(&strip_all_cmd_tags(&sentences[1])), "还有呢？");
+    }
+
+    #[test]
+    fn delegate_hint_is_for_ui_turns_only() {
+        assert!(mode_hint(HermesTurnMode::Bridge).is_empty());
+        let hint = mode_hint(HermesTurnMode::Ui);
+        assert!(hint.contains("delegate_task") && hint.contains("computer_use") && hint.contains("pocket-agent skill"));
     }
 
     #[test]

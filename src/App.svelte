@@ -41,14 +41,21 @@
     return handleSendMessageImpl(text, userLanguage);
   }
 
-  async function handleSendMessageImpl(text: string, userLanguage?: string) {
-    // Update current input language for status TTS (explicit param from STT wins,
-    // otherwise detect from typed text).
-    currentInputLang = (userLanguage as LangKey | undefined) ?? detectLang(text);
+  /** `silent`: PA's own turn (background result report) — no user bubble, not saved as the user's words. */
+  async function handleSendMessageImpl(text: string, userLanguage?: string, silent = false) {
+    if (silent) {
+      userLanguage = currentInputLang;
+    } else {
+      // The user's own turn carries any finished background result; no separate report.
+      cancelPendingReport();
+      // Update current input language for status TTS (explicit param from STT wins,
+      // otherwise detect from typed text).
+      currentInputLang = (userLanguage as LangKey | undefined) ?? detectLang(text);
 
-    chatStore.addUserMessage(text);
-    // Save user message to history
-    invoke('save_chat_message', { role: 'user', content: text }).catch(e => console.error('Failed to save user message:', e));
+      chatStore.addUserMessage(text);
+      // Save user message to history
+      invoke('save_chat_message', { role: 'user', content: text }).catch(e => console.error('Failed to save user message:', e));
+    }
 
     chatStore.clearThinkingSteps();
     chatStore.startStream();
@@ -73,6 +80,36 @@
       characterState.toIdle();
       spiritPhase = 0;
     }
+  }
+
+  // ─── Background subagent finished: PA starts the reporting turn once idle ───
+  let pendingReport = false;
+  let pendingReportTimer: ReturnType<typeof setInterval> | null = null;
+
+  function isIdleForReport(): boolean {
+    // characterState too: chat-stream-end sets islandMode idle while the last sentences still play.
+    return !conversationActive && !showBreakConfirm && !isTurnActive() && get(characterState) === 'idle'
+      && (islandMode === 'idle' || islandMode === 'waiting_for_wake');
+  }
+
+  function cancelPendingReport() {
+    pendingReport = false;
+    if (pendingReportTimer) { clearInterval(pendingReportTimer); pendingReportTimer = null; }
+  }
+
+  function tryDeliverReport() {
+    if (!pendingReport || !isIdleForReport()) return;
+    cancelPendingReport();
+    const text = currentInputLang === 'zh'
+      ? '[Pocket Agent] 后台任务已完成，请把结果告诉用户。'
+      : '[Pocket Agent] A background task has finished. Tell the user the result.';
+    handleSendMessageImpl(text, undefined, true);
+  }
+
+  function onSubagentDelivered() {
+    pendingReport = true;
+    tryDeliverReport();
+    if (pendingReport && !pendingReportTimer) pendingReportTimer = setInterval(tryDeliverReport, 1000);
   }
 
   // ─── Context menu ───
@@ -815,6 +852,10 @@
       listen<{ count: number }>('background-subagents', (e) => {
         onBackgroundSubagents(e.payload.count);
       }),
+      listen<{ count: number }>('subagent-delivered', (e) => {
+        debugState('subagent-delivered', { count: e.payload.count });
+        onSubagentDelivered();
+      }),
       listen('conv-speech-detected', () => {
         lastUserSpeechAt = Date.now();
         onSpeechDetected();
@@ -1270,6 +1311,7 @@
     if (audioLevelTimer) clearInterval(audioLevelTimer);
     clearBridgeFallbackTimer();
     onTurnEnd();
+    cancelPendingReport();
     if (unsubSettings) unsubSettings();
     if (conversationActive) {
       invoke('stop_continuous_conversation').catch(() => {});
