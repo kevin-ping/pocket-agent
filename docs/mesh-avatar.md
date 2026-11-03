@@ -43,6 +43,8 @@
 | `thinking` | 表情 `halfLidded`（半闭眼） |
 | `speaking` | 张嘴说话：前端用模拟音量驱动口型（约 6 Hz 起伏、偶尔停顿），**和真实语音不同步** |
 
+`speaking` 只在真正播报时出现。Hermes 一轮里先说一句再调工具时，后端在已提交的语音播完、这一轮还没结束时发 `chat-audio-idle`，头像切回 `thinking`；下一句开始播时再回到 `speaking`。播报中途来的工具调用或 reasoning 不打断 `speaking`，等这句播完再切。整轮结束（`chat-audio-done`）后，连续对话模式回到 `listening`，否则回到 `idle`。
+
 离开 `speaking`、被 barge-in 打断、组件卸载时，口型循环都会停止，音量归零，嘴巴闭上。barge-in 时 `App.svelte` 通过 `interrupted` prop 通知 `AvatarIcon`，并清空回复情绪：此时 `characterState` 可能还停在 `speaking`（要等后端 Ready 后才切到 `listening`），但嘴巴会立刻停下。
 
 圆形裁剪除了圆角加 `overflow: hidden`,外层 `.mesh-face` 还加了 `mask-image` 圆形遮罩：旧版 WebKit(macOS 12 实测)不会按圆角裁剪单独合成的 WebGL 画布，只靠 `overflow` 时头像会露出圆圈。

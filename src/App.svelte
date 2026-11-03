@@ -252,6 +252,16 @@
     characterState.toThinking();
   }
 
+  // Mid-turn thinking / tool calls must not cut off speech that is still playing;
+  // chat-audio-idle switches to thinking once the queue drains.
+  function enterMidTurnThinking() {
+    if (get(characterState) === 'speaking') {
+      firstStreamDelta = false;
+      return;
+    }
+    enterThinkingVisuals();
+  }
+
   // Shows Hermes' own tool preview (e.g. the terminal command) so the user can see what it is doing.
   function toolStepLabel(toolName: string, preview: unknown): string {
     const text = typeof preview === 'string'
@@ -688,23 +698,37 @@
           invoke('notify_conversation_tts_done', { generation: e.payload }).catch(console.error);
           spiritPhase = 0;
         } else {
-          characterState.transition('speaking', 'idle');
+          // chat-audio-idle may have moved speaking → thinking just before the turn ended.
+          if (get(characterState) === 'thinking') characterState.toIdle();
+          else characterState.transition('speaking', 'idle');
           spiritPhase = 0;
           islandMode = 'idle';
           armWakeListenerIfEnabled();
         }
         autoCloseBreakConfirm();
       }),
+      // Everything queued has played but the turn is still running (tools / next part).
+      listen<number>('chat-audio-idle', () => {
+        if (interruptedReply) return;
+        mouthActive = false;
+        if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
+        debugState('chat-audio-idle');
+        if (get(characterState) === 'speaking') {
+          characterState.toThinking();
+          islandMode = 'thinking';
+          spiritPhase = 2;
+        }
+      }),
 
       // LLM intermediate thinking/reasoning updates (appended to ReasoningPanel)
       listen<string>('chat-thinking', (e) => {
-        enterThinkingVisuals();
+        enterMidTurnThinking();
         chatStore.appendReasoning(e.payload);
       }),
 
       // Tool call start notification
       listen<string>('chat-tool-call', (e) => {
-        enterThinkingVisuals();
+        enterMidTurnThinking();
         chatStore.endReasoningSegment();
         cancelPendingStatusSpeech();
         try {
@@ -760,12 +784,12 @@
 
       // Bridge-mode intermediate events (reasoning + tool calls from Hermes via bridge)
       listen<string>("bridge-thinking", (e) => {
-        enterThinkingVisuals();
+        enterMidTurnThinking();
         // Without bridge-thinking-start (show_thinking=false) the panel was never cleared.
         if (bridgeThinkingActive) chatStore.appendReasoning(e.payload);
       }),
       listen<string>("bridge-tool-call", (e) => {
-        enterThinkingVisuals();
+        enterMidTurnThinking();
         chatStore.endReasoningSegment();
         cancelPendingStatusSpeech();
         try {

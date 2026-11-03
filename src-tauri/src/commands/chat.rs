@@ -207,6 +207,7 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
                     {
                         PENDING_NON_SILENT.fetch_sub(1, Ordering::SeqCst);
                         maybe_emit_audio_done(&prep.app, prep.generation);
+                        maybe_emit_audio_idle(&prep.app, prep.generation);
                     }
                 }
             })
@@ -324,6 +325,24 @@ fn maybe_emit_audio_done(app: &AppHandle, generation: u64) {
         eprintln!("[AUDIO] emitting chat-audio-done (gen={})", generation);
         let _ = app.emit("chat-audio-done", generation);
     }
+}
+
+/// Emit chat-audio-idle when everything submitted for `generation` has played but the
+/// turn is still running (Hermes calling tools or composing the next part), so the
+/// avatar can leave SPEAKING. speak_text sets SUBMISSION_DONE right after submitting,
+/// so pushed / bridge speech never gets this event.
+fn maybe_emit_audio_idle(app: &AppHandle, generation: u64) {
+    if generation != AUDIO_GENERATION.load(Ordering::SeqCst) {
+        return;
+    }
+    if SUBMISSION_DONE.load(Ordering::SeqCst) {
+        return;
+    }
+    if PENDING_NON_SILENT.load(Ordering::SeqCst) > 0 {
+        return;
+    }
+    eprintln!("[AUDIO] emitting chat-audio-idle (gen={})", generation);
+    let _ = app.emit("chat-audio-idle", generation);
 }
 
 /// edge-tts binary: EDGE_TTS_BIN, else the PA venv's copy, else PATH. A PATH
