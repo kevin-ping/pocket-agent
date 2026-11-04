@@ -12,7 +12,7 @@ android {
         minSdk = 30 // Pixel 2 tops out at Android 11
         targetSdk = 34
         versionCode = 1
-        versionName = "0.3.0"
+        versionName = "0.3.1"
     }
 
     compileOptions {
