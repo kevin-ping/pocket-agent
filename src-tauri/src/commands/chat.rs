@@ -139,7 +139,9 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
 
                     eprintln!("[PLAYER] gen={} chars={} audio={}", prep.generation, prep.text_len, tts_ok);
 
-                    if tts_ok {
+                    if tts_ok && crate::voice::remote::is_online() {
+                        play_on_phone(&prep);
+                    } else if tts_ok {
                         match rodio::OutputStream::try_default() {
                             Ok((stream, stream_handle)) => {
                                 match rodio::Sink::try_new(&stream_handle) {
@@ -216,6 +218,30 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
     })
 }
 
+/// Phone output (FEAT-DEV1): the same events as the rodio path, but timed by
+/// the phone's playing / done reports instead of the local sink.
+fn play_on_phone(prep: &PreparedAudio) {
+    let audio = match std::fs::read(&prep.tts_file) {
+        Ok(bytes) => bytes,
+        Err(e) => { eprintln!("[AUDIO] read for phone: {}", e); return; }
+    };
+    let generation = prep.generation;
+    let started = crate::voice::remote::play_sentence(
+        audio,
+        || generation == audio_generation(),
+        || {
+            if !prep.silent {
+                let _ = prep.app.emit("chat-audio-playing", true);
+            } else {
+                let _ = prep.app.emit("chat-status-audio-playing", ());
+            }
+        },
+    );
+    if started {
+        let _ = prep.app.emit("chat-audio-sentence-end", ());
+    }
+}
+
 /// Stop the pipeline and reset queue counter. Called on fn-key press and barge-in.
 pub fn audio_generation() -> u64 { AUDIO_GENERATION.load(Ordering::SeqCst) }
 
@@ -231,6 +257,7 @@ pub fn stop_audio_queue() {
     if let Some(sink) = sink {
         sink.stop();
     }
+    crate::voice::remote::clear();
     let _ = audio_sender().lock().unwrap().send(AudioCmd::Stop);
     schedule_wake_resume_after_grace();
 }
@@ -246,6 +273,34 @@ fn schedule_wake_resume_after_grace() {
             crate::voice::sherpa_wake::resume_wake();
         }
     });
+}
+
+/// Sentences submitted and not yet played (switch_device waits for 0).
+pub fn audio_queue_depth() -> usize {
+    AUDIO_QUEUE_DEPTH.load(Ordering::SeqCst)
+}
+
+/// Hermes turns (UI or bridge) still running, however they end.
+static TURNS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+pub fn turn_in_flight() -> bool {
+    TURNS_IN_FLIGHT.load(Ordering::SeqCst) > 0
+}
+
+/// Counts one turn for as long as it lives; dropping covers every return path.
+struct TurnInFlight;
+
+impl TurnInFlight {
+    fn start() -> Self {
+        TURNS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        TurnInFlight
+    }
+}
+
+impl Drop for TurnInFlight {
+    fn drop(&mut self) {
+        TURNS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Check if queue is full (read-only, for API layer).
@@ -481,6 +536,28 @@ enum HermesTurnMode {
 const DELEGATE_HINT: &str = "
 LONG RESEARCH:
 While you work the user hears only silence. Research or compiling material that will likely take more than about a minute (several searches, reading several pages, multi-step analysis) should go to a background subagent with delegate_task: first tell the user in one short spoken sentence that you have started and they can keep talking about other things, then end this turn. When the result is in, Pocket Agent will start a turn for you; then say the conclusion briefly and put the details on a page as the pocket-agent skill describes. Desktop tasks the user watches (computer_use) still run in the foreground.";
+
+/// A fact, not advice (decision-20261028-230622): only while the phone camera is open.
+const PHONE_CAMERA_HINT: &str = "
+The user's phone camera is open in the Pocket Agent phone app. The phone_camera_snapshot tool (pocket_agent MCP server) returns its current frame.";
+
+fn phone_camera_hint(camera_on: bool) -> &'static str {
+    if camera_on { PHONE_CAMERA_HINT } else { "" }
+}
+
+/// Facts, not advice (FEAT-DEV1): where PA is while its phone app is connected.
+const PHONE_DRIVING_HINT: &str = "
+The user is using Pocket Agent through its phone app (screen, microphone and speaker on the phone). The switch_device tool (pocket_agent MCP server) moves Pocket Agent between the phone and this computer.";
+const PHONE_PARKED_HINT: &str = "
+Pocket Agent is on this computer; its phone app is connected and on standby. The switch_device tool (pocket_agent MCP server) moves Pocket Agent between the phone and this computer.";
+
+fn phone_device_hint(phone_ui: bool, parked: bool) -> &'static str {
+    match (phone_ui, parked) {
+        (_, true) => PHONE_PARKED_HINT,
+        (true, false) => PHONE_DRIVING_HINT,
+        (false, false) => "",
+    }
+}
 
 fn mode_hint(mode: HermesTurnMode) -> &'static str {
     match mode {
@@ -1003,6 +1080,7 @@ pub async fn dispatch_bridge_message(
         app.emit("bridge-thinking-start", ()).map_err(|e| e.to_string())?;
     }
 
+    let _in_flight = TurnInFlight::start();
     let my_turn_gen = TURN_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
     let request = HermesTurnRequest {
@@ -1077,6 +1155,8 @@ pub async fn send_message(
     } else {
         hint.push_str("\nPocket Agent has no local desktop integration with this gateway. Gateway computer tools operate on the gateway/driver host, not automatically on this Mac. Do not claim to see or control this Mac.");
     }
+    hint.push_str(phone_camera_hint(crate::voice::remote::is_camera_on()));
+    hint.push_str(phone_device_hint(crate::api::remote::ui_attached(), crate::voice::remote::is_parked()));
     if fixed.is_empty() {
         hint.push_str("
 
@@ -1085,6 +1165,7 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
 
     let text = build_ui_turn_text(&text, &primary, &aux1, &aux2, &fixed);
 
+    let _in_flight = TurnInFlight::start();
     let my_turn_gen = TURN_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
     app.emit("chat-thinking-start", ()).map_err(|e| e.to_string())?;
@@ -1517,6 +1598,26 @@ mod tests {
         assert!(mode_hint(HermesTurnMode::Bridge).is_empty());
         let hint = mode_hint(HermesTurnMode::Ui);
         assert!(hint.contains("delegate_task") && hint.contains("computer_use") && hint.contains("pocket-agent skill"));
+    }
+
+    #[test]
+    fn phone_device_hint_states_where_pa_is_only_with_a_phone() {
+        assert!(phone_device_hint(false, false).is_empty(), "desktop alone: unchanged");
+        for (ui, parked) in [(true, false), (true, true), (false, true)] {
+            let hint = phone_device_hint(ui, parked);
+            assert!(hint.contains("switch_device"));
+            assert!(!hint.to_lowercase().contains("should"), "states a fact, gives no advice");
+        }
+        assert!(phone_device_hint(true, false).contains("through its phone app"));
+        assert!(phone_device_hint(true, true).contains("on this computer"));
+    }
+
+    #[test]
+    fn phone_camera_hint_is_a_fact_only_while_the_camera_is_open() {
+        assert!(phone_camera_hint(false).is_empty());
+        let hint = phone_camera_hint(true);
+        assert!(hint.contains("phone_camera_snapshot"));
+        assert!(!hint.to_lowercase().contains("should"), "states a fact, gives no advice");
     }
 
     #[test]

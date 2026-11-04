@@ -170,6 +170,7 @@ pub fn run() {
             api::runs::respond_computer_approval,
             api::runs::pending_computer_approvals,
             api::subagents::settle_background_subagents,
+            api::remote::is_ui_remote_active,
             commands::history::open_chat_history,
             commands::history::save_chat_message,
 

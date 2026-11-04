@@ -555,6 +555,27 @@ pub struct StreamingHandle {
     pub sample_rate: u32,
     /// Channel count reported by the input device.
     pub channels: u16,
+    /// Audio source (local mic / phone) the capture was started on.
+    source_epoch: u64,
+}
+
+impl StreamingHandle {
+    /// The source switched (phone attached or left) since this capture began:
+    /// its audio no longer arrives, so the owning worker should end.
+    pub fn is_stale(&self) -> bool {
+        self.source_epoch != crate::voice::remote::source_epoch()
+    }
+}
+
+/// Releases the capture owner, resets AUDIO_LEVEL and the VAD ring when a
+/// streaming thread exits — normally, via early return, or via panic.
+struct ReleaseOnDrop(u8);
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        release_capture(self.0);
+        AUDIO_LEVEL.store(0, Ordering::Relaxed);
+        clear_vad_samples();
+    }
 }
 
 /// Begin a long-lived capture session. The callback fires on cpal's audio
@@ -567,9 +588,15 @@ pub fn start_streaming_capture<F>(owner: u8, callback: F) -> Result<StreamingHan
 where
     F: FnMut(&[i16], u32) + Send + 'static,
 {
-    {
+    let (remote, source_epoch) = {
         let _gate = lock_capture_gate();
         try_acquire_capture(owner)?;
+        // The source switch flips under this same gate, so what is read here
+        // names the source this capture really starts on.
+        (crate::voice::remote::is_online(), crate::voice::remote::source_epoch())
+    };
+    if remote {
+        return start_remote_streaming(owner, callback, source_epoch);
     }
 
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -581,16 +608,6 @@ where
     let spawn_result = std::thread::Builder::new()
         .name("audio-streaming".into())
         .spawn(move || {
-            // Guarantee release whether the thread exits normally, via early
-            // return, or via panic. AUDIO_LEVEL is also reset.
-            struct ReleaseOnDrop(u8);
-            impl Drop for ReleaseOnDrop {
-                fn drop(&mut self) {
-                    release_capture(self.0);
-                    AUDIO_LEVEL.store(0, Ordering::Relaxed);
-                    clear_vad_samples();
-                }
-            }
             let _release = ReleaseOnDrop(owner_for_thread);
 
             let host = cpal::default_host();
@@ -656,6 +673,7 @@ where
             stop_tx,
             sample_rate: rate,
             channels: ch,
+            source_epoch,
         }),
         // Thread holds ReleaseOnDrop and releases as it unwinds.
         Ok(Err(e)) => Err(e),
@@ -669,12 +687,61 @@ where
     }
 }
 
+/// Phone variant of a streaming session: the callback is fed from the /audio
+/// upload (16 kHz mono) and the device stays closed. Same release contract as
+/// the cpal path: a detached thread waits for stop, then releases the owner.
+fn start_remote_streaming<F>(owner: u8, callback: F, source_epoch: u64) -> Result<StreamingHandle, String>
+where
+    F: FnMut(&[i16], u32) + Send + 'static,
+{
+    let id = crate::voice::remote::attach_capture(Box::new(callback));
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let spawn_result = std::thread::Builder::new()
+        .name("remote-streaming".into())
+        .spawn(move || {
+            let _release = ReleaseOnDrop(owner);
+            eprintln!("[record] streaming(owner={}) from phone", owner_name(owner));
+            let _ = stop_rx.recv();
+            crate::voice::remote::detach_capture(id);
+            eprintln!("[record] phone streaming stopped (owner={})", owner_name(owner));
+        });
+    if let Err(e) = spawn_result {
+        crate::voice::remote::detach_capture(id);
+        release_capture(owner);
+        return Err(format!("spawn: {}", e));
+    }
+    Ok(StreamingHandle {
+        stop_tx,
+        sample_rate: crate::voice::remote::REMOTE_SAMPLE_RATE,
+        channels: 1,
+        source_epoch,
+    })
+}
+
 /// Stop a streaming session: signals the dedicated thread to drop its stream
 /// and release the device. Idempotent if the thread already exited.
 pub fn stop_streaming_capture(handle: StreamingHandle) {
     let _ = handle.stop_tx.send(());
     // handle drops here; the dedicated thread is detached and will release the
     // device + owner on its own once the stop signal is processed.
+}
+
+pub(crate) fn update_level_i16(data: &[i16]) {
+    if data.is_empty() {
+        return;
+    }
+    let rms = (data
+        .iter()
+        .map(|&s| {
+            let f = s as f32 / i16::MAX as f32;
+            f * f
+        })
+        .sum::<f32>()
+        / data.len() as f32)
+        .sqrt();
+    let db = if rms > 0.001 { 20.0 * rms.log10() } else { -60.0 };
+    let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+    AUDIO_LEVEL.store((level * 1000.0) as u32, Ordering::Relaxed);
 }
 
 fn build_streaming_stream<F>(
@@ -696,24 +763,6 @@ where
         let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
         AUDIO_LEVEL.store((level * 1000.0) as u32, Ordering::Relaxed);
     }
-    fn update_level_i16(data: &[i16]) {
-        if data.is_empty() {
-            return;
-        }
-        let rms = (data
-            .iter()
-            .map(|&s| {
-                let f = s as f32 / i16::MAX as f32;
-                f * f
-            })
-            .sum::<f32>()
-            / data.len() as f32)
-            .sqrt();
-        let db = if rms > 0.001 { 20.0 * rms.log10() } else { -60.0 };
-        let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-        AUDIO_LEVEL.store((level * 1000.0) as u32, Ordering::Relaxed);
-    }
-
     match fmt {
         SampleFormat::F32 => {
             let cb = cb.clone();

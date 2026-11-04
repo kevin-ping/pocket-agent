@@ -326,6 +326,12 @@ fn worker_loop(
     }
 
     loop {
+        if stream_handle.is_stale() {
+            // Phone attached or left: this capture's audio no longer arrives.
+            eprintln!("[conv] audio source switched, ending conversation");
+            let _ = app.emit("conversation-ended", ());
+            break;
+        }
         if mode == Mode::Acknowledging && ready_since.elapsed() > Duration::from_secs(30) {
             let _ = app.emit("stt-error", serde_json::json!({"error": "等待确认音效超时，请重新开始对话"}));
             let _ = app.emit("conversation-ended", ());

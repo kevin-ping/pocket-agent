@@ -13,7 +13,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use base64::Engine;
 
-use crate::voice::record::{start_streaming_capture, stop_streaming_capture, OWNER_WAKE};
+use crate::voice::record::{start_streaming_capture, stop_streaming_capture, StreamingHandle, OWNER_WAKE};
 
 /// STT server URL for HTTP-based speaker embedding (bypasses macOS 12 ORT C API mismatch).
 const STT_SERVER_URL: &str = "http://127.0.0.1:8651";
@@ -244,6 +244,7 @@ pub fn start_wake_listener(app: AppHandle, _threshold: f32, _speaker_name: Optio
             let result = wake_http_worker_loop(
                 &app_worker,
                 &rx,
+                &stream_handle,
                 device_sr,
                 device_ch,
                 &stop_flag_worker,
@@ -311,6 +312,7 @@ pub fn stop_wake_listener() {
 fn wake_http_worker_loop(
     app: &AppHandle,
     rx: &mpsc::Receiver<Vec<i16>>,
+    stream: &StreamingHandle,
     device_sr: u32,
     device_ch: u16,
     stop_flag: &AtomicBool,
@@ -326,6 +328,11 @@ fn wake_http_worker_loop(
         let mut was_paused = false;
         let mut last_sent = std::time::Instant::now();
         while !stop_flag.load(Ordering::Acquire) {
+            if stream.is_stale() {
+                // Phone attached or left; the frontend re-arms on the new source.
+                eprintln!("[wake] audio source switched, stopping listener");
+                break;
+            }
             let paused = WAKE_PAUSED.load(Ordering::Acquire);
             let gap = overflow.swap(false, Ordering::AcqRel)
                 || last_sent.elapsed() > Duration::from_secs(10);

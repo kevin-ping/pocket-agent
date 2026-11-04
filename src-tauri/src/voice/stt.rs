@@ -25,7 +25,8 @@ fn mark_app_ready(notify: impl FnOnce()) {
 
 fn show_main_window(handle: Option<&tauri::AppHandle>, source: &str) {
     if let Some(h) = handle {
-        if let Some(window) = h.get_webview_window("main") {
+        // A /ui client (the phone) drives PA: the desktop window stays hidden.
+        if let Some(window) = h.get_webview_window("main").filter(|_| !crate::api::remote::is_ui_remote_active()) {
             let _ = window.show();
             eprintln!("[stt] window shown ({source})");
         }
