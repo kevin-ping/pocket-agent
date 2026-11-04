@@ -378,8 +378,8 @@
   // A new listen drops the previous reasoning; the user's last utterance stays on screen
   // (the next stt-result replaces it) until the idle wipe below.
   $: if ($characterState === 'listening') chatStore.clearReasoning();
-  // Privacy: 30 s after PA goes idle, what both sides said leaves the screen.
-  const IDLE_WIPE_MS = 30_000;
+  // Privacy: 5 min after PA goes idle, what both sides said leaves the screen.
+  const IDLE_WIPE_MS = 5 * 60_000;
   let idleWipeTimer: ReturnType<typeof setTimeout> | null = null;
   $: scheduleIdleWipe($characterState === 'idle');
   function scheduleIdleWipe(idle: boolean) {

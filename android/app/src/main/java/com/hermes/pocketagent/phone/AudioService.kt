@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -43,7 +44,9 @@ import java.util.concurrent.TimeUnit
  *          answered with `playing` / `done`; `{"type":"clear"}` stops at once;
  *          `{"type":"snapshot","id":N}` → one camera frame from [CameraHub];
  *  - up:   [CameraHub.stateJson] whenever the camera opens, closes or switches lens.
- * Reconnects on its own; a foreground service so it survives the screen off.
+ * Reconnects on its own; a foreground service so it survives the screen off
+ * and Home. Swiping the app away or the notification's 「断开」 stops it, so
+ * PA's voice returns to the Mac.
  */
 class AudioService : Service() {
     private val handler = Handler(Looper.getMainLooper())
@@ -75,6 +78,12 @@ class AudioService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_DISCONNECT) {
+            Log.i(TAG, "disconnect from the notification")
+            onDisconnect?.invoke() // MainActivity: close the camera and the page (/ui)
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (running) return START_STICKY
         running = true
         startForeground(NOTIFICATION_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
@@ -97,6 +106,14 @@ class AudioService : Service() {
         return START_STICKY
     }
 
+    // Swiped away from recents. Home and screen lock don't come here. The
+    // activity's onStop has already closed the camera.
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.i(TAG, "task removed: stopping")
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         running = false
         CameraHub.listener = null
@@ -117,11 +134,17 @@ class AudioService : Service() {
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL, "Pocket Agent 语音", NotificationManager.IMPORTANCE_LOW)
         )
+        val disconnect = PendingIntent.getService(
+            this, 0,
+            Intent(this, AudioService::class.java).setAction(ACTION_DISCONNECT),
+            PendingIntent.FLAG_IMMUTABLE,
+        )
         return Notification.Builder(this, CHANNEL)
             .setContentTitle("Pocket Agent")
             .setContentText("正在为 Mac 上的 Pocket Agent 收音和播放")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
+            .addAction(Notification.Action.Builder(null, "断开", disconnect).build())
             .build()
     }
 
@@ -273,13 +296,17 @@ class AudioService : Service() {
         }
     }
 
-    private companion object {
-        const val TAG = "PocketAgent"
-        const val CHANNEL = "pa_audio"
-        const val NOTIFICATION_ID = 1
-        const val RATE = 16000
-        const val FRAME_BYTES = RATE * 2 / 50 // 20 ms
-        const val RECONNECT_MS = 2000L
-        const val PLAY_TIMEOUT_S = 120L
+    companion object {
+        /** Set by the visible MainActivity; run on 「断开」 before the service stops. */
+        @Volatile var onDisconnect: (() -> Unit)? = null
+
+        private const val ACTION_DISCONNECT = "com.hermes.pocketagent.phone.DISCONNECT"
+        private const val TAG = "PocketAgent"
+        private const val CHANNEL = "pa_audio"
+        private const val NOTIFICATION_ID = 1
+        private const val RATE = 16000
+        private const val FRAME_BYTES = RATE * 2 / 50 // 20 ms
+        private const val RECONNECT_MS = 2000L
+        private const val PLAY_TIMEOUT_S = 120L
     }
 }

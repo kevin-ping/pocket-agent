@@ -89,7 +89,8 @@ fn audio_sender() -> &'static Mutex<std::sync::mpsc::Sender<AudioCmd>> {
 
                                 let (rate, volume) = emotion_to_prosody(&emotion);
                                 let tts_file = tts_path(&format);
-                                let tts_ok = generate_tts_to(&text, &tts_file, &voice, rate, volume);
+                                let still_wanted = || generation == AUDIO_GENERATION.load(Ordering::SeqCst);
+                                let tts_ok = generate_tts_to(&text, &tts_file, &voice, rate, volume, &still_wanted);
                                 eprintln!("[TTS-GEN] gen={} chars={} ok={}", generation, text.chars().count(), tts_ok);
 
                                 let text_len = text.chars().count();
@@ -245,8 +246,9 @@ fn play_on_phone(prep: &PreparedAudio) {
 /// Stop the pipeline and reset queue counter. Called on fn-key press and barge-in.
 pub fn audio_generation() -> u64 { AUDIO_GENERATION.load(Ordering::SeqCst) }
 
-pub fn stop_audio_queue() {
-    eprintln!("[AUDIO] stop requested");
+/// `reason` names the caller so every stop in the log can be traced.
+pub fn stop_audio_queue(reason: &str) {
+    eprintln!("[AUDIO] stop requested ({})", reason);
     AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst);
     // Supersede any in-flight SSE turn so its sentence callback stops
     // reserving queue slots that will never be released (leak → queue
@@ -545,18 +547,26 @@ fn phone_camera_hint(camera_on: bool) -> &'static str {
     if camera_on { PHONE_CAMERA_HINT } else { "" }
 }
 
-/// Facts, not advice (FEAT-DEV1): where PA is while its phone app is connected.
+/// Facts, not advice (FEAT-DEV1 / BUG-HINT1): where PA is at this message, once
+/// the phone app has connected in this run. Stated as the live state so an
+/// earlier device claim in the history (e.g. a refused switch_device) doesn't win.
 const PHONE_DRIVING_HINT: &str = "
-The user is using Pocket Agent through its phone app (screen, microphone and speaker on the phone). The switch_device tool (pocket_agent MCP server) moves Pocket Agent between the phone and this computer.";
+Right now (as of this message) Pocket Agent is on the user's phone: its phone app is open and in use (screen, microphone and speaker on the phone).";
 const PHONE_PARKED_HINT: &str = "
-Pocket Agent is on this computer; its phone app is connected and on standby. The switch_device tool (pocket_agent MCP server) moves Pocket Agent between the phone and this computer.";
+Right now (as of this message) Pocket Agent is on this computer; its phone app is connected and on standby.";
+const PHONE_GONE_HINT: &str = "
+Right now (as of this message) Pocket Agent is on this computer; its phone app is not connected.";
+const PHONE_LIVE_STATE: &str = " This is the live state at this message and can change between turns (for example when the user opens or closes the phone app); it is authoritative, and anything said earlier in this conversation about which device Pocket Agent is on may be out of date. The switch_device tool (pocket_agent MCP server) moves Pocket Agent between the phone and this computer.";
 
-fn phone_device_hint(phone_ui: bool, parked: bool) -> &'static str {
-    match (phone_ui, parked) {
-        (_, true) => PHONE_PARKED_HINT,
+/// `phone_ui`: a /ui page is attached; `seen`: the phone app connected at some point in this run.
+fn phone_device_hint(phone_ui: bool, parked: bool, seen: bool) -> String {
+    let state = match (phone_ui, parked) {
         (true, false) => PHONE_DRIVING_HINT,
-        (false, false) => "",
-    }
+        (true, true) => PHONE_PARKED_HINT,
+        (false, _) if seen || parked => PHONE_GONE_HINT,
+        (false, _) => return String::new(),
+    };
+    format!("{state}{PHONE_LIVE_STATE}")
 }
 
 fn mode_hint(mode: HermesTurnMode) -> &'static str {
@@ -619,48 +629,98 @@ fn emotion_to_prosody(emotion: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// One edge-tts run may take this long; a stuck handshake otherwise holds every
+/// queued sentence behind it for a minute.
+const TTS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// edge-tts talks to Microsoft's cloud service, so a single socket timeout is
-/// common; retry once before dropping the sentence.
-fn generate_tts_to(text: &str, path: &str, voice: &str, rate: &str, volume: &str) -> bool {
+/// common; retry once before dropping the sentence. `keep_going` returns false
+/// once nobody wants this sentence any more (barge-in): the run is killed and
+/// not retried.
+fn generate_tts_to(text: &str, path: &str, voice: &str, rate: &str, volume: &str, keep_going: &dyn Fn() -> bool) -> bool {
+    generate_tts_with_timeout(text, path, voice, rate, volume, TTS_TIMEOUT, keep_going)
+}
+
+fn generate_tts_with_timeout(
+    text: &str, path: &str, voice: &str, rate: &str, volume: &str,
+    timeout: std::time::Duration, keep_going: &dyn Fn() -> bool,
+) -> bool {
     if text.trim().is_empty() { return false; }
-    if generate_tts_once(text, path, voice, rate, volume) {
+    if generate_tts_once(text, path, voice, rate, volume, timeout, keep_going) {
         return true;
+    }
+    if !keep_going() {
+        return false;
     }
     eprintln!("[TTS] failed, retrying in 1s...");
     std::thread::sleep(std::time::Duration::from_secs(1));
-    generate_tts_once(text, path, voice, rate, volume)
+    keep_going() && generate_tts_once(text, path, voice, rate, volume, timeout, keep_going)
 }
 
-fn generate_tts_once(text: &str, path: &str, voice: &str, rate: &str, volume: &str) -> bool {
+fn generate_tts_once(
+    text: &str, path: &str, voice: &str, rate: &str, volume: &str,
+    timeout: std::time::Duration, keep_going: &dyn Fn() -> bool,
+) -> bool {
+    use std::io::Read;
     eprintln!("[TTS] generating for {} chars voice={} rate={} vol={}...", text.len(), voice, rate, volume);
     let rate_arg = format!("--rate={}", rate);
     let volume_arg = format!("--volume={}", volume);
-    let result = Command::new(edge_tts_bin())
+    let spawned = Command::new(edge_tts_bin())
         .arg("--voice").arg(voice)
         .arg("--text").arg(text)
         .arg(&rate_arg)
         .arg(&volume_arg)
         .arg("--write-media").arg(path)
-        .output();
-    match result {
-        Ok(output) => {
-            let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            if output.status.success() && bytes > 0 {
-                eprintln!("[TTS] OK, {} bytes", bytes);
-                true
-            } else {
-                // edge-tts creates the --write-media file before it can fail; remove the
-                // empty leftover so the player's exists() check doesn't try to decode it.
-                let _ = std::fs::remove_file(path);
-                eprintln!("[TTS] failed: {}", String::from_utf8_lossy(&output.stderr));
-                false
-            }
-        }
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
         Err(e) => {
             let _ = std::fs::remove_file(path);
             eprintln!("[TTS] error: {}", e);
-            false
+            return false;
         }
+    };
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if start.elapsed() >= timeout => {
+                eprintln!("[TTS] timed out after {:?}, killing edge-tts", timeout);
+                break None;
+            }
+            Ok(None) if !keep_going() => {
+                eprintln!("[TTS] interrupted, killing edge-tts");
+                break None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) => {
+                eprintln!("[TTS] wait error: {}", e);
+                break None;
+            }
+        }
+    };
+    let Some(status) = status else {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(path);
+        return false;
+    };
+    let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if status.success() && bytes > 0 {
+        eprintln!("[TTS] OK, {} bytes", bytes);
+        true
+    } else {
+        // edge-tts creates the --write-media file before it can fail; remove the
+        // empty leftover so the player's exists() check doesn't try to decode it.
+        let _ = std::fs::remove_file(path);
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        eprintln!("[TTS] failed: {}", stderr);
+        false
     }
 }
 
@@ -1156,7 +1216,11 @@ pub async fn send_message(
         hint.push_str("\nPocket Agent has no local desktop integration with this gateway. Gateway computer tools operate on the gateway/driver host, not automatically on this Mac. Do not claim to see or control this Mac.");
     }
     hint.push_str(phone_camera_hint(crate::voice::remote::is_camera_on()));
-    hint.push_str(phone_device_hint(crate::api::remote::ui_attached(), crate::voice::remote::is_parked()));
+    hint.push_str(&phone_device_hint(
+        crate::api::remote::ui_attached(),
+        crate::voice::remote::is_parked(),
+        crate::api::remote::phone_seen(),
+    ));
     if fixed.is_empty() {
         hint.push_str("
 
@@ -1310,6 +1374,7 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
 
 #[tauri::command]
 pub async fn discard_pending_turn(app: AppHandle) -> Result<(), String> {
+    eprintln!("[AUDIO] discard pending turn (frontend, after barge-in / cancel)");
     TURN_GENERATION.fetch_add(1, Ordering::SeqCst);
     AUDIO_GENERATION.fetch_add(1, Ordering::SeqCst);
     let result = crate::api::runs::cancel_all().await;
@@ -1419,7 +1484,7 @@ pub async fn preview_voice(
             "Hello, I'm your intelligent voice assistant. I'm very happy to talk with you."
         };
         let path = tts_path(&format);
-        if !generate_tts_to(text, &path, &voice, "+0%", "+0%") {
+        if !generate_tts_to(text, &path, &voice, "+0%", "+0%", &|| true) {
             return Err("voice preview generation failed".to_string());
         }
 
@@ -1601,15 +1666,19 @@ mod tests {
     }
 
     #[test]
-    fn phone_device_hint_states_where_pa_is_only_with_a_phone() {
-        assert!(phone_device_hint(false, false).is_empty(), "desktop alone: unchanged");
-        for (ui, parked) in [(true, false), (true, true), (false, true)] {
-            let hint = phone_device_hint(ui, parked);
-            assert!(hint.contains("switch_device"));
-            assert!(!hint.to_lowercase().contains("should"), "states a fact, gives no advice");
+    fn phone_device_hint_states_where_pa_is_now_once_a_phone_connected() {
+        assert!(phone_device_hint(false, false, false).is_empty(), "desktop alone: unchanged");
+        for (ui, parked, seen) in [(true, false, true), (true, true, true), (false, false, true), (false, true, true)] {
+            let hint = phone_device_hint(ui, parked, seen);
+            assert!(hint.contains("Right now (as of this message)") && hint.contains("live state"));
+            assert!(hint.contains("authoritative") && hint.contains("switch_device"));
+            let lower = hint.to_lowercase();
+            assert!(!lower.contains("should") && !lower.contains("must"), "states a fact, gives no advice");
         }
-        assert!(phone_device_hint(true, false).contains("through its phone app"));
-        assert!(phone_device_hint(true, true).contains("on this computer"));
+        assert!(phone_device_hint(true, false, true).contains("on the user's phone"));
+        assert!(phone_device_hint(true, true, true).contains("on this computer; its phone app is connected and on standby"));
+        assert!(phone_device_hint(false, false, true).contains("on this computer; its phone app is not connected"));
+        assert!(phone_device_hint(false, true, true).contains("not connected"), "parked page gone");
     }
 
     #[test]
@@ -1688,7 +1757,7 @@ mod tests {
             (fake("ok.sh", "ID3", 0), true),
         ] {
             std::env::set_var("EDGE_TTS_BIN", &bin);
-            assert_eq!(generate_tts_to("hi", out, "en-US-AriaNeural", "+0%", "+0%"), expect, "{:?}", bin);
+            assert_eq!(generate_tts_to("hi", out, "en-US-AriaNeural", "+0%", "+0%", &|| true), expect, "{:?}", bin);
             assert_eq!(Path::new(out).exists(), expect, "{:?}", bin);
             let _ = std::fs::remove_file(out);
         }
@@ -1702,10 +1771,38 @@ mod tests {
         )).unwrap();
         std::fs::set_permissions(&flaky, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("EDGE_TTS_BIN", &flaky);
-        assert!(generate_tts_to("hi", out, "en-US-AriaNeural", "+0%", "+0%"));
+        assert!(generate_tts_to("hi", out, "en-US-AriaNeural", "+0%", "+0%", &|| true));
         assert!(Path::new(out).exists());
         assert_eq!(std::fs::read_to_string(&runs).unwrap().lines().count(), 2);
         let _ = std::fs::remove_file(out);
+
+        // Interrupted during the first (failing) run: no retry.
+        let _ = std::fs::remove_file(&runs);
+        std::fs::write(&flaky, format!(
+            "#!/bin/sh\necho x >> \"{}\"\nexit 1\n", runs.display()
+        )).unwrap();
+        assert!(!generate_tts_to("hi", out, "en-US-AriaNeural", "+0%", "+0%", &|| !runs.exists()));
+        assert_eq!(std::fs::read_to_string(&runs).unwrap().lines().count(), 1);
+
+        // Hung edge-tts (stuck handshake): each run is killed at the timeout,
+        // the retry hangs too, the half-written file is removed.
+        let hang = dir.join("hang.sh");
+        std::fs::write(&hang,
+            "#!/bin/sh\nwhile [ \"$1\" != \"--write-media\" ]; do shift; done\nprintf 'ID3' > \"$2\"\nexec sleep 30\n"
+        ).unwrap();
+        std::fs::set_permissions(&hang, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("EDGE_TTS_BIN", &hang);
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(500);
+        assert!(!generate_tts_with_timeout("hi", out, "en-US-AriaNeural", "+0%", "+0%", timeout, &|| true));
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
+        assert!(!Path::new(out).exists());
+
+        // Barge-in while hung: killed right away, not after the timeout.
+        let start = std::time::Instant::now();
+        assert!(!generate_tts_with_timeout("hi", out, "en-US-AriaNeural", "+0%", "+0%", TTS_TIMEOUT, &|| false));
+        assert!(start.elapsed() < std::time::Duration::from_secs(2), "{:?}", start.elapsed());
+        assert!(!Path::new(out).exists());
         std::env::remove_var("EDGE_TTS_BIN");
         let _ = std::fs::remove_dir_all(&dir);
     }

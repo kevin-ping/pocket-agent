@@ -479,6 +479,7 @@ struct WakeCheckResult {
     speaker_match: bool,
     keyword_match: bool,
     keyword_text: String,
+    score: f64,
 }
 
 /// Reuse enrolled keyword AND speaker verification during playback. Errors fail
@@ -486,6 +487,13 @@ struct WakeCheckResult {
 /// Speaker verification reduces speaker echo false positives; it is not AEC.
 pub fn check_interrupt_wake(samples: &[i16], sr: u32, threshold: f32) -> Result<bool, String> {
     let result = wake_http_check(samples, sr, 1, threshold)?;
+    if result.keyword_match {
+        // Keyword hits are rare; log them so every barge-in stop can be traced.
+        eprintln!(
+            "[conv] barge-in check: kw=\"{}\" speaker_match={} score={:.2} threshold={:.2}",
+            result.keyword_text, result.speaker_match, result.score, threshold
+        );
+    }
     Ok(result.speaker_match && result.keyword_match && !result.keyword_text.trim().is_empty())
 }
 
@@ -509,6 +517,7 @@ fn wake_http_check(
         speaker_match: v["speaker_match"].as_bool().unwrap_or(false),
         keyword_match: v["keyword_match"].as_bool().unwrap_or(false),
         keyword_text: v["keyword_text"].as_str().unwrap_or("").to_string(),
+        score: v["score"].as_f64().unwrap_or(0.0),
     })
 }
 

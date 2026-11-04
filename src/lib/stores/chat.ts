@@ -392,7 +392,7 @@ function createChatStore() {
 
     /** Reset for a new turn. `keepTranscript` keeps what was said on screen —
      *  the user's last utterance and PA's last reply — which only the idle
-     *  timeout in App.svelte wipes (privacy: nothing lingers past 30 s idle). */
+     *  timeout in App.svelte wipes (privacy: nothing lingers past 5 min idle). */
     clear: (opts: { keepTranscript?: boolean } = {}) => {
       if (typewriterTimer) { clearInterval(typewriterTimer); typewriterTimer = null; }
       if (pendingChars.length > 0) pendingChars = [];

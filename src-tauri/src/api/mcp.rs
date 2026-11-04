@@ -3,8 +3,9 @@
 // Phone camera (open / snapshot / close) and switching between phone and
 // desktop. Hermes decides when to use them; PA carries them out and answers
 // with the plain fact. Every result is a content block, never a JSON-RPC
-// error. Write-capable tools carry no readOnlyHint: with the server set to
-// `trust: untrusted` in Hermes, those are the ones that ask for approval.
+// error. Every tool carries readOnlyHint, so none asks for approval; the
+// server stays `trust: untrusted` in Hermes so a future tool without the hint
+// asks (Hermes approvals never remember "session" / "always").
 // Streamable HTTP with plain JSON responses: POST /mcp carries one JSON-RPC
 // message; there is no server-initiated stream (GET → 405) and no session.
 // Auth: `Authorization: Bearer <API_SERVER_KEY>`, and unlike the other bearer
@@ -114,7 +115,7 @@ fn tools() -> Value {
                 "type": "object",
                 "properties": { "facing": { "type": "string", "enum": ["front", "back"], "description": "The lens the user asked for: front = selfie lens, back = rear lens" } },
             },
-            "annotations": { "title": "Open phone camera", "readOnlyHint": false, "openWorldHint": false },
+            "annotations": { "title": "Open phone camera", "readOnlyHint": true, "openWorldHint": false },
         },
         {
             "name": SNAPSHOT,
@@ -270,14 +271,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_marks_only_camera_open_as_needing_approval() {
+    async fn tools_list_marks_every_tool_read_only() {
         let reply = call(r#"{"jsonrpc":"2.0","id":"a","method":"tools/list"}"#).await.unwrap();
         let tools = reply["result"]["tools"].as_array().unwrap();
         let read_only: Vec<(&str, bool)> = tools
             .iter()
             .map(|t| (t["name"].as_str().unwrap(), t["annotations"]["readOnlyHint"] == true))
             .collect();
-        assert_eq!(read_only, vec![(CAMERA_OPEN, false), (SNAPSHOT, true), (CAMERA_CLOSE, true), (SWITCH_DEVICE, true)]);
+        assert_eq!(read_only, vec![(CAMERA_OPEN, true), (SNAPSHOT, true), (CAMERA_CLOSE, true), (SWITCH_DEVICE, true)]);
         assert_eq!(tools[0]["inputSchema"]["properties"]["facing"]["enum"], json!(["front", "back"]));
         assert!(tools[0]["inputSchema"].get("required").is_none(), "facing is optional: Hermes asks the user");
         assert_eq!(tools[3]["inputSchema"]["required"], json!(["target"]));

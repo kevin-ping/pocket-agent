@@ -10,13 +10,14 @@
   import StatusPanel from '../StatusPanel.svelte';
   import ReasoningPanel from '../ReasoningPanel.svelte';
   import Icon from '../Icon.svelte';
-  import { listen } from '../../ipc';
+  import { invoke, listen } from '../../ipc';
   import { onDestroy, tick } from 'svelte';
 
   // Phone portrait (/ui): golden-ratio split — avatar stage on top, a dock
   // below with two swipeable pages: the reply plus the user's transcript, and
   // the tools plus reasoning. The dock slides to the page that matches the
-  // turn as it changes phase. The camera button (Android
+  // turn as it changes phase. The computer button (top left) moves PA to the
+  // desktop at once and parks this phone. The camera button (Android
   // shell only) swaps the dock for a viewfinder: the shell lays its native
   // preview over the box we reserve, and Hermes can grab a frame through PA's
   // /mcp. App.svelte computes every state; this only lays it out.
@@ -135,7 +136,28 @@
   // Registered once per mount, never from an effect.
   const unlistenCamera = camera ? listen<CameraCommand>('phone-camera', (e) => onCameraCommand(e.payload)) : null;
 
+  // Two taps to move: the first arms the button for 3 s, the second parks.
+  // The server answers with ui-parked; src/main.ts then reloads into the
+  // parked page. A refusal (this page was replaced) changes nothing.
+  let parkArmed = $state(false);
+  let parkTimer: ReturnType<typeof setTimeout> | undefined;
+  async function moveToDesktop() {
+    if (!parkArmed) {
+      parkArmed = true;
+      parkTimer = setTimeout(() => (parkArmed = false), 3000);
+      return;
+    }
+    clearTimeout(parkTimer);
+    parkArmed = false;
+    try {
+      await invoke('park');
+    } catch (e) {
+      console.warn('[mobile] park refused:', e);
+    }
+  }
+
   onDestroy(() => {
+    clearTimeout(parkTimer);
     void unlistenCamera?.then((unlisten) => unlisten());
     window.removeEventListener('pa-camera', onCameraEvent);
     resize?.disconnect();
@@ -155,6 +177,14 @@
     {/each}
     <div class="avatar-box"><MobileAvatar {...avatar} /></div>
     <div class="island"><DynamicIsland mode={islandMode} {audioLevel} /></div>
+    <button
+      type="button"
+      class="toggle left"
+      class:armed={parkArmed}
+      onclick={moveToDesktop}
+      aria-label={parkArmed ? '再点一次移到电脑' : '移到电脑'}
+    ><Icon name="monitor" size={20} color="rgba(232, 232, 240, 0.92)" /></button>
+    {#if parkArmed}<span class="park-hint" role="status">再点一次移到电脑</span>{/if}
     {#if camera}
       <button
         type="button"
@@ -277,6 +307,30 @@
     justify-content: center;
     cursor: pointer;
     transition: background 0.2s ease, border-color 0.2s ease;
+  }
+  .toggle.left {
+    right: auto;
+    left: 12px;
+  }
+  .toggle.armed {
+    background: rgba(96, 104, 240, 0.7);
+    border-color: rgba(190, 196, 255, 0.75);
+  }
+  .park-hint {
+    position: absolute;
+    top: calc(18px + env(safe-area-inset-top));
+    left: 64px;
+    z-index: 2;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: rgba(10, 10, 22, 0.7);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    color: rgba(232, 232, 240, 0.92);
+    font-size: 13px;
+    line-height: 16px;
+    white-space: nowrap;
+    pointer-events: none;
   }
   .toggle.on {
     background: rgba(224, 48, 104, 0.55);

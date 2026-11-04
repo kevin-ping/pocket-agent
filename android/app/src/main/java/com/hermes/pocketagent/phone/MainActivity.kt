@@ -46,6 +46,8 @@ class MainActivity : Activity() {
     private var resumed = false
     // Bumped whenever the camera must not open from earlier requests (pause, navigation, close).
     @Volatile private var cameraGen = 0
+    // The notification's 「断开」: close the camera and the page too, so /ui goes and the Mac drives again.
+    private val disconnect: () -> Unit = { runOnUiThread { stopCamera(); finishAndRemoveTask() } }
 
     private data class CameraRequest(val left: Int, val top: Int, val width: Int, val height: Int, val front: Boolean)
 
@@ -59,6 +61,7 @@ class MainActivity : Activity() {
         registerReceiver(powerReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
             ?.let { keepScreenOnWhenPlugged(it) }
         if (Config.load(this) == null) showSettings() else start()
+        AudioService.onDisconnect = disconnect
     }
 
     override fun onResume() {
@@ -86,6 +89,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        if (AudioService.onDisconnect === disconnect) AudioService.onDisconnect = null
         camera?.close()
         unregisterReceiver(powerReceiver)
         handler.removeCallbacksAndMessages(null)

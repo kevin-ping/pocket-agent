@@ -68,7 +68,7 @@ pub const UI_COMMANDS: &[&str] = &[
     "reset_hotkey_active_state", "respond_computer_approval", "save_chat_message", "send_message", "set_double_click_mode",
     "settle_background_subagents", "speak_status", "speak_text", "start_continuous_conversation",
     "start_wake_word_listening", "stop_continuous_conversation", "stop_wake_word_listening",
-    "wake_model_status", "is_ui_parked", "set_ui_visible", "take_over",
+    "wake_model_status", "is_ui_parked", "set_ui_visible", "take_over", "park",
 ];
 
 /// All a parked phone may do: ask whether it is parked, report whether it is
@@ -156,6 +156,8 @@ struct UiClient {
 static UI_CLIENT: Mutex<Option<UiClient>> = Mutex::new(None);
 static NEXT_UI_ID: AtomicU64 = AtomicU64::new(0);
 static UI_REMOTE_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// A /ui page has connected at some point in this run (the device hint, commands/chat.rs).
+static PHONE_SEEN: AtomicBool = AtomicBool::new(false);
 /// Set once at startup (forward_ui_events); a deferred switch runs without a request in hand.
 static APP: OnceLock<AppHandle> = OnceLock::new();
 
@@ -163,6 +165,12 @@ static APP: OnceLock<AppHandle> = OnceLock::new();
 #[tauri::command]
 pub fn is_ui_remote_active() -> bool {
     UI_REMOTE_ACTIVE.load(Ordering::Acquire)
+}
+
+/// voice/remote tests: the phone driving without a /ui session.
+#[cfg(test)]
+pub(crate) fn set_ui_remote_active(active: bool) {
+    UI_REMOTE_ACTIVE.store(active, Ordering::Release);
 }
 
 /// Forward the main window's events to the /ui client. Registered once at startup.
@@ -199,6 +207,10 @@ pub(crate) fn ui_attached() -> bool {
     lock(&UI_CLIENT).is_some()
 }
 
+pub(crate) fn phone_seen() -> bool {
+    PHONE_SEEN.load(Ordering::Acquire)
+}
+
 fn ui_in_foreground() -> bool {
     lock(&UI_CLIENT).as_ref().is_some_and(|c| c.visible)
 }
@@ -230,6 +242,7 @@ async fn ui_session(app: AppHandle, socket: WebSocket) {
     let (kick, mut kicked) = oneshot::channel::<()>();
     let id = NEXT_UI_ID.fetch_add(1, Ordering::AcqRel) + 1;
     *lock(&UI_CLIENT) = Some(UiClient { id, tx: tx.clone(), visible: false, _kick: kick });
+    PHONE_SEEN.store(true, Ordering::Release);
     eprintln!("[remote] /ui client {} connected", id);
     sync_driver(&app);
 
@@ -316,7 +329,7 @@ fn sync_driver(app: &AppHandle) {
     tauri::async_runtime::spawn_blocking(move || {
         converge_driver(|was_remote, remote| {
             // The switch interrupts whatever is playing or listening so the new driver starts clean.
-            crate::commands::chat::stop_audio_queue();
+            crate::commands::chat::stop_audio_queue("driver switch");
             crate::voice::conversation::stop_conversation();
             if was_remote == remote {
                 return; // phone → phone: the window and the desktop shell stay as they are
@@ -331,6 +344,9 @@ fn sync_driver(app: &AppHandle) {
             // Desktop-only event: the main window reloads into (or out of) its idle shell.
             let _ = app.emit("ui-remote-active", remote);
         });
+        // The audio source follows the driver; converging after the driver
+        // (whether it changed or not) settles both whatever order /ui and /audio arrive in.
+        crate::voice::remote::sync_source(&app);
     });
 }
 
@@ -402,6 +418,7 @@ async fn dispatch(app: &AppHandle, client: u64, cmd: &str, a: &Value) -> Result<
     match cmd {
         "is_ui_parked" => ok(is_parked()),
         "take_over" => ok(take_over(app, client)?),
+        "park" => ok(park(app, client)?),
         "send_message" => ok(chat::send_message(
             app.clone(), app.state(), arg(a, "text")?, arg(a, "ttsFormat")?, arg(a, "ttsPrimaryVoice")?,
             arg(a, "ttsAux1Voice")?, arg(a, "ttsAux2Voice")?, arg(a, "userLanguage")?, arg(a, "fixedLang")?,
@@ -520,7 +537,7 @@ struct PhoneState {
 /// Taking over needs the phone page on screen and its audio online.
 fn switch_answer(target: Device, p: PhoneState) -> Result<&'static str, &'static str> {
     match target {
-        Device::Desktop if p.parked || (!p.ui && !p.audio) => Err(ALREADY_ON_DESKTOP),
+        Device::Desktop if p.parked || !p.ui => Err(ALREADY_ON_DESKTOP),
         Device::Desktop => Ok(SWITCHING_TO_DESKTOP),
         Device::Phone if !p.parked && p.ui => Err(ALREADY_ON_PHONE),
         Device::Phone if !p.foreground || !p.audio => Err(PHONE_UI_ABSENT),
@@ -621,8 +638,7 @@ fn announce_park(parked: bool) {
     // The page reloads into (or out of) its parked screen.
     send_to_ui("ui-parked", json!({ "parked": parked }));
     if let Some(app) = APP.get() {
-        sync_driver(app);
-        sync_source(app);
+        sync_driver(app); // converges the audio source too
     }
 }
 
@@ -648,6 +664,31 @@ fn commit_take_over(client: u64) -> bool {
     }
     *gen += 1;
     set_parked(false);
+    true
+}
+
+pub const PARK_STALE: &str = "park from a /ui page that has since been replaced";
+
+/// The phone page's "move to the computer" button: park now and cancel any
+/// booking. Like take_over, only the current /ui client may.
+fn park(app: &AppHandle, client: u64) -> Result<bool, String> {
+    let _ = APP.set(app.clone());
+    if !commit_park(client) {
+        eprintln!("[remote] park from replaced /ui client {} ignored", client);
+        return Err(PARK_STALE.into());
+    }
+    eprintln!("[remote] phone parks: moving to the desktop");
+    announce_park(true);
+    Ok(true)
+}
+
+fn commit_park(client: u64) -> bool {
+    let mut gen = lock(&SWITCH);
+    if lock(&UI_CLIENT).as_ref().is_none_or(|c| c.id != client) {
+        return false;
+    }
+    *gen += 1;
+    set_parked(true);
     true
 }
 
@@ -814,6 +855,47 @@ mod tests {
     }
 
     #[test]
+    fn the_phone_is_the_audio_source_only_while_its_page_drives() {
+        use crate::voice::remote::{attach_phone, detach_phone, phone_is_source};
+        let _t = test_lock();
+        let audio = || {
+            let (tx, rx) = mpsc::unbounded_channel();
+            std::mem::forget(rx);
+            attach_phone(tx)
+        };
+        // /audio first (the app's service reconnects after a PA restart), /ui later.
+        let conn = audio();
+        converge_driver(|_, _| {});
+        assert!(!phone_is_source(), "/audio alone: the desktop drives, local mic and speaker");
+        *lock(&UI_CLIENT) = Some(ui_client(61));
+        converge_driver(|_, _| {});
+        assert!(phone_is_source(), "the page drives → the phone's mic and speaker");
+        // Parked → local; taken over → the phone again.
+        set_parked(true);
+        converge_driver(|_, _| {});
+        assert!(!phone_is_source());
+        set_parked(false);
+        converge_driver(|_, _| {});
+        assert!(phone_is_source());
+        // The page goes away while /audio stays.
+        *lock(&UI_CLIENT) = None;
+        converge_driver(|_, _| {});
+        assert!(!phone_is_source(), "/ui gone → back to local");
+        detach_phone(conn);
+
+        // The other order: /ui first, /audio later.
+        *lock(&UI_CLIENT) = Some(ui_client(62));
+        converge_driver(|_, _| {});
+        assert!(!phone_is_source(), "no /audio yet");
+        let conn = audio();
+        assert!(phone_is_source());
+        detach_phone(conn);
+        assert!(!phone_is_source());
+        *lock(&UI_CLIENT) = None;
+        converge_driver(|_, _| {});
+    }
+
+    #[test]
     fn a_parked_page_can_only_ask_and_take_over() {
         assert!(command_allowed("send_message", false));
         assert!(!command_allowed("send_message", true));
@@ -830,7 +912,7 @@ mod tests {
         use Device::*;
         let s = |parked, ui, foreground, audio| PhoneState { parked, ui, foreground, audio };
         assert_eq!(switch_answer(Desktop, s(false, true, true, true)), Ok(SWITCHING_TO_DESKTOP));
-        assert_eq!(switch_answer(Desktop, s(false, false, false, true)), Ok(SWITCHING_TO_DESKTOP), "voice is still on the phone");
+        assert_eq!(switch_answer(Desktop, s(false, false, false, true)), Err(ALREADY_ON_DESKTOP), "/audio alone: voice follows the desktop driver");
         assert_eq!(switch_answer(Desktop, s(true, true, true, true)), Err(ALREADY_ON_DESKTOP));
         assert_eq!(switch_answer(Desktop, s(false, false, false, false)), Err(ALREADY_ON_DESKTOP));
         assert_eq!(switch_answer(Phone, s(false, true, false, true)), Err(ALREADY_ON_PHONE));
@@ -949,6 +1031,49 @@ mod tests {
         assert!(commit_take_over(52));
         assert!(!is_parked());
         phone_offline(conn);
+    }
+
+    #[test]
+    fn the_current_page_parks_at_once_and_cancels_the_booking() {
+        let _t = test_lock();
+        let conn = phone_online(71);
+        // A switch_device(desktop) booked for after the turn; the user presses the button first.
+        let (_, gen) = book_switch(Device::Desktop).unwrap();
+        assert!(commit_park(71));
+        assert!(is_parked(), "parked right away, not after the turn");
+        assert!(!commit_switch(gen, Device::Desktop, || Ok("")), "the booking is cancelled");
+        // Parked, Hermes books a switch back to the phone; pressing the button again cancels it.
+        let (_, gen) = book_switch(Device::Phone).unwrap();
+        assert!(commit_park(71));
+        assert!(!commit_switch(gen, Device::Phone, || Ok("")));
+        assert!(is_parked());
+        // The parked page's take_over still works.
+        assert!(commit_take_over(71));
+        assert!(!is_parked());
+        phone_offline(conn);
+    }
+
+    #[test]
+    fn a_replaced_pages_queued_park_is_stale() {
+        let _t = test_lock();
+        let conn = phone_online(81);
+        // Page 81 sends park; before it runs, page 82 replaces it and books a switch through Hermes.
+        *lock(&UI_CLIENT) = Some(ui_client(82));
+        let (_, gen) = book_switch(Device::Desktop).unwrap();
+        assert!(!commit_park(81), "81 is no longer the /ui client");
+        assert!(!is_parked(), "a stale park leaves PARKED alone");
+        assert!(commit_switch(gen, Device::Desktop, || Ok("")), "…and does not cancel the new page's booking");
+        set_parked(false);
+        *lock(&UI_CLIENT) = None;
+        assert!(!commit_park(82), "no /ui client: refused");
+        assert!(!is_parked());
+        phone_offline(conn);
+    }
+
+    #[test]
+    fn a_parked_page_cannot_park_again() {
+        assert!(command_allowed("park", false));
+        assert!(!command_allowed("park", true));
     }
 
     fn quiet_after(turn: Arc<AtomicBool>, audio: Arc<AtomicBool>, drain_max: Duration) -> std::time::Duration {

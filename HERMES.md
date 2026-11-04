@@ -99,10 +99,10 @@ mcp_servers:
     url: http://127.0.0.1:8650/mcp
     headers:
       Authorization: Bearer ${API_SERVER_KEY}
-    trust: untrusted   # tools without readOnlyHint (phone_camera_open) need approval
+    trust: untrusted   # tools without readOnlyHint need approval; all four current tools carry it
 ```
 
-Hermes asks for approval only when the server is `trust: untrusted`, and then only for tools without `readOnlyHint`; there is no per-tool allow list. So only `phone_camera_open` asks. Approvals reach PA's approval prompt through `/v1/runs`; turns sent through `/bridge/send` have nobody to approve, and Hermes treats them as denied after its 60-second timeout. PA adds a one-line fact to UI turns while the phone camera is open, and where PA is (phone / parked) while the phone app is connected. Tool results and the full protocol: [docs/API_MANUAL.md](docs/API_MANUAL.md).
+Hermes asks for approval only when the server is `trust: untrusted`, and then only for tools without `readOnlyHint`; there is no per-tool allow list, and Hermes MCP approvals never remember "allow for this session" / "always allow" — every call asks again. So all four tools carry `readOnlyHint` and none asks; `trust: untrusted` stays as a safety net for future tools without the hint. Approvals reach PA's approval prompt through `/v1/runs`; turns sent through `/bridge/send` have nobody to approve, and Hermes treats them as denied after its 60-second timeout. PA adds a one-line fact to UI turns while the phone camera is open, and, once the phone app has connected in this PA run, where PA is right now (on the phone / on this computer with the phone on standby / on this computer with the phone app not connected), marked as the live state that overrides earlier device claims in the conversation. Tool results and the full protocol: [docs/API_MANUAL.md](docs/API_MANUAL.md).
 
 ## Reasoning and status on `/v1/runs` (local patch)
 

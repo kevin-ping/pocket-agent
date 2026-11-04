@@ -60,6 +60,10 @@
   {:else if name === 'camera'}
     <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z" />
     <circle cx="12" cy="13" r="3" />
+  {:else if name === 'monitor'}
+    <rect x="2" y="3" width="20" height="14" rx="2" />
+    <path d="M8 21h8" />
+    <path d="M12 17v4" />
   {:else if name === 'switch-camera'}
     <path d="M11 19H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5" />
     <path d="M13 5h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-5" />

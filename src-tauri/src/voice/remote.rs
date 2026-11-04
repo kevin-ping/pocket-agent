@@ -430,13 +430,16 @@ fn is_jpeg_b64(b64: &str) -> bool {
 
 static SWITCH: Mutex<()> = Mutex::new(());
 
-/// A parked phone counts as offline: local mic and speaker.
-fn phone_is_source() -> bool {
-    phone_attached() && !is_parked()
+/// The phone's mic and speaker follow the driver: only while the phone page
+/// drives (attached on /ui and not parked) and /audio is connected. /audio
+/// alone (e.g. the app's service reconnected after a PA restart, the page did
+/// not) or a parked phone → local mic and speaker.
+pub(crate) fn phone_is_source() -> bool {
+    phone_attached() && crate::api::remote::is_ui_remote_active() && !is_parked()
 }
 
-/// Converge the active source on whether an unparked phone is attached. Called
-/// after every attach / detach / park (blocking: it joins the wake worker). Reading the
+/// Converge the active source on phone_is_source. Called after every /audio
+/// attach / detach and every driver convergence (blocking: it joins the wake worker). Reading the
 /// target here rather than passing it in keeps racing connect / disconnect
 /// tasks from landing in the wrong order.
 pub fn sync_source(app: &AppHandle) {
@@ -452,7 +455,7 @@ pub fn sync_source(app: &AppHandle) {
         SOURCE_EPOCH.fetch_add(1, Ordering::AcqRel);
     }
     eprintln!("[remote] audio source → {}", if online { "phone" } else { "local" });
-    crate::commands::chat::stop_audio_queue();
+    crate::commands::chat::stop_audio_queue(if online { "audio source → phone" } else { "audio source → local" });
     crate::voice::sherpa_wake::stop_wake_listener();
     crate::voice::conversation::stop_conversation();
     // Workers on the old source also exit on their own once they see the epoch
@@ -738,6 +741,7 @@ mod tests {
     #[test]
     fn a_parked_phone_is_not_the_source_and_reconnecting_keeps_it_parked() {
         let _t = lock(&TEST_LOCK);
+        crate::api::remote::set_ui_remote_active(true); // the phone page drives
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let conn = attach_phone(tx);
         assert!(phone_is_source());
@@ -768,6 +772,7 @@ mod tests {
         assert_eq!(cap_rx.try_recv().unwrap(), vec![3]);
         detach_capture(id);
         detach_phone(again);
+        crate::api::remote::set_ui_remote_active(false);
     }
 
     #[test]

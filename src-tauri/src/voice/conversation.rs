@@ -578,7 +578,7 @@ fn worker_loop(
                 if mode != Mode::Speaking || epoch != wake_epoch || !matched {
                     continue;
                 }
-                crate::commands::chat::stop_audio_queue();
+                crate::commands::chat::stop_audio_queue("barge-in wake");
                 mode = Mode::Acknowledging;
                 ready_since = Instant::now();
                 wake_epoch = wake_epoch.wrapping_add(1);

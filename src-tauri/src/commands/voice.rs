@@ -138,7 +138,7 @@ pub fn start_voice_recording(
 
     // Destructive actions deferred from the hotkey thread so the break-confirmation
     // popup can intercept them: stop any in-progress TTS, then warm up the mic.
-    crate::commands::chat::stop_audio_queue();
+    crate::commands::chat::stop_audio_queue("single-shot start");
     crate::voice::record::pre_start();
 
     let handle = match take_pre_started() {
@@ -444,7 +444,7 @@ pub fn stop_continuous_conversation() -> Result<(), String> {
     // otherwise the assistant keeps reading a long reply after the user has
     // explicitly ended the session. Safe for single-shot too: that path stops
     // before send_message allocates its turn, so the generation bump is a no-op.
-    crate::commands::chat::stop_audio_queue();
+    crate::commands::chat::stop_audio_queue("conversation stopped");
     crate::voice::conversation::stop_conversation();
     Ok(())
 }
@@ -520,7 +520,7 @@ pub fn start_enroll_recording(
     try_acquire_capture(OWNER_SINGLE_SHOT)?;
     let reservation = ReservationGuard { committed: false };
 
-    crate::commands::chat::stop_audio_queue();
+    crate::commands::chat::stop_audio_queue("enroll recording start");
     crate::voice::record::pre_start();
 
     let handle = match take_pre_started() {
