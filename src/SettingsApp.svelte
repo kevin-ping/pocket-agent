@@ -12,7 +12,7 @@
     type AppSettings,
   } from './lib/stores/settings';
   import type { CharacterState } from './lib/stores/character';
-  import MeshFace from './lib/components/MeshFace.svelte';
+  import MeshFace, { MESH_SUPPORTED } from './lib/components/MeshFace.svelte';
   import { avatarGradient } from './lib/avatarColors';
   import Field from './lib/components/settings/Field.svelte';
   import Toggle from './lib/components/settings/Toggle.svelte';
@@ -489,7 +489,7 @@
             <fieldset class="mesh-body" disabled={!local.mesh_avatar_enabled}>
               <div class="mesh-preview">
                 <div class="mesh-circle" style:background={previewBackground(meshPreviewState, local.avatar_bg_colors[meshPreviewState])}>
-                  {#if meshPreviewStatus !== 'failed'}
+                  {#if MESH_SUPPORTED && meshPreviewStatus !== 'failed'}
                     <MeshFace state={meshPreviewState} mouth={meshPreviewState === 'speaking'} scale={local.mesh_avatar_scale}
                       offsetX={local.mesh_avatar_offset_x} offsetY={local.mesh_avatar_offset_y}
                       expressions={local.mesh_avatar_expressions} emotions={local.mesh_avatar_emotions}

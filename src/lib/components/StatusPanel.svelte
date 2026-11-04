@@ -28,7 +28,7 @@
   $effect(() => {
     const steps = $chatStore.thinkingSteps;
     const stepCount = steps.length;
-    const latestStep = steps.at(-1) ?? '';
+    const latestStep = steps[stepCount - 1] ?? '';
     const currentVoiceStatus = $chatStore.voiceStatus;
 
     if (stepCount < previousStepCount) followLatest = true;

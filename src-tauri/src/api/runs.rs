@@ -57,6 +57,15 @@ pub(super) fn http() -> reqwest::Client {
         .build()
         .expect("HTTP client")
 }
+/// 401 / 403 from the gateway: the key PA sends is not the gateway's.
+pub(super) fn auth_failed(status: reqwest::StatusCode) -> String {
+    format!(
+        "Hermes 拒绝了密钥（HTTP {}）：PA 的 API_SERVER_KEY 必须与网关 ~/.hermes/.env 中的 API_SERVER_KEY 一致（{}）。",
+        status.as_u16(),
+        crate::commands::config::gateway_hint()
+    )
+}
+
 pub(super) fn authorized(request: reqwest::RequestBuilder, key: &Option<String>) -> reqwest::RequestBuilder {
     if let Some(key) = key {
         request.bearer_auth(key)
@@ -197,11 +206,22 @@ pub async fn chat_stream(
         .json(&json!({"input": text, "instructions": instructions, "session_id": session}))
         .send()
         .await
-        .map_err(|_| "Hermes 任务创建响应丢失，执行状态未知；请检查后再重试。")?;
+        .map_err(|e| {
+            if e.is_connect() {
+                // Refused before anything was sent: the run was not created.
+                format!("连不上 Hermes 网关：请确认网关已启动、API_SERVER 正确（{}）。", crate::commands::config::gateway_hint())
+            } else {
+                "Hermes 任务创建响应丢失，执行状态未知；请检查后再重试。".to_string()
+            }
+        })?;
     if !response.status().is_success() {
+        let status = response.status();
+        if matches!(status.as_u16(), 401 | 403) {
+            return Err(auth_failed(status));
+        }
         return Err(format!(
             "Hermes 任务接口失败（HTTP {}）。电脑交互需要支持 /v1/runs 的 Hermes 网关。",
-            response.status()
+            status
         ));
     }
     let value: Value = response

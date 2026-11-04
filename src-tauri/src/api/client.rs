@@ -93,10 +93,13 @@ impl HermesClient {
         let response = request_builder
             .send()
             .await
-            .map_err(|e| format!("Connection failed: {}", e))?;
+            .map_err(|e| format!("Connection failed: {}（{}）", e, crate::commands::config::gateway_hint()))?;
 
         if !response.status().is_success() {
             let status = response.status();
+            if matches!(status.as_u16(), 401 | 403) {
+                return Err(super::runs::auth_failed(status));
+            }
             let resp_body = response.text().await.unwrap_or_default();
             return Err(format!("API returned error {}: {}", status, resp_body));
         }

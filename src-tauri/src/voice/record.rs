@@ -255,9 +255,118 @@ struct Daemon {
     cmd_tx: Sender<DaemonCmd>,
     stream_ready: AtomicBool,
     start_ack: AtomicBool,
+    /// Cleared when the worker exits or never started; commands then fail
+    /// with a reason instead of going to a dropped receiver.
+    alive: AtomicBool,
 }
 
 static DAEMON: OnceLock<Daemon> = OnceLock::new();
+
+/// Why the last prewarm could not set up the daemon (no device, permission).
+static MIC_INIT_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+const WORKER_STOPPED: &str = "录音线程已停止，请重启 Pocket Agent。";
+
+fn no_input_device() -> String {
+    "找不到麦克风：请连接麦克风，或在「系统设置 → 声音 → 输入」中选择输入设备，然后再按一次录音键。".to_string()
+}
+
+/// `Some(reason)` when macOS has denied or restricted microphone access. Denied
+/// capture does not fail in cpal, it only records silence, so ask TCC directly.
+fn mic_permission_error() -> Option<String> {
+    match mic_auth::status() {
+        mic_auth::DENIED | mic_auth::RESTRICTED => Some(
+            "麦克风权限被拒绝：打开「系统设置 → 隐私与安全性 → 麦克风」，允许 Pocket Agent\
+             (源码运行时允许启动它的终端),然后重启 Pocket Agent。"
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod mic_auth {
+    use std::ffi::{c_char, c_void};
+
+    pub const RESTRICTED: isize = 1;
+    pub const DENIED: isize = 2;
+
+    #[link(name = "AVFoundation", kind = "framework")]
+    extern "C" {
+        static AVMediaTypeAudio: *const c_void;
+    }
+    #[link(name = "objc")]
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> *const c_void;
+        fn sel_registerName(name: *const c_char) -> *const c_void;
+        fn objc_msgSend();
+    }
+
+    /// `[AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio]`:
+    /// 0 not determined, 1 restricted, 2 denied, 3 authorized.
+    pub fn status() -> isize {
+        unsafe {
+            let class = objc_getClass(c"AVCaptureDevice".as_ptr());
+            if class.is_null() {
+                return 0;
+            }
+            let sel = sel_registerName(c"authorizationStatusForMediaType:".as_ptr());
+            let send: unsafe extern "C" fn(*const c_void, *const c_void, *const c_void) -> isize =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            send(class, sel, AVMediaTypeAudio)
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod mic_auth {
+    pub const RESTRICTED: isize = 1;
+    pub const DENIED: isize = 2;
+    pub fn status() -> isize {
+        0
+    }
+}
+
+/// Publish the daemon, then start its worker with the published reference.
+/// The worker never looks the daemon up itself, so whichever thread runs first
+/// it cannot see an unpublished one. Only the call that wins publication spawns.
+fn publish_then_spawn(
+    cell: &'static OnceLock<Daemon>,
+    spawn: impl FnOnce(&'static Daemon, Receiver<DaemonCmd>) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let (cmd_tx, cmd_rx) = mpsc::channel::<DaemonCmd>();
+    let daemon = Daemon {
+        cmd_tx,
+        stream_ready: AtomicBool::new(false),
+        start_ack: AtomicBool::new(false),
+        alive: AtomicBool::new(true),
+    };
+    if cell.set(daemon).is_err() {
+        return Ok(()); // another prewarm published first and runs its own worker
+    }
+    let daemon = cell.get().expect("just published");
+    spawn(daemon, cmd_rx).map_err(|e| {
+        daemon.alive.store(false, Ordering::Release);
+        format!("录音线程启动失败({e}),请重启 Pocket Agent。")
+    })
+}
+
+/// The published daemon if its worker is running. Retries prewarm first, so a
+/// microphone connected or permitted after launch works without a restart.
+fn ready_daemon() -> Result<&'static Daemon, String> {
+    if DAEMON.get().is_none() {
+        prewarm();
+    }
+    match DAEMON.get() {
+        Some(d) if d.alive.load(Ordering::Acquire) => Ok(d),
+        Some(_) => Err(WORKER_STOPPED.to_string()),
+        None => Err(MIC_INIT_ERROR
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .unwrap_or_else(|| "audio not initialized".to_string())),
+    }
+}
 
 // -- Public API --
 
@@ -265,27 +374,29 @@ pub struct RecordingHandle {
     _priv: (),
 }
 
-/// Initialize at app startup: discover device, spawn daemon thread
+/// Initialize at app startup: discover device, spawn daemon thread. On failure
+/// the reason is kept for the next recording attempt, which retries.
 pub fn prewarm() {
+    let result = try_prewarm();
+    if let Err(e) = &result {
+        eprintln!("[record] prewarm: {}", e);
+    }
+    *MIC_INIT_ERROR.lock().unwrap_or_else(|p| p.into_inner()) = result.err();
+}
+
+fn try_prewarm() -> Result<(), String> {
     if DAEMON.get().is_some() {
-        return;
+        return Ok(());
+    }
+    if let Some(e) = mic_permission_error() {
+        return Err(e);
     }
 
     let host = cpal::default_host();
-    let device = match host.default_input_device() {
-        Some(d) => d,
-        None => {
-            eprintln!("[record] prewarm: no mic found");
-            return;
-        }
-    };
-    let supported = match device.default_input_config() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[record] prewarm: config error: {}", e);
-            return;
-        }
-    };
+    let device = host.default_input_device().ok_or_else(no_input_device)?;
+    let supported = device
+        .default_input_config()
+        .map_err(|e| format!("无法读取麦克风配置({e}):请在「系统设置 → 声音 → 输入」中检查输入设备，然后再按一次录音键。"))?;
 
     let input_channels = supported.channels();
     // Always write mono — stt-server requires `channels == 1` (see _read_wav_bytes).
@@ -308,24 +419,18 @@ pub fn prewarm() {
         sample_fmt
     );
 
-    let (cmd_tx, cmd_rx) = mpsc::channel::<DaemonCmd>();
-
-    std::thread::Builder::new()
-        .name("audio-daemon".to_string())
-        .spawn(move || daemon_loop(device, stream_cfg, sample_fmt, wav_spec, input_channels, cmd_rx))
-        .expect("audio daemon spawn");
-
-    DAEMON.get_or_init(|| Daemon {
-        cmd_tx,
-        stream_ready: AtomicBool::new(false),
-        start_ack: AtomicBool::new(false),
-    });
+    publish_then_spawn(&DAEMON, move |daemon, cmd_rx| {
+        std::thread::Builder::new()
+            .name("audio-daemon".to_string())
+            .spawn(move || daemon_loop(daemon, device, stream_cfg, sample_fmt, wav_spec, input_channels, cmd_rx))
+            .map(|_| ())
+    })
 }
 
 /// Non-blocking: called from CGEvent hotkey callback.
 /// Sends Start to daemon; daemon calls stream.play() on its own thread.
 pub fn pre_start() {
-    if let Some(daemon) = DAEMON.get() {
+    if let Some(daemon) = DAEMON.get().filter(|d| d.alive.load(Ordering::Acquire)) {
         // Send Start even if stream not ready — daemon will process it
         // after Phase 1 (stream build) completes
         daemon.start_ack.store(false, Ordering::Release);
@@ -348,25 +453,22 @@ pub fn take_pre_started() -> Option<RecordingHandle> {
 
 /// Fallback: start recording synchronously (called if take_pre_started returns None)
 pub fn start_recording() -> Result<RecordingHandle, String> {
-    if let Some(daemon) = DAEMON.get() {
-        if daemon.start_ack.load(Ordering::Acquire) {
-            return Ok(RecordingHandle { _priv: () });
+    let daemon = ready_daemon()?;
+    if daemon.start_ack.load(Ordering::Acquire) {
+        return Ok(RecordingHandle { _priv: () });
+    }
+    let (resp_tx, resp_rx) = mpsc::channel();
+    daemon
+        .cmd_tx
+        .send(DaemonCmd::Start(Some(resp_tx)))
+        .map_err(|_| WORKER_STOPPED.to_string())?;
+    match resp_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok(())) => {
+            daemon.start_ack.store(true, Ordering::Release);
+            Ok(RecordingHandle { _priv: () })
         }
-        let (resp_tx, resp_rx) = mpsc::channel();
-        daemon
-            .cmd_tx
-            .send(DaemonCmd::Start(Some(resp_tx)))
-            .map_err(|e| format!("send: {}", e))?;
-        match resp_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            Ok(Ok(())) => {
-                daemon.start_ack.store(true, Ordering::Release);
-                Ok(RecordingHandle { _priv: () })
-            }
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err("start timeout".into()),
-        }
-    } else {
-        Err("audio not initialized".into())
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("start timeout".into()),
     }
 }
 
@@ -385,7 +487,7 @@ fn stop_recording_internal() -> Result<String, String> {
     daemon
         .cmd_tx
         .send(DaemonCmd::Stop(resp_tx))
-        .map_err(|e| format!("send: {}", e))?;
+        .map_err(|_| WORKER_STOPPED.to_string())?;
     // Daemon may still be in Phase 1 (build_stream ~200ms) when Stop arrives —
     // give it enough headroom to walk through Phase 1 → Phase 2 → Phase 3 → finalize.
     match resp_rx.recv_timeout(std::time::Duration::from_secs(8)) {
@@ -397,6 +499,7 @@ fn stop_recording_internal() -> Result<String, String> {
 // -- Daemon implementation --
 
 fn daemon_loop(
+    daemon: &'static Daemon,
     device: cpal::Device,
     stream_cfg: cpal::StreamConfig,
     sample_fmt: SampleFormat,
@@ -404,10 +507,14 @@ fn daemon_loop(
     input_channels: u16,
     cmd_rx: Receiver<DaemonCmd>,
 ) {
-    let daemon = match DAEMON.get() {
-        Some(d) => d,
-        None => return,
-    };
+    // Any exit, panic included, marks the daemon stopped.
+    struct MarkStopped(&'static Daemon);
+    impl Drop for MarkStopped {
+        fn drop(&mut self) {
+            self.0.alive.store(false, Ordering::Release);
+        }
+    }
+    let _stopped = MarkStopped(daemon);
 
     loop {
         // -- Phase 1: Pre-build stream (expensive, ~200ms) --
@@ -610,11 +717,15 @@ where
         .spawn(move || {
             let _release = ReleaseOnDrop(owner_for_thread);
 
+            if let Some(e) = mic_permission_error() {
+                let _ = ready_tx.send(Err(e));
+                return;
+            }
             let host = cpal::default_host();
             let device = match host.default_input_device() {
                 Some(d) => d,
                 None => {
-                    let _ = ready_tx.send(Err("no input device".into()));
+                    let _ = ready_tx.send(Err(no_input_device()));
                     return;
                 }
             };
@@ -799,4 +910,60 @@ where
         f => return Err(format!("unsupported format: {:?}", f)),
     }
     .map_err(|e| format!("build_input_stream: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The old order spawned first and published after; a worker scheduled
+    /// first found nothing, returned, and left a daemon with a dead receiver.
+    /// Here the worker thread runs to completion before publish_then_spawn
+    /// returns, the most adverse order, and still gets the live daemon.
+    #[test]
+    fn worker_scheduled_first_sees_the_published_daemon() {
+        static CELL: OnceLock<Daemon> = OnceLock::new();
+        publish_then_spawn(&CELL, |daemon, cmd_rx| {
+            std::thread::spawn(move || {
+                let published = CELL.get().expect("published before the worker runs");
+                assert!(std::ptr::eq(published, daemon));
+                let (tx, _rx) = mpsc::channel();
+                daemon.cmd_tx.send(DaemonCmd::Stop(tx)).expect("receiver connected");
+                assert!(matches!(cmd_rx.try_recv(), Ok(DaemonCmd::Stop(_))));
+            })
+            .join()
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert!(CELL.get().unwrap().alive.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn failed_worker_start_is_reported_not_left_looking_ready() {
+        static CELL: OnceLock<Daemon> = OnceLock::new();
+        let err = publish_then_spawn(&CELL, |_, _| Err(std::io::Error::other("no threads"))).unwrap_err();
+        assert!(err.contains("no threads") && err.contains("重启"), "{err}");
+        assert!(!CELL.get().unwrap().alive.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn only_the_publishing_call_spawns_a_worker() {
+        static CELL: OnceLock<Daemon> = OnceLock::new();
+        let mut spawned = 0;
+        for _ in 0..2 {
+            publish_then_spawn(&CELL, |_, rx| {
+                spawned += 1;
+                std::mem::forget(rx); // keep the receiver alive like a running worker
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert_eq!(spawned, 1);
+    }
+
+    #[test]
+    fn microphone_authorization_status_is_readable() {
+        assert!((0..=3).contains(&mic_auth::status()));
+    }
 }

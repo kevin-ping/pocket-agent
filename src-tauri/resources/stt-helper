@@ -1,37 +1,48 @@
 #!/usr/bin/env python3
-"""stt-helper: uses faster_whisper for local STT. Returns JSON with text + detected language."""
+"""stt-helper: fallback STT when the resident stt-server is unavailable.
+
+Usage: stt-helper <wav_file> [--model NAME] [--lang-prompt trad]
+Takes the same model and script prompt as stt-server (PA passes them), and only
+loads a model that is already cached: a fallback must not start a download.
+Prints JSON {"text", "language"} on stdout.
+"""
+import argparse
+import json
 import os
 import sys
-import json
+import time
 
 # Workaround for libiomp5 double-load on macOS (faster_whisper/ctranslate2 vs numpy/MKL).
 # Must be set before importing faster_whisper.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
+parser = argparse.ArgumentParser()
+parser.add_argument("wav")
+parser.add_argument("--model", default="base")
+parser.add_argument("--lang-prompt", default="")
+args = parser.parse_args()
+
+# Same initial_prompt as stt-server: controls simplified vs traditional output.
+prompt = "以下是繁體中文的句子。" if args.lang_prompt.strip() in ("trad", "ja") else "以下是普通话的句子。"
+
 from faster_whisper import WhisperModel
 
-if len(sys.argv) != 2:
-    print("Usage: stt-helper <wav_file>", file=sys.stderr)
-    sys.exit(1)
-
-wav_path = sys.argv[1]
-
-import time
 t0 = time.time()
-
 try:
-    print(f"[stt] loading model...", file=sys.stderr, flush=True)
-    model = WhisperModel("tiny", device="cpu", compute_type="int8")
-    print(f"[stt] model loaded ({time.time()-t0:.1f}s), transcribing...", file=sys.stderr, flush=True)
+    print(f"[stt-helper] loading cached model '{args.model}'...", file=sys.stderr, flush=True)
+    try:
+        model = WhisperModel(args.model, device="cpu", compute_type="int8", local_files_only=True)
+    except Exception as e:
+        print(f"Whisper 模型 '{args.model}' 不在本机缓存中，备用转写不会下载模型({e})", file=sys.stderr, flush=True)
+        sys.exit(2)
+    print(f"[stt-helper] model loaded ({time.time()-t0:.1f}s), transcribing...", file=sys.stderr, flush=True)
     t1 = time.time()
-    segments, info = model.transcribe(wav_path, beam_size=5)
+    segments, info = model.transcribe(args.wav, beam_size=5, initial_prompt=prompt)
     text = " ".join(seg.text.strip() for seg in segments).strip()
-    detected_lang = info.language
-    print(f"[stt] done ({time.time()-t1:.1f}s) lang={detected_lang}", file=sys.stderr, flush=True)
+    print(f"[stt-helper] done ({time.time()-t1:.1f}s) lang={info.language}", file=sys.stderr, flush=True)
 
     if text:
-        result = {"text": text, "language": detected_lang}
-        print(json.dumps(result, ensure_ascii=False))
+        print(json.dumps({"text": text, "language": info.language}, ensure_ascii=False))
     else:
         print("Empty result", file=sys.stderr)
         sys.exit(1)

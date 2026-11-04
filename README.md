@@ -203,9 +203,11 @@ The responsibility for safe operation is shared across three layers:
 
 > **For agent-driven installation** (PA and Hermes on the same machine): see [README_AGENTS.md](README_AGENTS.md)
 >
-> **Agents: when installing, also read [HERMES.md](HERMES.md)** and carry out its setup steps, such as copying PA's skills into the backend profile.
+> **Agents: when installing, also read [HERMES.md](HERMES.md)** and carry out its setup steps, such as copying PA's skills into the backend profile. Its performance tuning and local Hermes patches are optional, not part of a basic install.
 
-Pocket Agent runs on **macOS 12+** only. Every install needs a running **Hermes** gateway (set it up first, below). Then pick one route:
+Pocket Agent runs on **macOS 12+** only. The UI is built for the WebKit that ships with macOS 12.0 (Safari 15.0). Verified so far: Apple Silicon on macOS 26 only; macOS 12–15 and Intel Macs are supported by the build settings but not yet verified on real hardware (see [docs/fresh-install-verification.md](docs/fresh-install-verification.md)). Every install needs a running **Hermes** gateway (set it up first, below). Then pick one route:
+
+The **basic install** is text chat, dictation, spoken replies and interrupting them. Wake word / voiceprint, computer tools and the phone app are optional features, each checked separately.
 
 - **[Route A — from source](#route-a--from-source-development)**: build and run with `npm run tauri dev`. Use this to develop PA or to try it.
 - **[Route B — .app / DMG](#route-b--app--dmg)**: build the app once with `npm run tauri build`, then run it like any Mac app.
@@ -271,7 +273,7 @@ Optional, not needed for a first install: the context-compression and model sett
    ```bash
    xcode-select --install          # skip if already installed
    xcode-select -p                 # prints a path, e.g. /Library/Developer/CommandLineTools
-   /usr/bin/python3 --version      # Python 3.9 or newer
+   /usr/bin/python3 --version      # must be 3.9–3.12 (the Command Line Tools ship 3.9)
    ```
 
    Wait until the installer has finished before going on.
@@ -291,7 +293,7 @@ Optional, not needed for a first install: the context-compression and model sett
 5. **Configure** — still in `pocket-agent/`:
 
    ```bash
-   cp .env.example .env
+   [ -f .env ] || cp .env.example .env    # keeps an existing .env
    ```
 
    Set `API_SERVER`, `API_SERVER_KEY` and `API_AGENT` as in step 6 of the Hermes setup:
@@ -332,23 +334,48 @@ There is no published installer: build the app yourself on a Mac with Route A's 
 
 2. **Install:** open the DMG and drag Pocket Agent to Applications (or copy the `.app`).
 
-3. **Configure:** the packaged app reads `~/.pocket-agent/.env`, not the repository's `.env`:
+3. **Configure:** the packaged app reads only `~/.pocket-agent/.env`, from whatever directory it is started; it never reads the repository's `.env` (see [Where PA reads its configuration](#where-pa-reads-its-configuration)):
 
    ```bash
    mkdir -p ~/.pocket-agent
-   cp .env.example ~/.pocket-agent/.env
+   [ -f ~/.pocket-agent/.env ] || cp .env.example ~/.pocket-agent/.env    # keeps an existing file
    ```
 
    Then set `API_SERVER` / `API_SERVER_KEY` / `API_AGENT` as above.
 
 4. **Launch** Pocket Agent and grant **Accessibility** and **Microphone** to it (restart PA after granting Accessibility). The machine still needs the Command Line Tools from Route A step 1: they provide the Python PA builds its voice environment from.
 
+### Where PA reads its configuration
+
+| Build | `.env` file read |
+|---|---|
+| Source (`npm run tauri dev`) | the repository's `.env`, whatever the current directory; only if it does not exist, `~/.pocket-agent/.env` |
+| Packaged `.app` | `~/.pocket-agent/.env` only |
+
+One file is read whole; keys are never mixed from both. A variable already set in the environment that starts PA (for example `export API_SERVER=…` in the terminal) overrides the file, in both builds.
+
+On startup PA logs one line saying which applies, without the key itself, e.g. `[config] 打包版，配置：/Users/you/.pocket-agent/.env；API_SERVER=http://localhost:8642(配置文件);API_SERVER_KEY=已设置(48 个字符,配置文件)`. A malformed line is reported by line number (`第 2 行格式错误`); settings after it are not applied. When the gateway refuses the connection or the key (HTTP 401/403), the error in the chat panel names the gateway address and this configuration source. To see the log for the `.app`, start it from a terminal (below); to rule out terminal overrides, `unset API_SERVER API_SERVER_KEY API_AGENT` first.
+
 ### Python and the voice environment
 
 - PA creates `~/.pocket-agent/venv` with the first suitable interpreter of: `/usr/bin/python3` (Command Line Tools), `python3` on PATH, Homebrew / `/usr/local` `python3.12`, `python3.11`, `python3.10`, then their `python3`. It must be **Python 3.9–3.12** with the `venv` module: `requirements-stt.txt` pins `numpy<2` (no 3.13 wheels), and the wake engine's build for macOS < 13.4 is Python 3.9 only. If none qualifies, the error lists every interpreter checked with its version.
-- An existing venv is reused; it is not rebuilt when a different Python is installed later.
+- An existing, working venv is reused; it is not rebuilt when a different Python is installed later. On each launch PA checks it first: if its interpreter no longer runs (e.g. the Python it was made from was removed), it is rebuilt with `python -m venv --clear`, which empties only `~/.pocket-agent/venv`; if pip is missing (venv creation was interrupted), PA restores pip with `ensurepip`, and rebuilds if that fails. An interrupted dependency install continues on the next launch. Settings, history, voiceprints, avatars and the model cache are outside the venv and never touched.
 - **`STT_PYTHON`** (advanced override) only changes which interpreter **runs** the voice service. It does not affect which Python builds the venv, and it must point to an interpreter that already has everything in `requirements-stt.txt` installed.
-- TTS runs `EDGE_TTS_BIN` if set, else PA's `~/.pocket-agent/venv/bin/edge-tts`, else `edge-tts` from PATH. A WebSocket **403** in the `[TTS]` log means that copy is outdated: `~/.pocket-agent/venv/bin/pip install -U edge-tts`.
+- TTS runs `EDGE_TTS_BIN` if set, else PA's `~/.pocket-agent/venv/bin/edge-tts`, else `edge-tts` from PATH. A WebSocket **403** in the `[TTS]` log means that copy is outdated: `~/.pocket-agent/venv/bin/python3 -m pip install -U edge-tts`.
+- If the voice service on `127.0.0.1:8651` is down, dictation falls back to a one-off helper that uses the same `STT_MODEL` and script prompt, loads the model **only from the local cache** (it never downloads; an uncached model is reported as such) and is stopped after 30 s plus three times the recording length, or when the conversation ends.
+
+### Network use
+
+| When | What | Needs |
+|---|---|---|
+| Install | Rust crates, npm packages (Route A) | crates.io, npmjs.org |
+| First launch | Voice environment | PyPI (pypi.org, files.pythonhosted.org) |
+| First launch | Whisper and voiceprint models | HuggingFace (huggingface.co); cached afterwards |
+| First launch, macOS < 13.4 only | Wake-engine compat build | this project's GitHub Release |
+| Every reply | Spoken replies (edge-tts) | **Microsoft's online TTS service** — there is no offline voice |
+| Every turn | The model | whatever your Hermes backend uses (a cloud API needs the internet, a local model does not) |
+
+Once the models are cached, transcription runs locally without a network. Spoken replies do not: if dictation works but replies are silent, check `[TTS]` in the log and the network to Microsoft's service before looking at the voice service. See [edge-tts](https://github.com/rany2/edge-tts).
 
 ### First launch: what happens
 
@@ -357,7 +384,7 @@ Times depend on the machine and the network, so none are promised here. The stat
 | Stage | Network | If it fails |
 |---|---|---|
 | 1. Rust compile (Route A only; later runs are incremental) | crates.io (first time) | Fix the compiler error shown in the terminal; usually missing Command Line Tools (Route A step 1). |
-| 2. Voice environment: PA finds Python, creates `~/.pocket-agent/venv`, runs `pip install` | **PyPI** (pypi.org, files.pythonhosted.org) | The window shows "Voice environment setup failed" with pip's error. Check the network or proxy, then restart PA; it retries automatically. "No usable Python" means installing the Command Line Tools (`xcode-select --install`). |
+| 2. Voice environment: PA finds Python, creates (or repairs) `~/.pocket-agent/venv`, runs `pip install` | **PyPI** (pypi.org, files.pythonhosted.org) | The window shows "Voice environment setup failed" with the reason. "无法从 PyPI 下载依赖": check the network or proxy, then restart PA; it continues the install. Other pip errors: read the `[venv:installing-deps!]` lines in the log. "No usable Python" lists every interpreter checked: install the Command Line Tools (`xcode-select --install`), or, if they are installed but not 3.9–3.12, a Python 3.12 (e.g. `brew install python@3.12`). "语音环境不完整" means even a fresh venv got no pip: reinstall the Command Line Tools. |
 | 3. Models: Whisper (`STT_MODEL`, default `base`) and the voiceprint model | **HuggingFace** (huggingface.co) | Past 30 s the window shows "starting voice service" and keeps waiting. If the voice service exits, the window says so; check the network and restart PA. A failed voiceprint-model download only disables voiceprints (owner-only wake); dictation still works and the download is retried when a voiceprint is first used. |
 | 4. Health check on `127.0.0.1:8651` | — | As in stage 3. |
 | 5. Ready: the window is shown (if it was not already) and the start sound plays | — | — |
@@ -477,6 +504,9 @@ That was a capture-state bug. After capturing a modifier key, macOS sends a rele
 
 ### Why would PA keep talking after I pressed `fn` to interrupt it?
 The old behavior queued a Stop command onto the audio thread, but the playback thread was blocked inside `rodio::Sink::sleep_until_end()`. That meant text output could stop while audio kept playing. v0.2.4 stores the current sink globally and calls `sink.stop()` synchronously from `stop_audio_queue()`, so pressing the hotkey now interrupts TTS immediately and starts recording right away.
+
+### Why does `npm run tauri dev` stop with "port 1420 is in use"?
+Vite serves the dev frontend on port 1420. Before it starts, `scripts/clear-dev-port.js` checks the port. It never stops anything: if any process is listening on 1420 (including an old vite from this repo), it prints the PID and command and `npm run dev` stops. If the check itself cannot run (e.g. `lsof` fails), it says so and stops as well, rather than assuming the port is free. Find it with `lsof -iTCP:1420 -sTCP:LISTEN`, stop it yourself with `kill <PID>` (or move the other project to another port), then run `npm run tauri dev` again.
 
 ### What should I test after upgrading to v0.2.4?
 - Launch locally from your normal terminal app and verify `fn` starts/stops recording

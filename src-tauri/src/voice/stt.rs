@@ -222,47 +222,140 @@ fn transcribe_http(wav_path: &str) -> Result<SttResult, String> {
     Ok(SttResult { text, language })
 }
 
-/// Fallback: spawn stt-helper subprocess (cold start, slower)
-fn transcribe_subprocess(wav_path: &str) -> Result<SttResult, String> {
+/// Bumped by `cancel_fallback` to end any stt-helper still running.
+static FALLBACK_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// End the transcriptions started so far (their conversation is over): one
+/// still in HTTP or its retry wait never starts the fallback helper, a running
+/// helper is killed. Transcriptions started afterwards are not affected.
+pub fn cancel_fallback() {
+    FALLBACK_EPOCH.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Cancellation scope of one transcription, taken when it starts.
+#[derive(Clone, Copy)]
+pub struct CancelToken(u64);
+
+impl CancelToken {
+    pub fn new() -> Self {
+        CancelToken(FALLBACK_EPOCH.load(Ordering::Acquire))
+    }
+
+    fn cancelled(self) -> bool {
+        FALLBACK_EPOCH.load(Ordering::Acquire) != self.0
+    }
+}
+
+/// Whisper model for both the resident server and the fallback helper.
+fn stt_model() -> String {
+    std::env::var("STT_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "base".to_string())
+}
+
+/// Script prompt from the primary TTS voice: zh-TW / zh-HK / zh-MO / ja-* →
+/// traditional, everything else → simplified. Shared by server and helper.
+fn lang_prompt() -> &'static str {
+    let primary_voice = std::env::var("TTS_PRIMARY_VOICE").unwrap_or_default();
+    if ["zh-TW", "zh-HK", "zh-MO", "ja-"].iter().any(|p| primary_voice.starts_with(p)) {
+        "trad"
+    } else {
+        ""
+    }
+}
+
+/// Time one fallback run may take: a cached model loads in seconds (the helper
+/// never downloads), and CPU transcription stays within a few times real time.
+fn fallback_limit(audio_secs: f32) -> std::time::Duration {
+    std::time::Duration::from_secs(30) + std::time::Duration::from_secs_f32(audio_secs.clamp(0.0, 600.0) * 3.0)
+}
+
+/// Run `cmd` to completion, or kill and reap it once it outlives `limit` or
+/// `cancelled()` turns true. Returns stdout, the last stderr line and the status.
+fn run_bounded(
+    mut cmd: Command,
+    limit: std::time::Duration,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(String, String, std::process::ExitStatus), String> {
+    use std::io::Read;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("stt-helper 启动失败: {}", e))?;
+    let mut stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let out_thread = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(out) = stdout.as_mut() {
+            let _ = out.read_to_string(&mut text);
+        }
+        text
+    });
+    // Progress lines go to the PA log; the last one explains a failure.
+    let err_thread = std::thread::spawn(move || {
+        let mut last = String::new();
+        for line in stderr.into_iter().flat_map(|e| std::io::BufReader::new(e).lines().map_while(Result::ok)) {
+            if !line.is_empty() {
+                eprintln!("{}", line);
+                last = line;
+            }
+        }
+        last
+    });
+
+    let deadline = std::time::Instant::now() + limit;
+    let stopped = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if cancelled() => break Err(CANCELLED.to_string()),
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                break Err(format!("备用转写超过 {} 秒未完成，已结束", limit.as_secs()))
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(e) => break Err(format!("stt-helper 等待失败: {}", e)),
+        }
+    };
+    if stopped.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let out = out_thread.join().unwrap_or_default();
+    let last_err = err_thread.join().unwrap_or_default();
+    stopped.map(|status| (out, last_err, status))
+}
+
+/// Fallback: spawn stt-helper subprocess (cold start, slower). Same model and
+/// script prompt as the resident server, cached models only, bounded in time,
+/// and ended once `cancelled()` turns true.
+fn transcribe_subprocess(wav_path: &str, cancelled: &dyn Fn() -> bool) -> Result<SttResult, String> {
     let helper = helper_path();
 
     if !helper.exists() {
         return Err(format!("stt-helper 未找到: {}", helper.display()));
     }
 
-    let mut child = if let Some(python) = resolve_python() {
-        Command::new(python)
-            .arg(&helper)
-            .arg(wav_path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("stt-helper 启动失败: {}", e))?
-    } else {
-        Command::new(&helper)
-            .arg(wav_path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("stt-helper 启动失败: {}", e))?
-    };
-
-    // Stream stderr lines in real-time for progress logging
-    if let Some(stderr) = child.stderr.take() {
-        let reader = std::io::BufReader::new(stderr);
-        for line in reader.lines() {
-            match line {
-                Ok(l) if !l.is_empty() => eprintln!("{}", l),
-                _ => break,
-            }
+    let mut cmd = match resolve_python() {
+        Some(python) => {
+            let mut c = Command::new(python);
+            c.arg(&helper);
+            c
         }
-    }
+        None => Command::new(&helper),
+    };
+    let model = stt_model();
+    cmd.arg(wav_path).arg("--model").arg(&model).arg("--lang-prompt").arg(lang_prompt());
+    eprintln!("[stt] fallback stt-helper with cached model '{}'", model);
 
-    let output = child.wait_with_output()
-        .map_err(|e| format!("stt-helper 等待失败: {}", e))?;
+    let audio_secs = hound::WavReader::open(wav_path)
+        .map(|r| r.duration() as f32 / r.spec().sample_rate.max(1) as f32)
+        .unwrap_or(60.0);
+    let (stdout, last_err, status) = run_bounded(cmd, fallback_limit(audio_secs), cancelled)?;
 
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if status.success() {
+        let stdout = stdout.trim().to_string();
         if stdout.is_empty() {
             // Empty subprocess output — treat as empty result (consistent with HTTP path).
             return Ok(SttResult { text: String::new(), language: String::new() });
@@ -279,28 +372,62 @@ fn transcribe_subprocess(wav_path: &str) -> Result<SttResult, String> {
             })
         }
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(format!("stt-helper 错误: {}", stderr))
+        Err(format!("stt-helper 错误: {}", last_err))
     }
 }
 
+const CANCELLED: &str = "备用转写已取消";
+
 /// Main entry: try HTTP first, retry once on transient failure, then fallback to subprocess
 pub fn transcribe(wav_path: &str) -> Result<SttResult, String> {
+    transcribe_until(wav_path, CancelToken::new())
+}
+
+/// `transcribe`, ended by any `cancel_fallback` after `token` was taken.
+pub fn transcribe_until(wav_path: &str, token: CancelToken) -> Result<SttResult, String> {
     let _txn = voice_txn();
+    transcribe_staged(
+        &|| token.cancelled(),
+        std::time::Duration::from_secs(1),
+        &|| transcribe_http(wav_path),
+        &|cancelled| transcribe_subprocess(wav_path, cancelled),
+    )
+}
+
+/// HTTP, one retry after `retry_delay`, then the helper. `cancelled` is checked
+/// before every stage and during the wait, and passed on to the helper.
+fn transcribe_staged(
+    cancelled: &dyn Fn() -> bool,
+    retry_delay: std::time::Duration,
+    http: &dyn Fn() -> Result<SttResult, String>,
+    fallback: &dyn Fn(&dyn Fn() -> bool) -> Result<SttResult, String>,
+) -> Result<SttResult, String> {
+    if cancelled() {
+        return Err(CANCELLED.to_string());
+    }
     // Step 1: Try resident HTTP server (fast, model already loaded)
-    match transcribe_http(wav_path) {
+    match http() {
         Ok(result) => {
             eprintln!("[stt] HTTP transcription succeeded");
             return Ok(result);
         }
         Err(e) => {
-            eprintln!("[stt] HTTP failed ({}), retrying in 1s...", e);
+            eprintln!("[stt] HTTP failed ({}), retrying in {:?}...", e, retry_delay);
         }
     }
 
     // Step 2: Retry once after short delay (server might be temporarily busy)
-    std::thread::sleep(std::time::Duration::from_secs(1));
-    match transcribe_http(wav_path) {
+    let resume = std::time::Instant::now() + retry_delay;
+    while std::time::Instant::now() < resume {
+        if cancelled() {
+            return Err(CANCELLED.to_string());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20).min(retry_delay));
+    }
+    if cancelled() {
+        return Err(CANCELLED.to_string());
+    }
+    match http() {
         Ok(result) => {
             eprintln!("[stt] HTTP transcription succeeded (retry)");
             return Ok(result);
@@ -311,25 +438,42 @@ pub fn transcribe(wav_path: &str) -> Result<SttResult, String> {
     }
 
     // Step 3: Fallback to subprocess (cold start, no VAD — may hallucinate)
-    transcribe_subprocess(wav_path)
+    if cancelled() {
+        eprintln!("[stt] transcription cancelled; not starting stt-helper");
+        return Err(CANCELLED.to_string());
+    }
+    fallback(cancelled)
 }
 
 /// Ensure the resident STT server is running; spawn it if not.
 /// Called once at app startup.
 pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
-    let client = reqwest::blocking::Client::builder()
+    let port = match reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
-        .build();
-
-    let running = match client {
-        Ok(c) => c.get(format!("{}/health", STT_SERVER_URL)).send().is_ok(),
-        Err(_) => false,
+        .build()
+    {
+        Ok(c) => probe_voice_port(&c, STT_SERVER_URL),
+        Err(_) => VoicePort::Free,
     };
 
-    if running {
-        eprintln!("[stt] resident server already running on :8651");
-        mark_app_ready(|| show_main_window(app_handle.as_ref(), "existing server"));
-        return;
+    match port {
+        VoicePort::Ours => {
+            eprintln!("[stt] resident server already running on :8651");
+            mark_app_ready(|| show_main_window(app_handle.as_ref(), "existing server"));
+            return;
+        }
+        // Not PA's voice service: report it, never kill a process PA does not own.
+        VoicePort::Foreign(detail) => {
+            report_service_failure(
+                app_handle.as_ref(),
+                &format!(
+                    "语音服务端口 8651 已被其他程序占用（{detail}）。在终端运行 lsof -iTCP:8651 -sTCP:LISTEN \
+                     查看占用的进程，关闭它后重启 Pocket Agent。"
+                ),
+            );
+            return;
+        }
+        VoicePort::Free => {}
     }
 
     let server_script = server_path();
@@ -357,22 +501,10 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
 
     eprintln!("[stt] starting resident STT server...");
 
-    // Read STT_MODEL from env (default: base). Lets users switch between tiny/base/small.
-    let stt_model = std::env::var("STT_MODEL").unwrap_or_else(|_| "base".to_string());
+    // STT_MODEL (default: base) lets users switch between tiny/base/small.
+    let stt_model = stt_model();
     eprintln!("[stt] using Whisper model: {}", stt_model);
-
-    // Derive lang-prompt from primary TTS voice to control Whisper output script.
-    // zh-TW, zh-HK, zh-MO, ja-* → traditional; everything else → simplified.
-    let primary_voice = std::env::var("TTS_PRIMARY_VOICE").unwrap_or_default();
-    let lang_prompt = if primary_voice.starts_with("zh-TW")
-        || primary_voice.starts_with("zh-HK")
-        || primary_voice.starts_with("zh-MO")
-        || primary_voice.starts_with("ja-")
-    {
-        "trad"
-    } else {
-        ""
-    };
+    let lang_prompt = lang_prompt();
 
     match Command::new(&python)
         .arg(&server_script)
@@ -409,7 +541,6 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
                         Ok(c) => c,
                         Err(_) => return,
                     };
-                    let url = format!("{}/health", STT_SERVER_URL);
                     // 30 s covers cold-boot of faster_whisper + Whisper "base"
                     // model load on a typical laptop. Tune up only if the user
                     // is on a much slower disk / first-ever model download.
@@ -417,7 +548,7 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
                     let deadline = std::time::Instant::now()
                         + std::time::Duration::from_secs(probe_deadline_s);
                     let interval = std::time::Duration::from_millis(500);
-                    let healthy = || client.get(&url).send().map(|r| r.status().is_success()).unwrap_or(false);
+                    let healthy = || voice_service_healthy(&client);
                     let mut outcome = probe_health(generation, Some(deadline), interval, healthy, child_state);
                     if outcome == Probe::TimedOut {
                         eprintln!(
@@ -454,6 +585,49 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
             &format!("语音服务启动失败（{python}: {e}）。删除 ~/.pocket-agent/.venv-ready 后重启 Pocket Agent 会重建语音环境。"),
         ),
     }
+}
+
+/// What answers on the voice-service port.
+#[derive(Debug, PartialEq)]
+enum VoicePort {
+    /// Nothing listening: PA starts its own server.
+    Free,
+    /// PA's stt-server (e.g. left running by a previous PA): reuse it.
+    Ours,
+    /// Something else holds the port; carries what it answered.
+    Foreign(String),
+}
+
+/// stt-server's `/health` is `{"status": "ok", "model": …, "vad": …}`. Any
+/// other answer (404, 500, unrelated JSON) is not PA's voice service.
+fn is_voice_health(status: u16, body: &str) -> bool {
+    if !(200..300).contains(&status) {
+        return false;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    v["status"] == "ok" && v["model"].is_string() && v["vad"].is_string()
+}
+
+fn probe_voice_port(client: &reqwest::blocking::Client, base: &str) -> VoicePort {
+    match client.get(format!("{base}/health")).send() {
+        Err(e) if e.is_connect() => VoicePort::Free,
+        Err(e) => VoicePort::Foreign(format!("/health 无响应：{e}")),
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let body = resp.text().unwrap_or_default();
+            if is_voice_health(status, &body) {
+                VoicePort::Ours
+            } else {
+                VoicePort::Foreign(format!("/health 返回 HTTP {status}，不是 Pocket Agent 语音服务"))
+            }
+        }
+    }
+}
+
+fn voice_service_healthy(client: &reqwest::blocking::Client) -> bool {
+    probe_voice_port(client, STT_SERVER_URL) == VoicePort::Ours
 }
 
 #[derive(Debug, PartialEq)]
@@ -542,7 +716,7 @@ pub fn restart_when_idle(app: tauri::AppHandle) {
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
-        if client.get(format!("{}/health", STT_SERVER_URL)).send().map(|r| r.status().is_success()).unwrap_or(false) {
+        if voice_service_healthy(&client) {
             eprintln!("[stt] STT server reloaded");
             let _ = app.emit("voice-engine-reloaded", ());
             return;
@@ -675,5 +849,305 @@ mod tests {
         mark_app_ready(|| shown += 1);
         assert_eq!(shown, 1, "app-ready fires for the first healthy server only");
         assert!(is_app_ready());
+    }
+
+    #[test]
+    fn only_pa_health_counts_as_the_voice_service() {
+        let pa = r#"{"status": "ok", "model": "base", "vad": "silero"}"#;
+        assert!(is_voice_health(200, pa));
+        assert!(!is_voice_health(404, pa));
+        assert!(!is_voice_health(500, pa));
+        assert!(!is_voice_health(200, ""));
+        assert!(!is_voice_health(200, "{}"));
+        assert!(!is_voice_health(200, r#"{"status": "ok"}"#));
+        assert!(!is_voice_health(200, r#"{"status": "healthy", "model": "x", "vad": "y"}"#));
+        assert!(!is_voice_health(200, "<html>not found</html>"));
+    }
+
+    /// One-shot HTTP server answering every request with `status` + `body`.
+    fn serve_once(status: &'static str, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut conn, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = conn.read(&mut buf);
+                let _ = write!(
+                    conn,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn port_probe_tells_free_ours_and_foreign_apart() {
+        let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(2)).build().unwrap();
+        // Nothing listening.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = free.local_addr().unwrap();
+        drop(free);
+        assert_eq!(probe_voice_port(&client, &format!("http://{addr}")), VoicePort::Free);
+
+        let ours = serve_once("200 OK", r#"{"status":"ok","model":"base","vad":"silero"}"#);
+        assert_eq!(probe_voice_port(&client, &ours), VoicePort::Ours);
+
+        for (status, body) in [("404 Not Found", ""), ("500 Internal Server Error", ""), ("200 OK", "{}"), ("200 OK", r#"{"name":"other"}"#)] {
+            let base = serve_once(status, body);
+            assert!(
+                matches!(probe_voice_port(&client, &base), VoicePort::Foreign(_)),
+                "{status} {body} must not count as PA's voice service"
+            );
+        }
+    }
+
+    fn sh(script: &str) -> Command {
+        let mut c = Command::new("/bin/sh");
+        c.arg("-c").arg(script);
+        c
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pa-stt-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn process_alive(pid: &str) -> bool {
+        Command::new("/bin/kill").args(["-0", pid.trim()]).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
+    }
+
+    #[test]
+    fn stuck_helper_is_killed_at_the_limit() {
+        let dir = scratch("stuck");
+        let pid_file = dir.join("pid");
+        let started = std::time::Instant::now();
+        let err = run_bounded(sh(&format!("echo $$ > {}; exec sleep 30", pid_file.display())), Duration::from_millis(500), &|| false).unwrap_err();
+        assert!(err.contains("超过"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!process_alive(&std::fs::read_to_string(&pid_file).unwrap()), "helper reaped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancelled_helper_is_killed_promptly() {
+        let dir = scratch("cancel");
+        let pid_file = dir.join("pid");
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            flag.store(true, Ordering::Release);
+        });
+        let started = std::time::Instant::now();
+        let err = run_bounded(sh(&format!("echo $$ > {}; exec sleep 30", pid_file.display())), Duration::from_secs(60), &|| cancel.load(Ordering::Acquire)).unwrap_err();
+        assert!(err.contains("已取消"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(!process_alive(&std::fs::read_to_string(&pid_file).unwrap()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finished_helper_returns_its_output_and_last_error_line() {
+        let (out, last, status) = run_bounded(sh("echo '{\"text\":\"hi\"}'; echo progress >&2; echo 'final reason' >&2; exit 3"), Duration::from_secs(10), &|| false).unwrap();
+        assert_eq!(out.trim(), r#"{"text":"hi"}"#);
+        assert_eq!(last, "final reason");
+        assert_eq!(status.code(), Some(3));
+    }
+
+    #[test]
+    fn longer_audio_gets_more_time() {
+        assert_eq!(fallback_limit(0.0), Duration::from_secs(30));
+        assert_eq!(fallback_limit(10.0), Duration::from_secs(60));
+    }
+
+    /// One transcription through the real stages, token and `run_bounded`:
+    /// HTTP is `http`, stt-helper a script that records its pid and start, then
+    /// answers "helper" (or hangs while `dir/hang` exists).
+    fn staged(token: CancelToken, dir: &std::path::Path, http: &dyn Fn() -> Result<SttResult, String>) -> Result<String, String> {
+        let script = format!(
+            "echo $$ > {d}/pid; touch {d}/started; [ -e {d}/hang ] && exec sleep 30; echo helper",
+            d = dir.display()
+        );
+        transcribe_staged(&|| token.cancelled(), Duration::from_millis(300), http, &|cancelled| {
+            let (out, _, _) = run_bounded(sh(&script), Duration::from_secs(20), cancelled)?;
+            Ok(SttResult { text: out.trim().to_string(), language: String::new() })
+        })
+        .map(|r| r.text)
+    }
+
+    fn http_down() -> Result<SttResult, String> {
+        Err("connection refused".into())
+    }
+
+    /// After a cancelled request: the next one runs normally, through the helper.
+    fn next_round_works(dir: &std::path::Path) {
+        let _ = std::fs::remove_file(dir.join("hang"));
+        let _ = std::fs::remove_file(dir.join("started"));
+        assert_eq!(staged(CancelToken::new(), dir, &http_down).unwrap(), "helper");
+    }
+
+    #[test]
+    fn cancel_during_http_never_starts_the_helper() {
+        let _serial = test_serial();
+        let dir = scratch("cancel-http");
+        let token = CancelToken::new();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let entered_tx = Mutex::new(entered_tx);
+        let release_rx = Mutex::new(release_rx);
+        let calls = AtomicU64::new(0);
+        std::thread::scope(|s| {
+            let old = s.spawn(|| {
+                staged(token, &dir, &|| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    entered_tx.lock().unwrap().send(()).unwrap();
+                    // Bounded, so a request that keeps going fails the test instead of hanging it.
+                    let _ = release_rx.lock().unwrap().recv_timeout(Duration::from_secs(2));
+                    http_down()
+                })
+            });
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            cancel_fallback();
+            // Taken after the cancel, before the old request ends: unaffected.
+            let next = CancelToken::new();
+            release_tx.send(()).unwrap();
+            assert_eq!(old.join().unwrap().unwrap_err(), CANCELLED);
+            assert!(!next.cancelled(), "the old request ending does not cancel the next one");
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no retry after the cancel");
+        assert!(!dir.join("started").exists(), "no helper after the cancel");
+        next_round_works(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancel_during_retry_wait_never_starts_the_helper() {
+        let _serial = test_serial();
+        let dir = scratch("cancel-wait");
+        let token = CancelToken::new();
+        let (failed_tx, failed_rx) = mpsc::channel();
+        let failed_tx = Mutex::new(failed_tx);
+        let calls = AtomicU64::new(0);
+        let started = Instant::now();
+        std::thread::scope(|s| {
+            let old = s.spawn(|| {
+                staged(token, &dir, &|| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    failed_tx.lock().unwrap().send(()).unwrap();
+                    http_down()
+                })
+            });
+            failed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            cancel_fallback();
+            assert_eq!(old.join().unwrap().unwrap_err(), CANCELLED);
+        });
+        assert!(started.elapsed() < Duration::from_millis(300), "the wait ends at the cancel");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no retry after the cancel");
+        assert!(!dir.join("started").exists());
+        next_round_works(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancel_just_before_the_helper_never_starts_it() {
+        let _serial = test_serial();
+        let dir = scratch("cancel-before-helper");
+        let calls = AtomicU64::new(0);
+        let err = staged(CancelToken::new(), &dir, &|| {
+            // The cancel lands as the retry fails, right before the fallback.
+            if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                cancel_fallback();
+            }
+            http_down()
+        })
+        .unwrap_err();
+        assert_eq!(err, CANCELLED);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(!dir.join("started").exists());
+        next_round_works(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancel_while_the_helper_runs_kills_and_reaps_it() {
+        let _serial = test_serial();
+        let dir = scratch("cancel-helper");
+        std::fs::write(dir.join("hang"), "").unwrap();
+        let token = CancelToken::new();
+        std::thread::scope(|s| {
+            let old = s.spawn(|| staged(token, &dir, &http_down));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !dir.join("started").exists() {
+                assert!(Instant::now() < deadline, "helper never started");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let cancelled_at = Instant::now();
+            cancel_fallback();
+            assert_eq!(old.join().unwrap().unwrap_err(), CANCELLED);
+            assert!(cancelled_at.elapsed() < Duration::from_secs(3));
+        });
+        assert!(!process_alive(&std::fs::read_to_string(dir.join("pid")).unwrap()), "helper reaped");
+        next_round_works(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The real stt-helper against a stand-in faster_whisper that records how
+    /// the model is loaded: same model and prompt as the server, cached only.
+    fn run_helper(dir: &std::path::Path, cached: bool, extra: &[&str]) -> (std::process::Output, String) {
+        let fake = dir.join("fake");
+        std::fs::create_dir_all(fake.join("faster_whisper")).unwrap();
+        let log = dir.join("calls.json");
+        std::fs::write(fake.join("faster_whisper/__init__.py"), format!(r#"
+import json
+class _Info: language = "zh"
+class _Seg: text = "测试"
+class WhisperModel:
+    def __init__(self, name, **kw):
+        self.call = {{"model": name, **kw}}
+        if not {cached}: raise RuntimeError("not found in local cache")
+    def transcribe(self, path, **kw):
+        self.call.update(kw)
+        json.dump(self.call, open({log:?}, "w"), ensure_ascii=False)
+        return [_Seg()], _Info()
+"#, cached = if cached { "True" } else { "False" }, log = log.to_str().unwrap())).unwrap();
+        let out = Command::new("/usr/bin/python3")
+            .arg(helper_path())
+            .arg("/tmp/x.wav")
+            .args(extra)
+            .env("PYTHONPATH", &fake)
+            .output()
+            .unwrap();
+        (out, std::fs::read_to_string(&log).unwrap_or_default())
+    }
+
+    #[test]
+    fn helper_uses_the_configured_model_and_prompt_from_cache_only() {
+        let dir = scratch("helper");
+        let (out, calls) = run_helper(&dir, true, &["--model", "small", "--lang-prompt", "trad"]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let call: serde_json::Value = serde_json::from_str(&calls).unwrap();
+        assert_eq!(call["model"], "small");
+        assert_eq!(call["local_files_only"], true);
+        assert_eq!(call["initial_prompt"], "以下是繁體中文的句子。");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), r#"{"text": "测试", "language": "zh"}"#);
+
+        let (_, calls) = run_helper(&dir, true, &["--model", "base", "--lang-prompt", ""]);
+        let call: serde_json::Value = serde_json::from_str(&calls).unwrap();
+        assert_eq!((call["model"].as_str(), call["initial_prompt"].as_str()), (Some("base"), Some("以下是普通话的句子。")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn helper_reports_an_uncached_model_instead_of_downloading() {
+        let dir = scratch("uncached");
+        let (out, _) = run_helper(&dir, false, &["--model", "small"]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("不在本机缓存中"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

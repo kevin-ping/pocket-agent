@@ -8,7 +8,7 @@ Pocket Agent (PA) is a macOS desktop voice companion. It connects to a Hermes ag
 
 - **GitHub**: https://github.com/kevin-ping/pocket-agent
 - **Stack**: Tauri 2 + Svelte 5 + Rust
-- **Platform**: macOS 12+ (verified on Apple Silicon; Intel not yet verified)
+- **Platform**: macOS 12+ (UI built for the macOS 12.0 WebKit; verified only on Apple Silicon, macOS 26; macOS 12–15 and Intel not yet verified)
 - **Current version**: 0.3.0
 
 ---
@@ -19,7 +19,7 @@ Check and install each tool. Skip any that are already present.
 
 ### 1a. Xcode Command Line Tools
 
-Verify: `xcode-select -p` prints a path and `/usr/bin/python3 --version` prints Python 3.9 or newer.
+Verify: `xcode-select -p` prints a path and `/usr/bin/python3 --version` prints a Python from 3.9 to 3.12 (the tools ship 3.9).
 
 If missing: `xcode-select --install`, then wait for the installer to finish before continuing. The tools provide the compiler/SDK for the Rust build and the Python PA builds its voice environment from.
 
@@ -73,10 +73,10 @@ Both must succeed with zero errors.
 Create .env in the project root (for dev mode):
 
 ```bash
-cp .env.example .env
+[ -f .env ] || cp .env.example .env    # never overwrite an existing .env
 ```
 
-Then edit .env with the correct values for your setup.
+Then edit .env with the correct values for your setup. If a `.env` already exists, keep its gateway and key unless the user asks to change them.
 
 **Required fields:**
 - `API_SERVER` — backend gateway URL (e.g. http://localhost:8642 for Hermes)
@@ -88,9 +88,11 @@ Then edit .env with the correct values for your setup.
 - `STT_MODEL` — Whisper model: `tiny` | `base` | `small` (default `base`)
 - `STT_PYTHON` — advanced override; leave unset. It only changes which interpreter runs the voice service (not which Python builds the venv) and must already have everything in `requirements-stt.txt` installed.
 
-**Config file locations:**
-- Development (tauri dev): project root `.env`
-- Packaged app (.dmg): `~/.pocket-agent/.env`
+**Config file locations (exactly one file is read, never a mix):**
+- Development (`npm run tauri dev`): the repository's `.env`, whatever the cwd; if it does not exist, `~/.pocket-agent/.env`
+- Packaged app (.app/.dmg): `~/.pocket-agent/.env` only, whatever the cwd
+- Variables already set in the launching environment override the file in both builds
+- The startup log line `[config] …` names the file used, the gateway URL and whether a key is set (never the key)
 
 ---
 
@@ -155,9 +157,11 @@ Check in this order; stop at the first failure.
 - **No hotkey response only after changing to a modifier** — ensure you are on v0.2.4+, which fixes the post-capture release event swallowing the first real press.
 - **fn works over SSH but double-triggers** — ensure you are on v0.2.4+, which suppresses the duplicate SSH `KEY_DOWN` after the `FLAGS_CHANGED` press path.
 - **PA keeps speaking after hotkey press** — ensure you are on v0.2.4+, which synchronously interrupts the active rodio sink instead of waiting for the playback thread queue.
-- **Voice setup failed / STT fails** — read the error in PA's status panel and the `[venv]` / `[stt-server]` log lines. pip errors: check network or proxy to PyPI, then restart PA. "No usable Python": `xcode-select --install`. To rebuild the voice environment, quit PA and delete `~/.pocket-agent/venv` and `~/.pocket-agent/.venv-ready`. If `STT_PYTHON` is set, unset it unless that interpreter has all of `requirements-stt.txt`.
-- **No voice output** — edge-tts in PATH? EDGE_TTS_BIN correct? A WebSocket **403** in the `[TTS]` log means the edge-tts that ran is outdated: `pip install -U edge-tts` for that copy.
-- **Cannot connect to backend** — Gateway running? API_SERVER and API_SERVER_KEY match?
+- **Voice setup failed / STT fails** — read the error in PA's status panel and the `[venv]` / `[stt-server]` log lines. "无法从 PyPI 下载依赖": check network or proxy to PyPI, then restart PA (the install continues). Other pip errors: the `[venv:installing-deps!]` lines. "No usable Python": `xcode-select --install`, or a Python 3.12 if the installed ones are outside 3.9–3.12. A half-created venv (no pip, missing core modules, or an interpreter that no longer runs) is repaired automatically on the next launch, even when a `.venv-ready` marker was left next to it. To rebuild the voice environment by hand, quit PA and delete only `~/.pocket-agent/venv` and `~/.pocket-agent/.venv-ready` (keep `.env`, the databases, voiceprints and avatars). If `STT_PYTHON` is set, unset it unless that interpreter has all of `requirements-stt.txt`.
+- **Recording fails** — "找不到麦克风": connect one or pick an input in System Settings → Sound → Input, then press the hotkey again. "麦克风权限被拒绝": allow PA (dev mode: the terminal) in Privacy & Security → Microphone, then restart PA.
+- **No voice output** — spoken replies use Microsoft's online TTS service, so check the network first; transcription working offline says nothing about TTS. edge-tts in PATH? EDGE_TTS_BIN correct? A WebSocket **403** in the `[TTS]` log means the edge-tts that ran is outdated: `<that python> -m pip install -U edge-tts` for that copy.
+- **`npm run tauri dev` stops with "port 1420 is in use"** — another process holds the dev port. Nothing is stopped automatically, not even an old vite from this repo: the script reports PID + command and exits non-zero. Check with `lsof -iTCP:1420 -sTCP:LISTEN`, stop that process yourself (`kill <PID>`), then rerun. "could not check whether port 1420 is free" means the check itself failed (e.g. `lsof`); check by hand.
+- **Cannot connect to backend** — the chat error names the gateway address and the config source. Gateway running? API_SERVER and API_SERVER_KEY match `~/.hermes/.env`? Check the `[config]` startup line for which file (or terminal variable) was used.
 - **Build fails** — cargo check and npm run build both pass? Rust and Node versions current?
 
 ---

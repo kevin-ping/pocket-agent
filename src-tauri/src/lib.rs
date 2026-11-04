@@ -11,14 +11,9 @@ pub struct AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Load .env file:
-    // 1. Current working directory (works for `tauri dev`)
-    // 2. ~/.pocket-agent/.env (works for packaged .app)
-    let _ = dotenvy::dotenv();
-    if let Ok(home) = std::env::var("HOME") {
-        let env_path = std::path::Path::new(&home).join(".pocket-agent").join(".env");
-        let _ = dotenvy::from_path(&env_path);
-    }
+    // Gateway settings: the packaged app reads ~/.pocket-agent/.env, a dev build
+    // the repository's .env (else the user file); process env wins over both.
+    commands::config::load_env();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())

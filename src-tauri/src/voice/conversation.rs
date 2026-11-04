@@ -33,7 +33,7 @@ use crate::voice::record::{
     current_owner, start_streaming_capture, stop_streaming_capture, StreamingHandle,
     OWNER_CONVERSATION, OWNER_NONE, OWNER_WAKE,
 };
-use crate::voice::stt::{transcribe, SttResult};
+use crate::voice::stt::{transcribe_until, CancelToken, SttResult};
 
 /// Fallback default for the per-utterance silence flush window. The live value
 /// comes from `pause_tolerance_ms` passed in by the frontend; this constant is
@@ -249,6 +249,8 @@ pub fn start_conversation(
                     // the slot, or a late exit would clobber a newer session's
                     // active state and reintroduce the press/release mismatch.
                     crate::voice::hotkey::set_active_state(false);
+                    // A fallback transcription of this session has no one to report to.
+                    crate::voice::stt::cancel_fallback();
                 }
             }
         })
@@ -666,6 +668,9 @@ fn spawn_transcribe(
     tx: Sender<Msg>,
     owner_gate: Option<(String, f32)>,
 ) {
+    // Taken on the worker, while the session is live: ending the session
+    // cancels this transcription in any stage, including the speaker check.
+    let token = CancelToken::new();
     std::thread::Builder::new()
         .name("conv-transcribe".into())
         .spawn(move || {
@@ -696,7 +701,7 @@ fn spawn_transcribe(
                 }
             }
 
-            let result = transcribe(wav_path);
+            let result = transcribe_until(wav_path, token);
             let _ = std::fs::remove_file(&path);
             let _ = tx.send(Msg::SttResult(result));
         })

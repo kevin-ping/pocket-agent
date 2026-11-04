@@ -87,6 +87,114 @@ VIOLATION OF ANY RULE ABOVE will cause the voice output to sound broken. Always 
     )
 }
 
+/// What the startup log and gateway errors say about where the gateway
+/// settings came from. Never contains the key.
+static CONFIG_SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The single .env file this run reads, whole (keys are never mixed across files).
+/// Packaged app: `~/.pocket-agent/.env` only. Dev build: the repository's `.env`
+/// whatever the cwd, else the user file. Process environment variables win over
+/// either, since dotenvy never overwrites a variable that is already set.
+fn choose_env_file(packaged: bool, repo_env: &std::path::Path, user_env: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    let repo = (!packaged).then_some(repo_env);
+    repo.into_iter()
+        .chain(user_env)
+        .find(|p| p.is_file())
+        .map(std::path::Path::to_path_buf)
+}
+
+/// `…/X.app/Contents/MacOS/<exe>`: a packaged build, not `tauri dev` or a bare binary.
+fn is_app_bundle_exe(exe: &std::path::Path) -> bool {
+    let macos = exe.parent();
+    let contents = macos.and_then(|p| p.parent());
+    let app = contents.and_then(|p| p.parent());
+    macos.and_then(|p| p.file_name()) == Some("MacOS".as_ref())
+        && contents.and_then(|p| p.file_name()) == Some("Contents".as_ref())
+        && app.and_then(|p| p.extension()) == Some("app".as_ref())
+}
+
+/// A parse error by line number only: dotenvy's own message quotes the line,
+/// which may be the key.
+fn describe_env_error(path: &std::path::Path, err: &dotenvy::Error) -> String {
+    let what = match err {
+        dotenvy::Error::LineParse(line, _) => std::fs::read_to_string(path)
+            .ok()
+            // The error carries the whole line or just its value part.
+            .and_then(|text| text.lines().position(|l| !line.is_empty() && l.contains(line.as_str())))
+            .map(|i| format!("第 {} 行格式错误", i + 1))
+            .unwrap_or_else(|| "有一行格式错误".to_string()),
+        dotenvy::Error::Io(e) => format!("无法读取({})", e.kind()),
+        _ => "无法解析".to_string(),
+    };
+    format!("配置文件 {} {}(该行之后的设置未生效)", path.display(), what)
+}
+
+/// `scheme://***@host` when the URL carries credentials.
+fn redact_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(mut u) if !u.username().is_empty() || u.password().is_some() => {
+            let _ = u.set_username("***");
+            let _ = u.set_password(None);
+            u.to_string()
+        }
+        _ => url.to_string(),
+    }
+}
+
+/// Load the gateway configuration (see `choose_env_file`) and log where each
+/// value came from. Call once, before anything reads the environment.
+pub fn load_env() {
+    let packaged = std::env::current_exe().map(|e| is_app_bundle_exe(&e)).unwrap_or(false);
+    let repo_env = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".env");
+    let user_env = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".pocket-agent").join(".env"));
+    let from_process = |name: &str| std::env::var_os(name).is_some();
+    let (server_preset, key_preset) = (from_process("API_SERVER"), from_process("API_SERVER_KEY"));
+
+    let file = choose_env_file(packaged, &repo_env, user_env.as_deref());
+    let mut source = match &file {
+        Some(path) => format!("{}", path.display()),
+        None => {
+            let looked: Vec<String> = (!packaged).then(|| repo_env.display().to_string()).into_iter()
+                .chain(user_env.as_ref().map(|p| p.display().to_string())).collect();
+            format!("未找到配置文件(已查找 {})", looked.join("、"))
+        }
+    };
+    if let Some(path) = &file {
+        if let Err(e) = dotenvy::from_path(path) {
+            let problem = describe_env_error(path, &e);
+            eprintln!("[config] {problem}");
+            source = problem;
+        }
+    }
+
+    let origin = |preset: bool, set: bool| match (preset, set, &file) {
+        (true, _, _) => "进程环境变量",
+        (false, true, Some(_)) => "配置文件",
+        _ => "默认值",
+    };
+    let key = get_api_key();
+    eprintln!(
+        "[config] {}版，配置：{source}；API_SERVER={}({});API_SERVER_KEY={}",
+        if packaged { "打包" } else { "开发" },
+        redact_url(&get_api_url()),
+        origin(server_preset, std::env::var_os("API_SERVER").is_some()),
+        match &key {
+            Some(k) => format!("已设置({} 个字符,{})", k.chars().count(), origin(key_preset, true)),
+            None => "未设置".to_string(),
+        },
+    );
+    let _ = CONFIG_SOURCE.set(source);
+}
+
+/// Appended to gateway connection / auth errors so a wrong target is findable.
+pub fn gateway_hint() -> String {
+    format!(
+        "网关 {},配置来源：{}",
+        redact_url(&get_api_url()),
+        CONFIG_SOURCE.get().map(String::as_str).unwrap_or("未加载")
+    )
+}
+
 /// Load API URL from environment variable.
 /// Reads API_SERVER from .env file on startup, falls back to env var.
 pub fn get_api_url() -> String {
@@ -519,6 +627,81 @@ pub fn quit_app(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    mod env_source {
+        use super::super::*;
+        use std::path::{Path, PathBuf};
+
+        fn scratch(name: &str) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!("pa-envsrc-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        #[test]
+        fn packaged_app_reads_only_the_user_file() {
+            let dir = scratch("packaged");
+            let (repo, user) = (dir.join("repo.env"), dir.join("user.env"));
+            std::fs::write(&repo, "API_SERVER=http://dev").unwrap();
+            std::fs::write(&user, "API_SERVER=http://app").unwrap();
+            assert_eq!(choose_env_file(true, &repo, Some(&user)), Some(user.clone()));
+            std::fs::remove_file(&user).unwrap();
+            // The repo file is never a fallback for the packaged app.
+            assert_eq!(choose_env_file(true, &repo, Some(&user)), None);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn dev_build_prefers_the_repo_file_and_falls_back_whole() {
+            let dir = scratch("dev");
+            let (repo, user) = (dir.join("repo.env"), dir.join("user.env"));
+            std::fs::write(&user, "API_SERVER=http://app").unwrap();
+            assert_eq!(choose_env_file(false, &repo, Some(&user)), Some(user.clone()), "only the user file");
+            std::fs::write(&repo, "API_SERVER=http://dev").unwrap();
+            assert_eq!(choose_env_file(false, &repo, Some(&user)), Some(repo.clone()), "both: repo wins");
+            assert_eq!(choose_env_file(false, &repo, None), Some(repo.clone()), "no HOME");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn process_environment_wins_over_the_file() {
+            let dir = scratch("precedence");
+            let file = dir.join(".env");
+            std::fs::write(&file, "PA_TEST_ENV_PRECEDENCE=file\nPA_TEST_ENV_FILL=file\n").unwrap();
+            std::env::set_var("PA_TEST_ENV_PRECEDENCE", "process");
+            dotenvy::from_path(&file).unwrap();
+            assert_eq!(std::env::var("PA_TEST_ENV_PRECEDENCE").unwrap(), "process");
+            assert_eq!(std::env::var("PA_TEST_ENV_FILL").unwrap(), "file");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn app_bundle_is_recognised_by_its_layout() {
+            assert!(is_app_bundle_exe(Path::new("/Applications/Pocket Agent.app/Contents/MacOS/pocket-agent")));
+            assert!(!is_app_bundle_exe(Path::new("/repo/src-tauri/target/debug/pocket-agent")));
+            assert!(!is_app_bundle_exe(Path::new("/repo/src-tauri/target/release/pocket-agent")));
+            assert!(!is_app_bundle_exe(Path::new("/tmp/Contents/MacOS/pocket-agent")));
+        }
+
+        #[test]
+        fn parse_errors_name_the_line_but_never_quote_it() {
+            let dir = scratch("parse");
+            let file = dir.join(".env");
+            std::fs::write(&file, "API_SERVER=http://x\nAPI_SERVER_KEY=sk live secret\n").unwrap();
+            let err = dotenvy::from_path_iter(&file).unwrap().find_map(Result::err).expect("line 2 does not parse");
+            let msg = describe_env_error(&file, &err);
+            assert!(msg.contains("第 2 行"), "{msg}");
+            assert!(!msg.contains("secret") && !msg.contains("sk live"), "{msg}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn credentials_in_the_gateway_url_are_masked() {
+            assert_eq!(redact_url("http://user:pw@gw.local:8642/"), "http://***@gw.local:8642/");
+            assert_eq!(redact_url("http://localhost:8642"), "http://localhost:8642");
+        }
+    }
+
     use super::*;
 
     #[test]
