@@ -3,6 +3,7 @@
   import Icon from './Icon.svelte';
   import { createEventDispatcher } from 'svelte';
   import MeshFace, { MESH_SUPPORTED } from './MeshFace.svelte';
+  import { avatarGradient } from '../avatarColors';
 
   export let avatarImage: string | null = null;
   export let spiritPhase = 0;
@@ -21,6 +22,8 @@
   export let meshEmotions: Record<string, string>;
   /** Custom `.mavatar` data URI, or null for the bundled avatar. */
   export let meshCustom: string | null = null;
+  /** State → background colour; only drives --grad1/--grad2, not ring/glow. */
+  export let bgColors: Record<string, string> = {};
 
   let meshStatus: 'loading' | 'ready' | 'failed' = 'loading';
   // A new file or re-enabling gets a fresh attempt even after an earlier failure.
@@ -34,14 +37,14 @@
   let state: CharacterState;
   $: state = $characterState;
 
-  const STATE_COLORS: Record<CharacterState, { grad1: string; grad2: string; glow: string; ring: string }> = {
-    idle:      { grad1: '#6b8cff', grad2: '#3d5af1', glow: 'rgba(107,140,255,0)',    ring: 'rgba(107,140,255,0.35)' },
-    listening: { grad1: '#ff6b9d', grad2: '#e03068', glow: 'rgba(255,107,157,0.45)', ring: 'rgba(255,107,157,0.7)'  },
-    thinking:  { grad1: '#ffd06b', grad2: '#e08830', glow: 'rgba(255,200,100,0.3)',  ring: 'rgba(255,200,100,0.6)'  },
-    speaking:  { grad1: '#6bffd0', grad2: '#30c888', glow: 'rgba(100,255,200,0.35)', ring: 'rgba(100,255,200,0.65)' },
+  const STATE_COLORS: Record<CharacterState, { glow: string; ring: string }> = {
+    idle:      { glow: 'rgba(107,140,255,0)',    ring: 'rgba(107,140,255,0.35)' },
+    listening: { glow: 'rgba(255,107,157,0.45)', ring: 'rgba(255,107,157,0.7)'  },
+    thinking:  { glow: 'rgba(255,200,100,0.3)',  ring: 'rgba(255,200,100,0.6)'  },
+    speaking:  { glow: 'rgba(100,255,200,0.35)', ring: 'rgba(100,255,200,0.65)' },
   };
 
-  $: colors = STATE_COLORS[state];
+  $: colors = { ...STATE_COLORS[state], ...avatarGradient(state, bgColors[state]) };
   $: willChange = state !== 'idle' ? 'transform' : 'auto';
   $: effectiveSkin = mediaSkins[state] ? 'media' : (avatarImage ? 'image' : 'css');
   $: mediaSrc = mediaSkins[state] ?? avatarImage ?? '';

@@ -1,5 +1,5 @@
 <script lang="ts">
-  export let name: 'message-square' | 'chat' | 'settings' | 'trash-2' | 'bell' | 'bell-off' | 'x' | 'alert-triangle' | 'audio-lines' | 'lightbulb' = 'x';
+  export let name: 'message-square' | 'chat' | 'settings' | 'trash-2' | 'bell' | 'bell-off' | 'x' | 'alert-triangle' | 'audio-lines' | 'lightbulb' | 'camera' | 'switch-camera' = 'x';
   export let size: number = 16;
   export let color: string = 'currentColor';
   export let strokeWidth: number = 2;
@@ -57,5 +57,18 @@
     <path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5" />
     <path d="M9 18h6" />
     <path d="M10 22h4" />
+  {:else if name === 'camera'}
+    <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z" />
+    <circle cx="12" cy="13" r="3" />
+  {:else if name === 'monitor'}
+    <rect x="2" y="3" width="20" height="14" rx="2" />
+    <path d="M8 21h8" />
+    <path d="M12 17v4" />
+  {:else if name === 'switch-camera'}
+    <path d="M11 19H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5" />
+    <path d="M13 5h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-5" />
+    <circle cx="12" cy="12" r="3" />
+    <path d="m18 22-3-3 3-3" />
+    <path d="m6 2 3 3-3 3" />
   {/if}
 </svg>

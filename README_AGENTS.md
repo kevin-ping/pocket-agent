@@ -4,12 +4,12 @@
 
 ## Overview
 
-Pocket Agent (PA) is a macOS desktop voice companion. It connects to an AI agent gateway (Hermes or OpenClaw) and provides push-to-talk voice interaction.
+Pocket Agent (PA) is a macOS desktop voice companion. It connects to a Hermes agent gateway (the only supported backend; OpenClaw is no longer supported) and provides push-to-talk voice interaction. macOS only — there is no Windows build yet.
 
 - **GitHub**: https://github.com/kevin-ping/pocket-agent
 - **Stack**: Tauri 2 + Svelte 5 + Rust
-- **Platform**: macOS 12+ (Intel and Apple Silicon)
-- **Current version**: 0.2.7
+- **Platform**: macOS 12+ (UI built for the macOS 12.0 WebKit; verified only on Apple Silicon, macOS 26; macOS 12–15 and Intel not yet verified)
+- **Current version**: 0.3.0
 
 ---
 
@@ -17,42 +17,35 @@ Pocket Agent (PA) is a macOS desktop voice companion. It connects to an AI agent
 
 Check and install each tool. Skip any that are already present.
 
-### 1a. Homebrew
+### 1a. Xcode Command Line Tools
+
+Verify: `xcode-select -p` prints a path and `/usr/bin/python3 --version` prints a Python from 3.9 to 3.12 (the tools ship 3.9).
+
+If missing: `xcode-select --install`, then wait for the installer to finish before continuing. The tools provide the compiler/SDK for the Rust build and the Python PA builds its voice environment from.
+
+### 1b. Homebrew
 
 Verify: `brew --version`
 
 If missing, install Homebrew using the official method from their GitHub repository.
 
-### 1b. Node.js 18+
+### 1c. Node.js 18+
 
 Verify: `node --version`
 
 If missing: `brew install node`
 
-### 1c. Rust toolchain
+### 1d. Rust toolchain
 
 Verify: `rustc --version` and `cargo --version`
 
 If missing, install Rust via rustup using the official installer.
 
-### 1d. Python 3.10+
+### 1e. Python: nothing to install by hand
 
-Verify: `python3 --version`
+Do **not** `pip install` / `pipx install` voice packages. On first launch PA creates `~/.pocket-agent/venv` and installs `src-tauri/resources/requirements-stt.txt` into it, which needs network access to PyPI; the speech models then download from HuggingFace.
 
-If missing: `brew install python@3.11`
-
-### 1e. Python packages
-
-Install both packages:
-
-```bash
-pipx install edge-tts
-pip install faster-whisper
-```
-
-If pipx is missing: `brew install pipx && pipx ensurepath`
-
-Verify: `which edge-tts` and `python3 -c "import faster_whisper"`
+PA builds the venv from the first **Python 3.9–3.12** (with the `venv` module) among: `/usr/bin/python3` (Command Line Tools), `python3` on PATH, `/opt/homebrew/bin/python3.{12,11,10}`, `/usr/local/bin/python3.{12,11,10}`, then `/opt/homebrew/bin/python3`, `/usr/local/bin/python3`. With the Command Line Tools from 1a this is already satisfied.
 
 ---
 
@@ -80,70 +73,81 @@ Both must succeed with zero errors.
 Create .env in the project root (for dev mode):
 
 ```bash
-cp .env.example .env
+[ -f .env ] || cp .env.example .env    # never overwrite an existing .env
 ```
 
-Then edit .env with the correct values for your setup.
+Then edit .env with the correct values for your setup. If a `.env` already exists, keep its gateway and key unless the user asks to change them.
 
 **Required fields:**
 - `API_SERVER` — backend gateway URL (e.g. http://localhost:8642 for Hermes)
 - `API_SERVER_KEY` — authentication key, must match gateway config (leave empty for no auth)
-- `API_AGENT` — OpenClaw agent name (e.g. my-agent, agent-2). **Leave it empty for Hermes**: when set, PA uses `/v1/chat/completions`, which has no stop command, so an interrupted turn keeps running in Hermes.
+- `API_AGENT` — **leave it empty**: when set, PA uses `/v1/chat/completions`, which has no stop command, so an interrupted turn keeps running in Hermes.
 
 **Optional fields:**
 - `EDGE_TTS_BIN` — path to edge-tts binary (if omitted: PA's venv copy `~/.pocket-agent/venv/bin/edge-tts`, else PATH)
-- `STT_PYTHON` — path to python3 with faster-whisper (auto-detected if omitted)
+- `STT_MODEL` — Whisper model: `tiny` | `base` | `small` (default `base`)
+- `STT_PYTHON` — advanced override; leave unset. It only changes which interpreter runs the voice service (not which Python builds the venv) and must already have everything in `requirements-stt.txt` installed.
 
-**Config file locations:**
-- Development (tauri dev): project root `.env`
-- Packaged app (.dmg): `~/.pocket-agent/.env`
-
-Use `which edge-tts` and `which python3` to find binary paths if needed.
+**Config file locations (exactly one file is read, never a mix):**
+- Development (`npm run tauri dev`): the repository's `.env`, whatever the cwd; if it does not exist, `~/.pocket-agent/.env`
+- Packaged app (.app/.dmg): `~/.pocket-agent/.env` only, whatever the cwd
+- Variables already set in the launching environment override the file in both builds
+- The startup log line `[config] …` names the file used, the gateway URL and whether a key is set (never the key)
 
 ---
 
-## Step 4: Start Backend Gateway
+## Step 4: Set Up the Hermes Gateway
 
-PA needs a running AI gateway. Start the appropriate one before launching PA.
+PA needs a running Hermes gateway with its API server enabled. Commands below were checked against Hermes v0.22.5 (`hermes --help`, Hermes' API server docs); check `hermes --help` on the installed version.
 
-**Hermes Agent** — default port 8642
-- Start: `hermes gateway` or `hermes serve`
-- Verify gateway is responding on its health endpoint
+1. If `hermes --version` fails, install Hermes: `curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`, then open a new shell.
+2. Configure a model and credentials: `hermes setup` (interactive — ask the user if you cannot answer its questions).
+3. Add to `~/.hermes/.env`: `API_SERVER_ENABLED=true` and `API_SERVER_KEY=<random string>` (e.g. `openssl rand -hex 24`).
+4. Start the gateway: `hermes gateway run` (foreground) or `hermes gateway install` then `hermes gateway start` (launchd). It listens on `http://127.0.0.1:8642`.
+5. Verify a real streamed reply — an open port is not enough:
 
-**OpenClaw** — default port 18789
-- Start: `openclaw serve`
-- Verify gateway is responding on its health endpoint
+   ```bash
+   curl -N http://127.0.0.1:8642/v1/chat/completions \
+     -H "Authorization: Bearer <API_SERVER_KEY>" \
+     -H "Content-Type: application/json" \
+     -d '{"model": "hermes-agent", "stream": true, "messages": [{"role": "user", "content": "Say hello in one sentence."}]}'
+   ```
 
-Ensure `API_SERVER` in .env matches the running gateway URL.
+   Expect `data: {...}` chunks with reply text and a final `data: [DONE]`. Do not continue until this works.
+6. In PA's `.env`: `API_SERVER=http://localhost:8642`, `API_SERVER_KEY` equal to the Hermes key, `API_AGENT` unset.
 
-Then read the guide for that backend and carry out its setup steps, such as copying PA's skills into the backend profile: [HERMES.md](HERMES.md) for Hermes, `OPENCLAW.md` for OpenClaw (once it exists).
+Then read [HERMES.md](HERMES.md) and carry out its setup steps, such as copying PA's skills into the Hermes profile. Its performance tuning and local patches are optional.
 
 ---
 
 ## Step 5: Run Pocket Agent
 
+From the repository root (where Step 2 left you):
+
 ```bash
-cd pocket-agent
 npm run tauri dev
 ```
 
-First build compiles Rust (~3-5 min). Subsequent starts take ~20s.
+First launch runs, in order: Rust compile → voice venv creation and `pip install` (PyPI) → Whisper and voiceprint model download (HuggingFace) → voice service health check on `127.0.0.1:8651` → start sound. The window appears as soon as the venv install starts; its status panel shows the stage, and any failure with the fix (network/proxy, or `xcode-select --install` when no usable Python exists). Watch the terminal for `[venv]`, `[stt]`, `[stt-server]` lines. Do not assume a fixed total duration.
 
 ### macOS Permissions
 
-On first launch, grant these in System Settings > Privacy and Security:
+Grant these in System Settings > Privacy and Security (the user has to click them):
 
-1. **Accessibility** — required for global hotkey capture. Enable for Pocket Agent, then restart the app.
-2. **Microphone** — prompted automatically on first recording.
+1. **Input Monitoring** — for the terminal app that runs `npm run tauri dev` (Terminal, iTerm2, …); restart that terminal afterwards. Without it the hotkey does nothing in dev mode.
+2. **Accessibility** — required for global hotkey capture. Enable for Pocket Agent, then restart the app.
+3. **Microphone** — prompted automatically on first recording.
 
 ### Verify Everything Works
 
-1. PA window appears on screen
-2. Press the hotkey (default: fn key) once — recording indicator appears
-3. Press the hotkey again — recording stops, STT transcribes, LLM responds with voice
-4. While PA is speaking, press the hotkey and verify voice playback stops immediately before recording begins
-5. Press Escape during recording — capture cancels cleanly
-6. Settings panel opens from menu bar tray icon
+Check in this order; stop at the first failure.
+
+1. **Text chat** — the PA window is on screen; a typed message gets a Hermes reply
+2. **Dictation** — press the hotkey shown in the chat panel (default `RightShift`), speak, press again — the words are transcribed and sent
+3. **TTS** — the reply is spoken
+4. **Interrupt** — while PA is speaking, press the hotkey: playback stops immediately and recording begins; Escape during recording cancels cleanly
+5. *(Optional)* **Wake word / voiceprint** — Settings → Voice
+6. *(Optional)* **Computer tools** — [docs/computer-interaction.md](docs/computer-interaction.md)
 
 ---
 
@@ -153,9 +157,11 @@ On first launch, grant these in System Settings > Privacy and Security:
 - **No hotkey response only after changing to a modifier** — ensure you are on v0.2.4+, which fixes the post-capture release event swallowing the first real press.
 - **fn works over SSH but double-triggers** — ensure you are on v0.2.4+, which suppresses the duplicate SSH `KEY_DOWN` after the `FLAGS_CHANGED` press path.
 - **PA keeps speaking after hotkey press** — ensure you are on v0.2.4+, which synchronously interrupts the active rodio sink instead of waiting for the playback thread queue.
-- **STT fails** — faster-whisper installed? STT_PYTHON path correct?
-- **No voice output** — edge-tts in PATH? EDGE_TTS_BIN correct? A WebSocket **403** in the `[TTS]` log means the edge-tts that ran is outdated: `pip install -U edge-tts` for that copy.
-- **Cannot connect to backend** — Gateway running? API_SERVER and API_SERVER_KEY match?
+- **Voice setup failed / STT fails** — read the error in PA's status panel and the `[venv]` / `[stt-server]` log lines. "无法从 PyPI 下载依赖": check network or proxy to PyPI, then restart PA (the install continues). Other pip errors: the `[venv:installing-deps!]` lines. "No usable Python": `xcode-select --install`, or a Python 3.12 if the installed ones are outside 3.9–3.12. A half-created venv (no pip, missing core modules, or an interpreter that no longer runs) is repaired automatically on the next launch, even when a `.venv-ready` marker was left next to it. To rebuild the voice environment by hand, quit PA and delete only `~/.pocket-agent/venv` and `~/.pocket-agent/.venv-ready` (keep `.env`, the databases, voiceprints and avatars). If `STT_PYTHON` is set, unset it unless that interpreter has all of `requirements-stt.txt`.
+- **Recording fails** — "找不到麦克风": connect one or pick an input in System Settings → Sound → Input, then press the hotkey again. "麦克风权限被拒绝": allow PA (dev mode: the terminal) in Privacy & Security → Microphone, then restart PA.
+- **No voice output** — spoken replies use Microsoft's online TTS service, so check the network first; transcription working offline says nothing about TTS. edge-tts in PATH? EDGE_TTS_BIN correct? A WebSocket **403** in the `[TTS]` log means the edge-tts that ran is outdated: `<that python> -m pip install -U edge-tts` for that copy.
+- **`npm run tauri dev` stops with "port 1420 is in use"** — another process holds the dev port. Nothing is stopped automatically, not even an old vite from this repo: the script reports PID + command and exits non-zero. Check with `lsof -iTCP:1420 -sTCP:LISTEN`, stop that process yourself (`kill <PID>`), then rerun. "could not check whether port 1420 is free" means the check itself failed (e.g. `lsof`); check by hand.
+- **Cannot connect to backend** — the chat error names the gateway address and the config source. Gateway running? API_SERVER and API_SERVER_KEY match `~/.hermes/.env`? Check the `[config]` startup line for which file (or terminal variable) was used.
 - **Build fails** — cargo check and npm run build both pass? Rust and Node versions current?
 
 ---
@@ -191,5 +197,5 @@ PA (Tauri + Svelte)
   ├── TTS (edge-tts → rodio playback)
   └── Push Server (port 8650)
        ↓
-  Hermes (:8642) or OpenClaw (:18789)
+  Hermes (:8642)
 ```

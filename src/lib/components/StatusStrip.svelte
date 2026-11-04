@@ -45,6 +45,7 @@
       {#key item.flash}
         <span class="dot tone-{item.tone}" class:flash={!!item.flash} aria-hidden="true"></span>
       {/key}
+      {#if item.showLabel}<span class="label">{item.label}</span>{/if}
     </button>
   {/each}
 </div>
@@ -100,6 +101,7 @@
   }
   .item.end { margin-left: auto; }
   .item:hover .dot { transform: scale(1.35); }
+  .label { font-size: 10px; color: rgba(232, 232, 240, 0.6); white-space: nowrap; font-variant-numeric: tabular-nums; }
 
   .dot {
     width: 6px;

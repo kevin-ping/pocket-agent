@@ -5,14 +5,15 @@
   probe    send test prompts straight to Hermes /v1/runs (own session id) and time every event
 
 Standard library only. Reads API_SERVER / API_SERVER_KEY from the repo .env, then ~/.pocket-agent/.env.
+The default log is ~/.hermes/profiles/$HERMES_PROFILE/logs/agent.log (HERMES_PROFILE defaults to "default").
 """
 import argparse, collections, datetime as dt, json, os, re, statistics, sys, time, urllib.request
 
-LOG = os.path.expanduser("~/.hermes/profiles/xingli/logs/agent.log")
+LOG = os.path.expanduser(f"~/.hermes/profiles/{os.environ.get('HERMES_PROFILE', 'default')}/logs/agent.log")
 PROBES = {
     "screen": "截图看一下我电脑桌面现在有什么,简单说两句。",
     "code": "查一下 /private/var/www/pocket-agent 仓库最近 3 个 git 提交,简单说一下。",
-    "flight": "帮我查一下明天悉尼到墨尔本的航班,说两三个就行。",
+    "flight": "帮我查一下明天北京到上海的航班,说两三个就行。",
 }
 
 

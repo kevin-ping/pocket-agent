@@ -1,6 +1,6 @@
 [package]
 name = "pocket-agent"
-version = "0.2.9"
+version = "0.3.0"
 edition = "2021"
 
 [lib]
@@ -48,7 +48,7 @@ dirs = "5.0"
 dotenvy = "0.15"
 
 # HTTP API server for push notifications
-axum = { version = "0.8", features = ["json"] }
+axum = { version = "0.8", features = ["json", "ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
 tempfile = "3"

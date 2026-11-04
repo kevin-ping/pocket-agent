@@ -13,7 +13,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use base64::Engine;
 
-use crate::voice::record::{start_streaming_capture, stop_streaming_capture, OWNER_WAKE};
+use crate::voice::record::{start_streaming_capture, stop_streaming_capture, StreamingHandle, OWNER_WAKE};
 
 /// STT server URL for HTTP-based speaker embedding (bypasses macOS 12 ORT C API mismatch).
 const STT_SERVER_URL: &str = "http://127.0.0.1:8651";
@@ -244,6 +244,7 @@ pub fn start_wake_listener(app: AppHandle, _threshold: f32, _speaker_name: Optio
             let result = wake_http_worker_loop(
                 &app_worker,
                 &rx,
+                &stream_handle,
                 device_sr,
                 device_ch,
                 &stop_flag_worker,
@@ -311,6 +312,7 @@ pub fn stop_wake_listener() {
 fn wake_http_worker_loop(
     app: &AppHandle,
     rx: &mpsc::Receiver<Vec<i16>>,
+    stream: &StreamingHandle,
     device_sr: u32,
     device_ch: u16,
     stop_flag: &AtomicBool,
@@ -326,6 +328,11 @@ fn wake_http_worker_loop(
         let mut was_paused = false;
         let mut last_sent = std::time::Instant::now();
         while !stop_flag.load(Ordering::Acquire) {
+            if stream.is_stale() {
+                // Phone attached or left; the frontend re-arms on the new source.
+                eprintln!("[wake] audio source switched, stopping listener");
+                break;
+            }
             let paused = WAKE_PAUSED.load(Ordering::Acquire);
             let gap = overflow.swap(false, Ordering::AcqRel)
                 || last_sent.elapsed() > Duration::from_secs(10);
@@ -472,6 +479,7 @@ struct WakeCheckResult {
     speaker_match: bool,
     keyword_match: bool,
     keyword_text: String,
+    score: f64,
 }
 
 /// Reuse enrolled keyword AND speaker verification during playback. Errors fail
@@ -479,6 +487,13 @@ struct WakeCheckResult {
 /// Speaker verification reduces speaker echo false positives; it is not AEC.
 pub fn check_interrupt_wake(samples: &[i16], sr: u32, threshold: f32) -> Result<bool, String> {
     let result = wake_http_check(samples, sr, 1, threshold)?;
+    if result.keyword_match {
+        // Keyword hits are rare; log them so every barge-in stop can be traced.
+        eprintln!(
+            "[conv] barge-in check: kw=\"{}\" speaker_match={} score={:.2} threshold={:.2}",
+            result.keyword_text, result.speaker_match, result.score, threshold
+        );
+    }
     Ok(result.speaker_match && result.keyword_match && !result.keyword_text.trim().is_empty())
 }
 
@@ -502,6 +517,7 @@ fn wake_http_check(
         speaker_match: v["speaker_match"].as_bool().unwrap_or(false),
         keyword_match: v["keyword_match"].as_bool().unwrap_or(false),
         keyword_text: v["keyword_text"].as_str().unwrap_or("").to_string(),
+        score: v["score"].as_f64().unwrap_or(0.0),
     })
 }
 

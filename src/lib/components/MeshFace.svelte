@@ -29,6 +29,8 @@
   /** Custom `.mavatar` as a data URI, or null for the bundled avatar. */
   export let customSource: string | null = null;
   export let status: 'loading' | 'ready' | 'failed' = 'loading';
+  /** circle: the desktop's face close-up; fill: the whole picture, as large as the box allows, standing on its bottom edge (phone). */
+  export let variant: 'circle' | 'fill' = 'circle';
 
   // Fixed same-origin path, kept even for custom files: <mesh-avatar> without src fetches a remote sample.
   const MESH_SRC = '/avatars/xingyin.mavatar';
@@ -59,6 +61,13 @@
   $: size = SIZE * scale;
   $: left = -12 + offsetX - (SIZE / 2) * (scale - 1);
   $: top = -10 + offsetY - (SIZE / 2) * (scale - 1);
+
+  let boxW = 0;
+  let boxH = 0;
+  $: fill = variant === 'fill';
+  $: side = fill ? Math.min(boxW, boxH) : size;
+  $: elLeft = fill ? (boxW - side) / 2 : left;
+  $: elTop = fill ? boxH - side : top;
 
   function loadCustom(el: MeshAvatarElement, dataUri: string) {
     loadedCustom = dataUri;
@@ -119,17 +128,17 @@
   onDestroy(stopMouth);
 </script>
 
-<div class="mesh-face" aria-hidden="true">
+<div class="mesh-face" class:fill aria-hidden="true" bind:clientWidth={boxW} bind:clientHeight={boxH}>
   {#key builtinGeneration}
   <mesh-avatar
     bind:this={meshEl}
     src={MESH_SRC}
     fit="contain"
     expression={expressions[state] ?? 'neutral'}
-    style:width="{size}px"
-    style:height="{size}px"
-    style:left="{left}px"
-    style:top="{top}px"
+    style:width="{side}px"
+    style:height="{side}px"
+    style:left="{elLeft}px"
+    style:top="{elTop}px"
     on:load={handleLoad}
     on:error={handleError}
   ></mesh-avatar>
@@ -148,6 +157,11 @@
     -webkit-mask-image: radial-gradient(circle closest-side, #000 99%, transparent 100%);
     mask-image: radial-gradient(circle closest-side, #000 99%, transparent 100%);
     pointer-events: none;
+  }
+  .mesh-face.fill {
+    border-radius: 0;
+    -webkit-mask-image: none;
+    mask-image: none;
   }
   /* 1600px source at 96px = 0.06 scale; face center (797, 860) → (48, 51.6), placed at (36, 42) — slightly below the 72px padding-box center */
   .mesh-face mesh-avatar {

@@ -3,17 +3,24 @@
 //! session, folded into the next PA turn. So both edges are read from the session
 //! transcript: the `delegate_task` dispatch row lights the lamp, the completion row marks
 //! the turn that announces it, and the frontend settles at that turn's chat-audio-done.
+//! While any delegation is running, a single poller reads the session every 15s and emits
+//! `subagent-delivered` for new completions so the frontend can start the reporting turn.
 //! Only delegation ids and session ids are kept; message text never leaves this module.
 use super::runs::{authorized, http};
 use crate::commands::config::{get_api_key, get_api_url};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
 const MESSAGE_PAGE: usize = 80;
 const MAX_PENDING: usize = 16;
 const MAX_SETTLED: usize = 64;
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// At most one poller; cleared under the ledger lock when nothing is running.
+static POLLING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum State {
@@ -132,26 +139,64 @@ fn running_ids(ledger: &Ledger) -> Vec<String> {
     ids
 }
 
-/// Before a UI turn: mark delegations whose result is now in the session. Returns the
-/// reminder for Hermes about the ones still out, or None.
-pub async fn before_turn(app: &AppHandle) -> Option<String> {
+/// Running delegations whose completion row is in `delivered` become Delivered.
+/// Returns how many changed; settled or already-delivered ids never count again.
+fn mark_delivered(ledger: &mut Ledger, delivered: &HashSet<String>) -> usize {
+    let mut marked = 0;
+    for (id, (_, state)) in ledger.pending.iter_mut() {
+        if *state == State::Running && delivered.contains(id) {
+            *state = State::Delivered;
+            marked += 1;
+        }
+    }
+    marked
+}
+
+/// Reads each session with a running delegation and marks the new completions.
+async fn check_sessions() -> usize {
     let sessions: HashSet<String> = {
         let ledger = ledger().lock().unwrap();
         ledger.pending.values().filter(|(_, s)| *s == State::Running).map(|(sess, _)| sess.clone()).collect()
     };
+    let mut marked = 0;
     for session in sessions {
         let Some(messages) = recent_messages(&session).await else { continue };
         let delivered = delivered_ids(&messages);
-        let mut ledger = ledger().lock().unwrap();
-        for (id, (_, state)) in ledger.pending.iter_mut() {
-            if *state == State::Running && delivered.contains(id) {
-                *state = State::Delivered;
-            }
-        }
+        marked += mark_delivered(&mut ledger().lock().unwrap(), &delivered);
     }
+    marked
+}
+
+/// Before a UI turn: mark delegations whose result is now in the session. Returns the
+/// reminder for Hermes about the ones still out, or None.
+pub async fn before_turn(app: &AppHandle) -> Option<String> {
+    check_sessions().await;
     let ledger = ledger().lock().unwrap();
     emit_count(app, &ledger);
     reminder(&running_ids(&ledger))
+}
+
+/// Starts the poller unless one is already running. Call after adding Running entries.
+fn ensure_poller(app: &AppHandle) {
+    if POLLING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            let marked = check_sessions().await;
+            let ledger = ledger().lock().unwrap();
+            if marked > 0 {
+                emit_count(&app, &ledger);
+                let _ = app.emit("subagent-delivered", json!({"count": marked}));
+            }
+            if running_ids(&ledger).is_empty() {
+                POLLING.store(false, Ordering::SeqCst);
+                return;
+            }
+        }
+    });
 }
 
 fn reminder(running: &[String]) -> Option<String> {
@@ -184,6 +229,8 @@ pub async fn after_delegate(app: &AppHandle, session: &str) {
         }
         if !fresh.is_empty() {
             emit_count(app, &ledger);
+            drop(ledger);
+            ensure_poller(app);
             return;
         }
     }
@@ -283,6 +330,24 @@ mod tests {
         settle_ledger(&mut ledger);
         assert_eq!(ledger.settled.len(), MAX_SETTLED);
         assert_eq!(ledger.settled[0], "deleg_36");
+    }
+
+    #[test]
+    fn mark_delivered_counts_each_completion_once() {
+        let mut ledger = Ledger::default();
+        ledger.pending.insert("deleg_1".into(), ("s".into(), State::Running));
+        ledger.pending.insert("deleg_2".into(), ("s".into(), State::Running));
+        ledger.pending.insert("deleg_3".into(), ("s".into(), State::Dismissed));
+        let delivered = HashSet::from(["deleg_1".to_string(), "deleg_3".to_string(), "deleg_9".to_string()]);
+        assert_eq!(mark_delivered(&mut ledger, &delivered), 1);
+        assert_eq!(ledger.pending["deleg_1"].1, State::Delivered);
+        assert_eq!(ledger.pending["deleg_2"].1, State::Running);
+        // The same completion row on the next poll does not trigger again.
+        assert_eq!(mark_delivered(&mut ledger, &delivered), 0);
+        // Nor after the reporting turn settled it.
+        settle_ledger(&mut ledger);
+        assert_eq!(mark_delivered(&mut ledger, &delivered), 0);
+        assert_eq!(running_ids(&ledger), vec!["deleg_2"]);
     }
 
     #[test]

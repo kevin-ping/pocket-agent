@@ -11,14 +11,9 @@ pub struct AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Load .env file:
-    // 1. Current working directory (works for `tauri dev`)
-    // 2. ~/.pocket-agent/.env (works for packaged .app)
-    let _ = dotenvy::dotenv();
-    if let Ok(home) = std::env::var("HOME") {
-        let env_path = std::path::Path::new(&home).join(".pocket-agent").join(".env");
-        let _ = dotenvy::from_path(&env_path);
-    }
+    // Gateway settings: the packaged app reads ~/.pocket-agent/.env, a dev build
+    // the repository's .env (else the user file); process env wins over both.
+    commands::config::load_env();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
@@ -88,7 +83,11 @@ pub fn run() {
                                     || voice::stt::restart_when_idle(reload_handle),
                                 );
                             }
-                            Err(e) => eprintln!("[venv] bootstrap failed: {}", e),
+                            Err(e) => {
+                                eprintln!("[venv] bootstrap failed: {}", e);
+                                // venv-setup-error carries the message; the window must be up to show it.
+                                voice::stt::reveal_main_window(&venv_handle, "venv setup failed");
+                            }
                         }
                     })
                     .ok();
@@ -168,7 +167,9 @@ pub fn run() {
             commands::config::quit_app,
             commands::computer::get_computer_status,
             api::runs::respond_computer_approval,
+            api::runs::pending_computer_approvals,
             api::subagents::settle_background_subagents,
+            api::remote::is_ui_remote_active,
             commands::history::open_chat_history,
             commands::history::save_chat_message,
 
@@ -186,6 +187,7 @@ pub fn run() {
             commands::voice::stop_wake_word_listening,
             commands::voice::is_wake_word_active,
             commands::voice::is_app_ready,
+            voice::setup_status::voice_setup_status,
             commands::voice::start_enroll_recording,
             commands::voice::stop_enroll_recording,
             commands::voice::enroll_speaker,

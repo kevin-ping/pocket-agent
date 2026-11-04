@@ -2,7 +2,7 @@
   import { fade } from 'svelte/transition';
   import { createEventDispatcher } from 'svelte';
   import Icon from './Icon.svelte';
-  import { invoke } from '@tauri-apps/api/core';
+  import { invoke, isRemote } from '../ipc';
   import { chatStore } from '../stores/chat';
 
   export let x = 0;
@@ -58,10 +58,13 @@
     <button class="item" role="menuitem" on:click={() => handleAction('mute')}>
       {muted ? '<Icon name="bell" size={14} /> 取消静音' : '<Icon name="bell-off" size={14} /> 静音'}
     </button>
-    <div class="divider"></div>
-    <button class="item danger" role="menuitem" on:click={() => handleAction('quit')}>
-      <Icon name="x" size={14} /> 退出
-    </button>
+    {#if !isRemote}
+      <!-- Quitting PA is a Mac-side action; the phone has no quit. -->
+      <div class="divider"></div>
+      <button class="item danger" role="menuitem" on:click={() => handleAction('quit')}>
+        <Icon name="x" size={14} /> 退出
+      </button>
+    {/if}
   </div>
 {/if}
 

@@ -58,7 +58,7 @@
   // During thinking/tool phase, show intermediate steps instead of empty box
   let displayContent = $derived($chatStore.isStreaming && !$chatStore.streamingContent
     ? ''
-    : ($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? idleHint($settingsStore)));
+    : ($chatStore.error ?? $chatStore.messages[$chatStore.messages.length - 1]?.content ?? idleHint($settingsStore)));
 
   // Auto-scroll to bottom when streaming
   $effect(() => {
@@ -111,7 +111,7 @@
         </p>
       {:else}
         <p class="message-text" class:error-text={isError}>
-          {@html sanitizeHtml($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? idleHint($settingsStore))}
+          {@html sanitizeHtml($chatStore.error ?? $chatStore.messages[$chatStore.messages.length - 1]?.content ?? idleHint($settingsStore))}
         </p>
       {/if}
     </div>

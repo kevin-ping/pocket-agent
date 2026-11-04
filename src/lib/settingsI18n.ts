@@ -281,6 +281,7 @@ const meshEn = {
   file: 'Avatar file', builtin: 'Built-in xingyin', custom: 'Custom file', choose: 'Choose .mavatar', restore: 'Restore built-in',
   fileHint: '.mavatar file, up to 10 MB. Read locally only.', fileError: 'Choose a .mavatar file up to 10 MB.',
   expressions: 'Expression for each state', emotions: 'Reply emotion mapping', advanced: 'Advanced',
+  bgColors: 'Avatar background colors', bgColorsHint: 'Circle background for each state. The ring and glow keep their colors.', resetColors: 'Restore defaults',
 };
 type MeshStrings = typeof meshEn;
 const MESH_TRANSLATIONS: Record<SettingsLang, MeshStrings> = {
@@ -292,6 +293,7 @@ const MESH_TRANSLATIONS: Record<SettingsLang, MeshStrings> = {
     file: '头像文件', builtin: '内置 xingyin', custom: '自定义文件', choose: '选择 .mavatar', restore: '恢复内置',
     fileHint: '.mavatar 文件，最大 10 MB，只在本地读取。', fileError: '请选择不超过 10 MB 的 .mavatar 文件。',
     expressions: '各状态的表情', emotions: '回复情绪对应', advanced: '高级',
+    bgColors: '头像背景色', bgColorsHint: '每个状态的圆形背景颜色，光圈和外发光颜色不变。', resetColors: '恢复默认',
   },
   ja: {
     enabled: 'アニメーションアバター（mesh）', enabledHint: 'オンにすると、下の静止画 / アニメーションアバターより優先されます。',
@@ -300,6 +302,7 @@ const MESH_TRANSLATIONS: Record<SettingsLang, MeshStrings> = {
     file: 'アバターファイル', builtin: '内蔵 xingyin', custom: 'カスタムファイル', choose: '.mavatar を選択', restore: '内蔵に戻す',
     fileHint: '.mavatar ファイル、最大 10 MB。ローカルでのみ読み込みます。', fileError: '10 MB 以下の .mavatar ファイルを選択してください。',
     expressions: '状態ごとの表情', emotions: '返答の感情の対応', advanced: '詳細',
+    bgColors: 'アバターの背景色', bgColorsHint: '状態ごとの円の背景色です。リングと光彩の色は変わりません。', resetColors: 'デフォルトに戻す',
   },
   ko: {
     enabled: '애니메이션 아바타(mesh)', enabledHint: '켜면 아래의 정적 / 애니메이션 아바타 대신 표시됩니다.',
@@ -308,6 +311,7 @@ const MESH_TRANSLATIONS: Record<SettingsLang, MeshStrings> = {
     file: '아바타 파일', builtin: '내장 xingyin', custom: '사용자 파일', choose: '.mavatar 선택', restore: '내장으로 복원',
     fileHint: '.mavatar 파일, 최대 10 MB. 로컬에서만 읽습니다.', fileError: '10 MB 이하의 .mavatar 파일을 선택하세요.',
     expressions: '상태별 표정', emotions: '응답 감정 매핑', advanced: '고급',
+    bgColors: '아바타 배경색', bgColorsHint: '상태별 원형 배경색입니다. 테두리와 빛 효과 색은 바뀌지 않습니다.', resetColors: '기본값으로 복원',
   },
   fr: {
     enabled: 'Avatar animé (mesh)', enabledHint: 'Activé, il remplace les avatars statique et animé ci-dessous.',
@@ -316,6 +320,7 @@ const MESH_TRANSLATIONS: Record<SettingsLang, MeshStrings> = {
     file: "Fichier d'avatar", builtin: 'xingyin intégré', custom: 'Fichier personnalisé', choose: 'Choisir un .mavatar', restore: "Revenir à l'intégré",
     fileHint: 'Fichier .mavatar, 10 Mo maximum. Lu uniquement en local.', fileError: 'Choisissez un fichier .mavatar de 10 Mo maximum.',
     expressions: 'Expression par état', emotions: 'Correspondance des émotions', advanced: 'Avancé',
+    bgColors: "Couleurs de fond de l'avatar", bgColorsHint: "Fond du cercle pour chaque état. L'anneau et le halo gardent leurs couleurs.", resetColors: 'Rétablir les valeurs par défaut',
   },
   de: {
     enabled: 'Animierter Avatar (mesh)', enabledHint: 'Wenn aktiv, ersetzt er den statischen und animierten Avatar unten.',
@@ -324,6 +329,7 @@ const MESH_TRANSLATIONS: Record<SettingsLang, MeshStrings> = {
     file: 'Avatar-Datei', builtin: 'Integrierter xingyin', custom: 'Eigene Datei', choose: '.mavatar wählen', restore: 'Integrierten wiederherstellen',
     fileHint: '.mavatar-Datei, bis 10 MB. Wird nur lokal gelesen.', fileError: 'Wähle eine .mavatar-Datei bis 10 MB.',
     expressions: 'Gesichtsausdruck je Zustand', emotions: 'Zuordnung der Antwort-Emotionen', advanced: 'Erweitert',
+    bgColors: 'Avatar-Hintergrundfarben', bgColorsHint: 'Kreishintergrund je Zustand. Ring und Leuchten behalten ihre Farben.', resetColors: 'Standard wiederherstellen',
   },
   es: {
     enabled: 'Avatar animado (mesh)', enabledHint: 'Al activarlo, sustituye a los avatares estático y animado de abajo.',
@@ -332,6 +338,7 @@ const MESH_TRANSLATIONS: Record<SettingsLang, MeshStrings> = {
     file: 'Archivo de avatar', builtin: 'xingyin integrado', custom: 'Archivo personalizado', choose: 'Elegir .mavatar', restore: 'Restaurar integrado',
     fileHint: 'Archivo .mavatar, hasta 10 MB. Solo se lee localmente.', fileError: 'Elige un archivo .mavatar de hasta 10 MB.',
     expressions: 'Expresión por estado', emotions: 'Correspondencia de emociones', advanced: 'Avanzado',
+    bgColors: 'Colores de fondo del avatar', bgColorsHint: 'Fondo del círculo para cada estado. El anillo y el brillo conservan sus colores.', resetColors: 'Restaurar valores predeterminados',
   },
 };
 export function meshSettingsText(lang: string): MeshStrings {

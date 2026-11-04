@@ -12,8 +12,40 @@ use tauri::{AppHandle, Emitter};
 struct Run {
     url: String,
     key: Option<String>,
-    pending: HashMap<String, Vec<String>>,
+    pending: HashMap<String, Approval>,
     cancelled: bool,
+}
+/// One unanswered Hermes request: the choices it offered, and the
+/// `computer-approval` payload, kept so a reloaded frontend can show it again.
+#[derive(Clone)]
+struct Approval {
+    choices: Vec<String>,
+    shown: Value,
+    /// Session-authority runs fence each prompt to an execution generation,
+    /// echoed back in the answer.
+    generation: Option<i64>,
+}
+
+/// The id to answer an approval.request with. Legacy runs send `request_id`;
+/// session-authority runs send the prompt's `prompt_id` plus its
+/// `execution_generation` (both required then).
+fn approval_ref(event: &Value) -> Result<(String, Option<i64>), String> {
+    let missing = || "Hermes 批准请求缺少编号，已停止任务。".to_string();
+    let valid = |id: &Value| id.as_str().filter(|s| !s.is_empty() && s.len() <= 256).map(String::from);
+    if let Some(id) = valid(&event["request_id"]) {
+        return Ok((id, None));
+    }
+    let id = valid(&event["prompt_id"]).ok_or_else(missing)?;
+    let generation = event["execution_generation"].as_i64().ok_or_else(missing)?;
+    Ok((id, Some(generation)))
+}
+
+/// Session-authority runs accept exactly these keys.
+fn approval_answer(request_id: &str, generation: Option<i64>, choice: &str) -> Value {
+    match generation {
+        Some(generation) => json!({"request_id": request_id, "execution_generation": generation, "choice": choice}),
+        None => json!({"request_id": request_id, "choice": choice}),
+    }
 }
 fn active() -> &'static Mutex<HashMap<String, Run>> {
     static RUNS: OnceLock<Mutex<HashMap<String, Run>>> = OnceLock::new();
@@ -25,6 +57,15 @@ pub(super) fn http() -> reqwest::Client {
         .build()
         .expect("HTTP client")
 }
+/// 401 / 403 from the gateway: the key PA sends is not the gateway's.
+pub(super) fn auth_failed(status: reqwest::StatusCode) -> String {
+    format!(
+        "Hermes 拒绝了密钥（HTTP {}）：PA 的 API_SERVER_KEY 必须与网关 ~/.hermes/.env 中的 API_SERVER_KEY 一致（{}）。",
+        status.as_u16(),
+        crate::commands::config::gateway_hint()
+    )
+}
+
 pub(super) fn authorized(request: reqwest::RequestBuilder, key: &Option<String>) -> reqwest::RequestBuilder {
     if let Some(key) = key {
         request.bearer_auth(key)
@@ -68,44 +109,59 @@ pub async fn respond_computer_approval(
 ) -> Result<(), String> {
     // Only exact pending requests owned by this PA process can be answered, and only with a
     // choice Hermes offered for that request. Claim it before sending so it cannot be reused.
-    let (run, choices) = {
+    let (run, approval) = {
         let mut runs = active().lock().unwrap();
         let run = runs.get_mut(&run_id).ok_or("该电脑任务已经结束。")?;
         if run.cancelled {
             return Err("该电脑任务已取消。".into());
         }
-        let choices = run
+        let approval = run
             .pending
             .get(&request_id)
             .ok_or("该操作已经处理或已过期。")?;
-        if !choices.contains(&choice) {
+        if !approval.choices.contains(&choice) {
             return Err("该操作不允许此批准方式。".into());
         }
-        let choices = run.pending.remove(&request_id).unwrap_or_default();
-        (run.clone(), choices)
+        let approval = run.pending.remove(&request_id).ok_or("该操作已经处理或已过期。")?;
+        (run.clone(), approval)
     };
     if let Err(error) = control(
         &run,
         &run_id,
         "approval",
-        json!({"request_id": request_id, "choice": choice}),
+        approval_answer(&request_id, approval.generation, &choice),
     )
     .await
     {
         if error.retryable {
-            restore_approval(&run_id, request_id, choices);
+            restore_approval(&run_id, request_id, approval);
         }
         return Err(error.message);
     }
     Ok(())
 }
 
-fn restore_approval(run_id: &str, request_id: String, choices: Vec<String>) {
+fn restore_approval(run_id: &str, request_id: String, approval: Approval) {
     if let Some(run) = active().lock().unwrap().get_mut(run_id) {
         if !run.cancelled {
-            run.pending.entry(request_id).or_insert(choices);
+            run.pending.entry(request_id).or_insert(approval);
         }
     }
+}
+
+/// The `computer-approval` payloads still waiting for an answer. A frontend
+/// that (re)mounts after they were emitted — the desktop reloading out of the
+/// phone shell, a phone reconnecting — shows them from here. Answering still
+/// goes through respond_computer_approval's exact run / request / choice check.
+#[tauri::command]
+pub fn pending_computer_approvals() -> Vec<Value> {
+    active()
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|run| !run.cancelled)
+        .flat_map(|run| run.pending.values().map(|a| a.shown.clone()))
+        .collect()
 }
 
 pub async fn cancel_all() -> Result<(), String> {
@@ -150,11 +206,22 @@ pub async fn chat_stream(
         .json(&json!({"input": text, "instructions": instructions, "session_id": session}))
         .send()
         .await
-        .map_err(|_| "Hermes 任务创建响应丢失，执行状态未知；请检查后再重试。")?;
+        .map_err(|e| {
+            if e.is_connect() {
+                // Refused before anything was sent: the run was not created.
+                format!("连不上 Hermes 网关：请确认网关已启动、API_SERVER 正确（{}）。", crate::commands::config::gateway_hint())
+            } else {
+                "Hermes 任务创建响应丢失，执行状态未知；请检查后再重试。".to_string()
+            }
+        })?;
     if !response.status().is_success() {
+        let status = response.status();
+        if matches!(status.as_u16(), 401 | 403) {
+            return Err(auth_failed(status));
+        }
         return Err(format!(
             "Hermes 任务接口失败（HTTP {}）。电脑交互需要支持 /v1/runs 的 Hermes 网关。",
-            response.status()
+            status
         ));
     }
     let value: Value = response
@@ -257,10 +324,8 @@ pub async fn chat_stream(
                         }
                     }
                     "approval.request" => {
-                        let request_id = value["request_id"]
-                            .as_str()
-                            .filter(|s| !s.is_empty() && s.len() <= 256)
-                            .ok_or("Hermes 批准请求缺少编号，已停止任务。")?;
+                        let (request_id, generation) = approval_ref(&value)?;
+                        let request_id = request_id.as_str();
                         let choices: Vec<String> = value["choices"]
                             .as_array()
                             .into_iter()
@@ -270,21 +335,18 @@ pub async fn chat_stream(
                         if !choices.iter().any(|choice| choice == "deny") {
                             return Err("Hermes 批准请求缺少拒绝选项，已停止任务。".into());
                         }
+                        let shown = json!({"run_id": id, "request_id": request_id,
+                            "choices": choices, "command": value["command"].as_str().unwrap_or(""),
+                            "description": value["description"].as_str().unwrap_or("")});
                         if let Some(run) = active().lock().unwrap().get_mut(&id) {
                             if run.cancelled {
                                 continue;
                             }
-                            run.pending.insert(request_id.into(), choices.clone());
+                            run.pending.insert(request_id.into(), Approval { choices, shown: shown.clone(), generation });
                         } else {
                             continue;
                         }
-                        app.emit(
-                            "computer-approval",
-                            json!({"run_id": id, "request_id": request_id,
-                            "choices": choices, "command": value["command"].as_str().unwrap_or(""),
-                            "description": value["description"].as_str().unwrap_or("")}),
-                        )
-                        .map_err(|e| e.to_string())?;
+                        app.emit("computer-approval", shown).map_err(|e| e.to_string())?;
                     }
                     "run.completed" | "run.failed" | "run.cancelled" | "run.interrupted" => {
                         terminal = true;
@@ -501,7 +563,11 @@ mod tests {
         let mut pending = HashMap::new();
         pending.insert(
             request.into(),
-            choices.iter().map(|c| c.to_string()).collect(),
+            Approval {
+                choices: choices.iter().map(|c| c.to_string()).collect(),
+                shown: json!({"run_id": id, "request_id": request, "choices": choices}),
+                generation: None,
+            },
         );
         active().lock().unwrap().insert(
             id.into(),
@@ -529,6 +595,24 @@ mod tests {
             }
         });
         url
+    }
+
+    #[tokio::test]
+    async fn unanswered_approvals_can_be_shown_again_until_answered() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let id = "run_replay_test";
+        register(id, ok_gateway().await, "request", &["once", "deny"]);
+        let replay = pending_computer_approvals();
+        assert!(replay.iter().any(|a| a["run_id"] == id && a["request_id"] == "request"));
+        respond_computer_approval(id.into(), "request".into(), "once".into())
+            .await
+            .unwrap();
+        assert!(!pending_computer_approvals().iter().any(|a| a["run_id"] == id));
+        active().lock().unwrap().get_mut(id).unwrap().cancelled = true;
+        register(id, ok_gateway().await, "again", &["deny"]);
+        active().lock().unwrap().get_mut(id).unwrap().cancelled = true;
+        assert!(!pending_computer_approvals().iter().any(|a| a["run_id"] == id), "cancelled runs show nothing");
+        active().lock().unwrap().remove(id);
     }
 
     #[tokio::test]
@@ -564,6 +648,26 @@ mod tests {
             .pending
             .contains_key("specific"));
         active().lock().unwrap().remove(id);
+    }
+
+    #[test]
+    fn approvals_are_answered_in_the_shape_their_run_uses() {
+        // Legacy run: request_id, answered with request_id + choice.
+        let legacy = json!({"event": "approval.request", "request_id": "r1", "choices": ["once", "deny"]});
+        assert_eq!(approval_ref(&legacy), Ok(("r1".into(), None)));
+        assert_eq!(approval_answer("r1", None, "once"), json!({"request_id": "r1", "choice": "once"}));
+        // Session-authority run (MCP trust gate seen 2026-11-04): prompt_id + execution_generation,
+        // answered with exactly request_id, execution_generation and choice.
+        let authority = json!({"event": "approval.request", "kind": "approval", "prompt_id": "p9",
+                               "execution_generation": 3, "choices": ["once", "deny", "session", "always"]});
+        assert_eq!(approval_ref(&authority), Ok(("p9".into(), Some(3))));
+        assert_eq!(approval_answer("p9", Some(3), "deny"),
+                   json!({"request_id": "p9", "execution_generation": 3, "choice": "deny"}));
+        // Anything else stops the run rather than guessing.
+        for bad in [json!({}), json!({"prompt_id": "p9"}), json!({"prompt_id": "p9", "execution_generation": "3"}),
+                    json!({"request_id": ""}), json!({"prompt_id": "x".repeat(257), "execution_generation": 1})] {
+            assert!(approval_ref(&bad).is_err(), "{bad}");
+        }
     }
 
     #[tokio::test]
@@ -690,7 +794,7 @@ mod tests {
             "request",
             &["once", "deny"],
         );
-        let choices = active()
+        let approval = active()
             .lock()
             .unwrap()
             .get_mut(id)
@@ -699,7 +803,7 @@ mod tests {
             .remove("request")
             .unwrap();
         // An ordinary definitely-unsent failure may be retried.
-        restore_approval(id, "request".into(), choices.clone());
+        restore_approval(id, "request".into(), approval.clone());
         assert!(active().lock().unwrap()[id].pending.contains_key("request"));
         // cancel_all's locked invalidation occurs before the failed request completes.
         {
@@ -708,10 +812,10 @@ mod tests {
             run.pending.clear();
             run.cancelled = true;
         }
-        restore_approval(id, "request".into(), choices.clone());
+        restore_approval(id, "request".into(), approval.clone());
         assert!(active().lock().unwrap()[id].pending.is_empty());
         active().lock().unwrap().remove(id);
-        restore_approval(id, "request".into(), choices);
+        restore_approval(id, "request".into(), approval);
         assert!(!active().lock().unwrap().contains_key(id));
     }
 }

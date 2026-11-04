@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import { invoke } from '@tauri-apps/api/core';
+  import { invoke, isRemote, listen, type UnlistenFn } from './lib/ipc';
   import { getCurrentWindow, LogicalPosition, LogicalSize } from '@tauri-apps/api/window';
 
   import AvatarIcon from './lib/components/AvatarIcon.svelte';
   import DynamicIsland from './lib/components/DynamicIsland.svelte';
+  import MobileLayout from './lib/components/mobile/MobileLayout.svelte';
   import Icon from './lib/components/Icon.svelte';
   import ChatPanel from './lib/components/ChatPanel.svelte';
   import StatusPanel from './lib/components/StatusPanel.svelte';
@@ -19,17 +19,19 @@
   import { chatStore, statusVisible } from './lib/stores/chat';
   import { settingsStore } from './lib/stores/settings';
   import { layoutStore } from './lib/stores/layout';
-  import { onBackgroundSubagents, onSpeechDetected, refreshComputerStatus, settleSubagents } from './lib/stores/status';
+  import { onBackgroundSubagents, onSpeechDetected, onTurnEnd, onTurnStart, onTurnStep, refreshComputerStatus, settleSubagents } from './lib/stores/status';
   import { STATUS_PHRASES, langFromVoice, detectLang, convLabels, convLabelsLang, type LangKey } from './lib/i18n';
   import { wakeErrorMessage } from './lib/wakeErrors';
+  import { createSetupSequencer, type SetupSnapshot } from './lib/voiceSetup';
 
-  const appWindow = getCurrentWindow();
+  // Remote mode (phone WebView over /ui) has no native window.
+  const appWindow = isRemote ? null : getCurrentWindow();
 
   // ─── Drag (avatar only) ───
   function handleAvatarDragStart(e: MouseEvent) {
     const target = e.target as HTMLElement;
     if (target.closest('button, input, select, [role="textbox"]')) return;
-    appWindow.startDragging();
+    appWindow?.startDragging();
   }
 
   // ─── Chat send ───
@@ -41,14 +43,21 @@
     return handleSendMessageImpl(text, userLanguage);
   }
 
-  async function handleSendMessageImpl(text: string, userLanguage?: string) {
-    // Update current input language for status TTS (explicit param from STT wins,
-    // otherwise detect from typed text).
-    currentInputLang = (userLanguage as LangKey | undefined) ?? detectLang(text);
+  /** `silent`: PA's own turn (background result report) — no user bubble, not saved as the user's words. */
+  async function handleSendMessageImpl(text: string, userLanguage?: string, silent = false) {
+    if (silent) {
+      userLanguage = currentInputLang;
+    } else {
+      // The user's own turn carries any finished background result; no separate report.
+      cancelPendingReport();
+      // Update current input language for status TTS (explicit param from STT wins,
+      // otherwise detect from typed text).
+      currentInputLang = (userLanguage as LangKey | undefined) ?? detectLang(text);
 
-    chatStore.addUserMessage(text);
-    // Save user message to history
-    invoke('save_chat_message', { role: 'user', content: text }).catch(e => console.error('Failed to save user message:', e));
+      chatStore.addUserMessage(text);
+      // Save user message to history
+      invoke('save_chat_message', { role: 'user', content: text }).catch(e => console.error('Failed to save user message:', e));
+    }
 
     chatStore.clearThinkingSteps();
     chatStore.startStream();
@@ -69,9 +78,40 @@
       });
     } catch (e) {
       chatStore.setError(`请求未完成: ${e}`);
+      onTurnEnd();
       characterState.toIdle();
       spiritPhase = 0;
     }
+  }
+
+  // ─── Background subagent finished: PA starts the reporting turn once idle ───
+  let pendingReport = false;
+  let pendingReportTimer: ReturnType<typeof setInterval> | null = null;
+
+  function isIdleForReport(): boolean {
+    // characterState too: chat-stream-end sets islandMode idle while the last sentences still play.
+    return !conversationActive && !showBreakConfirm && !isTurnActive() && get(characterState) === 'idle'
+      && (islandMode === 'idle' || islandMode === 'waiting_for_wake');
+  }
+
+  function cancelPendingReport() {
+    pendingReport = false;
+    if (pendingReportTimer) { clearInterval(pendingReportTimer); pendingReportTimer = null; }
+  }
+
+  function tryDeliverReport() {
+    if (!pendingReport || !isIdleForReport()) return;
+    cancelPendingReport();
+    const text = currentInputLang === 'zh'
+      ? '[Pocket Agent] 后台任务已完成，请把结果告诉用户。'
+      : '[Pocket Agent] A background task has finished. Tell the user the result.';
+    handleSendMessageImpl(text, undefined, true);
+  }
+
+  function onSubagentDelivered() {
+    pendingReport = true;
+    tryDeliverReport();
+    if (pendingReport && !pendingReportTimer) pendingReportTimer = setInterval(tryDeliverReport, 1000);
   }
 
   // ─── Context menu ───
@@ -128,6 +168,24 @@
   // Hermes compacts the session context before some turns (can take a couple of minutes).
   const COMPACTING_STEP = '🗜️ 正在整理之前的对话，可能要一两分钟…';
   let compactingThisTurn = false;
+  // Long turns: after 45s with no sound, say "still working" (at most once per 90s).
+  let lastSoundAt = 0;
+  let lastStillWorkingAt = 0;
+  let lastUserSpeechAt = 0;
+
+  function startTurnProgress() {
+    lastSoundAt = Date.now();
+    lastStillWorkingAt = 0;
+    onTurnStart(checkStillWorking);
+  }
+
+  function checkStillWorking(elapsedSec: number) {
+    const now = Date.now();
+    if (islandMode === 'recording' || islandMode === 'speaking' || now - lastUserSpeechAt < 5000) return;
+    if (now - lastSoundAt < 45000 || now - lastStillWorkingAt < 90000) return;
+    lastStillWorkingAt = now;
+    speakStatus({ kind: 'stillWorking', min: Math.max(1, Math.round(elapsedSec / 60)) });
+  }
 
   async function cueDurationMs(audio: HTMLAudioElement): Promise<number> {
     if (Number.isFinite(audio.duration) && audio.duration > 0) {
@@ -164,6 +222,18 @@
     });
   }
 
+  function showSetupStatus() {
+    if (!get(layoutStore).expanded) void layoutStore.expand();
+  }
+
+  // Setup states apply in backend order. Entering installing / error opens the
+  // panel once — not on every pip line, so a user who collapses it stays collapsed.
+  const applySetup = createSetupSequencer((s) => {
+    const entering = get(chatStore).voiceSetupState !== s.state;
+    chatStore.setVoiceSetup({ voiceSetupState: s.state, voiceSetupPhase: s.phase, voiceSetupDetail: s.detail });
+    if (entering && (s.state === 'installing' || s.state === 'error')) showSetupStatus();
+  });
+
   /// Start or stop a continuous conversation. Shared by fn-key-down and
   /// fn-key-up: the hotkey state machine alternates which of the two it emits,
   /// so treating either as the toggle keeps one press = one action regardless
@@ -187,7 +257,7 @@
       islandMode = 'recording';
       spiritPhase = 0;
       firstStreamDelta = false;
-      chatStore.clear();
+      chatStore.clear({ keepTranscript: true });
       chatStore.setVoiceStatus(voiceListeningText());
       characterState.toListening();
       invoke('start_continuous_conversation', {
@@ -318,12 +388,28 @@
   // The mouth no longer waits for the speaking state (status speech plays during thinking),
   // so no path that leaves the turn may leave it open.
   $: if ($characterState === 'idle' || $characterState === 'listening') mouthActive = false;
-  // A new listen starts a new utterance: drop the previous one (covers fn key, manual
-  // start and continuous-mode re-listen alike).
-  $: if ($characterState === 'listening') { chatStore.setSttText(null); chatStore.clearReasoning(); }
-  $: extraStatusH = $chatStore.thinkingSteps.length === 0
+  // A new listen drops the previous reasoning; the user's last utterance stays on screen
+  // (the next stt-result replaces it) until the idle wipe below.
+  $: if ($characterState === 'listening') chatStore.clearReasoning();
+  // Privacy: 5 min after PA goes idle, what both sides said leaves the screen.
+  const IDLE_WIPE_MS = 5 * 60_000;
+  let idleWipeTimer: ReturnType<typeof setTimeout> | null = null;
+  $: scheduleIdleWipe($characterState === 'idle');
+  function scheduleIdleWipe(idle: boolean) {
+    if (idleWipeTimer) { clearTimeout(idleWipeTimer); idleWipeTimer = null; }
+    if (idle) idleWipeTimer = setTimeout(() => { idleWipeTimer = null; chatStore.clear(); }, IDLE_WIPE_MS);
+  }
+  // Voice setup rows: header + phase, or header + an error detail that wraps
+  // (~40 chars per line at the panel width).
+  $: setupLines = $chatStore.voiceSetupState === 'installing'
+    ? ($chatStore.voiceSetupPhase ? 2 : 1)
+    : $chatStore.voiceSetupState === 'error'
+      ? 1 + Math.ceil($chatStore.voiceSetupDetail.length / 40)
+      : 0;
+  $: statusLines = $chatStore.thinkingSteps.length + setupLines;
+  $: extraStatusH = statusLines === 0
     ? 0
-    : Math.min(STATUS_MAX_EXTRA_H, STATUS_BLOCK_PAD + $chatStore.thinkingSteps.length * STATUS_LINE_H);
+    : Math.min(STATUS_MAX_EXTRA_H, STATUS_BLOCK_PAD + statusLines * STATUS_LINE_H);
   // Measured: 0 while no STT text, else 6 px row padding + panel (content capped at 88 px).
   let sttRowH = 0;
   // Same as sttRowH, for the reasoning row below the status panel.
@@ -332,11 +418,12 @@
   $: if ($layoutStore.expanded && !$layoutStore.resizing) {
     const targetH = STATUS_BASE_H + sttRowH + extraStatusH + reasoningRowH;
     queueMicrotask(() => {
-      appWindow.setSize(new LogicalSize(STATUS_EXPANDED_W, targetH)).catch(() => {});
+      appWindow?.setSize(new LogicalSize(STATUS_EXPANDED_W, targetH)).catch(() => {});
     });
   }
 
   async function openChatHistory() {
+    if (isRemote) return; // a Mac window — not reachable from the phone
     try {
       await invoke('open_chat_history');
     } catch (e) {
@@ -511,6 +598,7 @@
     cancelPendingStatusSpeech();
     lastSpokenStatus = null;
     try { await invoke('discard_pending_turn'); } catch (e) { console.error(e); }
+    onTurnEnd();
     chatStore.endStream();
     chatStore.clearThinkingSteps();
     bridgeThinkingActive = false;
@@ -526,6 +614,7 @@
     cancelPendingStatusSpeech();
     lastSpokenStatus = null;
     try { await invoke('discard_pending_turn'); } catch (e) { console.error(e); }
+    onTurnEnd();
     chatStore.endStream();
     chatStore.clearThinkingSteps();
     bridgeThinkingActive = false;
@@ -569,7 +658,7 @@
     return undefined;
   }
 
-  type StatusKind = { kind: 'thinking' } | { kind: 'querying'; name: string } | { kind: 'executing' } | { kind: 'compacting' };
+  type StatusKind = { kind: 'thinking' } | { kind: 'querying'; name: string } | { kind: 'executing' } | { kind: 'compacting' } | { kind: 'stillWorking'; min: number };
   function speakStatus(kind: StatusKind) {
     cancelPendingStatusSpeech();
     const s = get(settingsStore);
@@ -579,6 +668,7 @@
     const text = kind.kind === 'thinking' ? p.thinking
                : kind.kind === 'executing' ? p.executing
                : kind.kind === 'compacting' ? p.compacting
+               : kind.kind === 'stillWorking' ? p.stillWorking(kind.min)
                : p.querying(kind.name);
     if (!text || text === lastSpokenStatus) return;
     lastSpokenStatus = text;
@@ -597,6 +687,7 @@
     unlisten = await Promise.all([
       listen('chat-thinking-start', () => {
         compactingThisTurn = false;
+        startTurnProgress();
         enterThinkingVisuals();
         chatStore.clearThinkingSteps();
         chatStore.clearReasoning();
@@ -620,6 +711,7 @@
       }),
       listen<boolean | undefined>('chat-audio-playing', (e) => {
         if (interruptedReply) return;
+        lastSoundAt = Date.now();
         cancelPendingStatusSpeech();
         lastSpokenStatus = null;
         debugState('chat-audio-playing');
@@ -643,12 +735,14 @@
       }),
       listen('chat-status-audio-playing', () => {
         if (interruptedReply) return;
+        lastSoundAt = Date.now();
         // Status speech plays during thinking: open the mouth only, leave turn state alone.
         if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
         mouthActive = true;
       }),
       listen('chat-audio-sentence-end', () => {
         if (interruptedReply) return;
+        lastSoundAt = Date.now();
         // Sentence finished; next sentence's TTS may still be generating. Close the
         // mouth after a short linger so brief gaps look natural but long ones don't flap.
         if (mouthLingerTimer) clearTimeout(mouthLingerTimer);
@@ -676,6 +770,7 @@
         chatStore.endStream();
         if (!lastSpeakingHadAudio) {
           chatStore.clearThinkingSteps();
+          onTurnEnd();
         } else {
           // An empty reply gets no chat-audio-done; drop 🤔 so it can't pin the turn active.
           chatStore.finishThinkingPhase();
@@ -689,6 +784,7 @@
       }),
       listen<number>('chat-audio-done', (e) => {
         settleSubagents();
+        onTurnEnd();
         avatarEmotion = null;
         mouthActive = false;
         if (mouthLingerTimer) { clearTimeout(mouthLingerTimer); mouthLingerTimer = null; }
@@ -748,6 +844,7 @@
 
       // Tool call start notification
       listen<string>('chat-tool-call', (e) => {
+        onTurnStep();
         enterMidTurnThinking();
         chatStore.endReasoningSegment();
         cancelPendingStatusSpeech();
@@ -768,6 +865,7 @@
       }),
       listen<string>('chat-stream-error', (e) => {
         settleSubagents();
+        onTurnEnd();
         cancelPendingStatusSpeech();
         lastSpokenStatus = null;
         debugState('chat-stream-error', { error: e.payload });
@@ -785,7 +883,12 @@
       listen<{ count: number }>('background-subagents', (e) => {
         onBackgroundSubagents(e.payload.count);
       }),
+      listen<{ count: number }>('subagent-delivered', (e) => {
+        debugState('subagent-delivered', { count: e.payload.count });
+        onSubagentDelivered();
+      }),
       listen('conv-speech-detected', () => {
+        lastUserSpeechAt = Date.now();
         onSpeechDetected();
       }),
       listen('bridge-push-received', () => {
@@ -857,7 +960,7 @@
           spiritPhase = 0;
           firstStreamDelta = false;
           characterState.toListening();
-          chatStore.clear();
+          chatStore.clear({ keepTranscript: true });
           conversationActive = true;
           invoke('start_continuous_conversation', {
             silenceTimeoutSecs: cfg.silence_timeout_secs,
@@ -1047,6 +1150,7 @@
       listen('conversation-barge-in', () => {
         debugState('conversation-barge-in');
         interruptedReply = true;
+        onTurnEnd();
         avatarEmotion = null;
         // sentence-end is ignored while interrupted, so close the mouth here.
         mouthActive = false;
@@ -1060,28 +1164,33 @@
       }),
 
       // ─── First-launch PA venv bootstrap (~/.pocket-agent/venv) ───
-      listen('venv-setup-ready', () => {
-        chatStore.setVoiceSetup({ voiceSetupState: 'ready', voiceSetupPhase: '', voiceSetupDetail: '' });
+      // The status panel only renders in the expanded layout; open it so a
+      // first-run install or a voice failure is visible.
+      listen<{ seq: number }>('venv-setup-ready', (e) => {
+        applySetup({ seq: e.payload.seq, state: 'ready', phase: '', detail: '' });
       }),
-      listen('venv-setup-started', () => {
-        chatStore.setVoiceSetup({ voiceSetupState: 'installing', voiceSetupPhase: '', voiceSetupDetail: '' });
+      listen<{ seq: number }>('venv-setup-started', (e) => {
+        applySetup({ seq: e.payload.seq, state: 'installing', phase: '', detail: '' });
       }),
-      listen<{ phase: string; detail: string }>('venv-setup-progress', (e) => {
-        chatStore.setVoiceSetup({
-          voiceSetupState: 'installing',
-          voiceSetupPhase: e.payload.phase,
-          voiceSetupDetail: e.payload.detail ?? '',
-        });
+      listen<{ seq: number; phase: string; detail: string }>('venv-setup-progress', (e) => {
+        applySetup({ seq: e.payload.seq, state: 'installing', phase: e.payload.phase, detail: e.payload.detail ?? '' });
       }),
-      listen('venv-setup-done', () => {
-        chatStore.setVoiceSetup({ voiceSetupState: 'ready', voiceSetupPhase: '', voiceSetupDetail: '' });
+      listen<{ seq: number }>('venv-setup-done', (e) => {
+        applySetup({ seq: e.payload.seq, state: 'ready', phase: '', detail: '' });
       }),
-      listen<{ phase: string; message: string }>('venv-setup-error', (e) => {
-        chatStore.setVoiceSetup({
-          voiceSetupState: 'error',
-          voiceSetupPhase: e.payload.phase,
-          voiceSetupDetail: e.payload.message ?? '',
-        });
+      listen<{ seq: number; phase: string; message: string }>('venv-setup-error', (e) => {
+        applySetup({ seq: e.payload.seq, state: 'error', phase: e.payload.phase, detail: e.payload.message ?? '' });
+      }),
+      // stt-server after setup: slow first start (model download), up, or exited.
+      listen<{ seq: number; state: 'starting' | 'ready' | 'failed'; message: string }>('voice-service-status', (e) => {
+        const { seq, state, message } = e.payload;
+        if (state === 'starting') {
+          applySetup({ seq, state: 'installing', phase: 'starting-service', detail: '' });
+        } else if (state === 'failed') {
+          applySetup({ seq, state: 'error', phase: 'voice-service', detail: message ?? '' });
+        } else {
+          applySetup({ seq, state: 'ready', phase: '', detail: '' });
+        }
       }),
 
       listen('accessibility-permission-required', () => {
@@ -1127,6 +1236,7 @@
   let posDragTimer: ReturnType<typeof setTimeout> | null = null;
 
   async function saveCurrentPosition() {
+    if (!appWindow) return;
     let pos, scale;
     try {
       pos = await appWindow.outerPosition();
@@ -1148,6 +1258,7 @@
 
   // ─── Listen for window drag + save on close ───
   async function setupWindowPositionSave() {
+    if (!appWindow) return;
     // Debounced save on window move (fires during drag)
     const unlistenMove = await appWindow.onMoved(() => {
       if (posDragTimer) clearTimeout(posDragTimer);
@@ -1165,7 +1276,7 @@
   // ─── Restore window position on mount ───
   async function restoreWindowPosition() {
     const settings = get(settingsStore);
-    if (settings.window_x !== null && settings.window_y !== null) {
+    if (appWindow && settings.window_x !== null && settings.window_y !== null) {
       try {
         await appWindow.setPosition(new LogicalPosition(settings.window_x, settings.window_y));
       } catch (e) { console.warn('[POS] restore failed:', e); }
@@ -1181,7 +1292,7 @@
 // 启动音效 + 窗口显示：后端所有服务就绪后才显示窗口并播放声效
     const playStartSound = async () => {
       console.log("[app] all services ready, showing window + playing start sound");
-      try { await appWindow.show(); } catch (e) { console.warn("[app] show failed:", e); }
+      try { await appWindow?.show(); } catch (e) { console.warn("[app] show failed:", e); }
       try {
         const audio = new Audio("app_start.mp3");
         audio.volume = 0.3;
@@ -1206,6 +1317,8 @@
     // Old macOS: the sherpa compat build installs after startup, then stt-server
     // reloads it. Wake could not start before — try again now.
     listen('voice-engine-reloaded', () => armWakeListenerIfEnabled()).catch(console.error);
+    // Phone attached or left: Rust stopped wake on the old source; listen on the new one.
+    listen('audio-source-changed', () => armWakeListenerIfEnabled()).catch(console.error);
 
     const settingsLoaded = await settingsStore.load();
     void refreshMeshCustom();
@@ -1219,6 +1332,8 @@
     }
     await restoreWindowPosition();
     await setupListeners();
+    // Setup events sent before the listeners existed are lost: read the latest state.
+    await invoke<SetupSnapshot>('voice_setup_status').then(applySetup).catch(console.error);
     await setupWindowPositionSave();
     prevWakeEnabled = s.wake_word_enabled;
     unsubSettings = settingsStore.subscribe((cur) => {
@@ -1234,9 +1349,12 @@
   });
 
   onDestroy(() => {
+    if (idleWipeTimer) clearTimeout(idleWipeTimer);
     unlisten.forEach((fn) => fn());
     if (audioLevelTimer) clearInterval(audioLevelTimer);
     clearBridgeFallbackTimer();
+    onTurnEnd();
+    cancelPendingReport();
     if (unsubSettings) unsubSettings();
     if (conversationActive) {
       invoke('stop_continuous_conversation').catch(() => {});
@@ -1247,11 +1365,31 @@
 <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
 <main
   class="app-root"
+  class:remote={isRemote}
   class:expanded={$layoutStore.expanded}
   class:avatar-right={$layoutStore.avatarSide === 'right'}
   role="application"
   aria-label="Pocket Agent"
 >
+  {#if isRemote}
+  <MobileLayout
+    {islandMode}
+    {audioLevel}
+    {reasoningVisible}
+    avatar={{
+      avatarImage: $settingsStore.avatar_image ?? null,
+      mediaSkins,
+      emotion: avatarEmotion,
+      interrupted: interruptedReply,
+      mouthActive,
+      meshEnabled: $settingsStore.mesh_avatar_enabled,
+      meshExpressions: $settingsStore.mesh_avatar_expressions,
+      meshEmotions: $settingsStore.mesh_avatar_emotions,
+      meshCustom,
+      bgColors: $settingsStore.avatar_bg_colors,
+    }}
+  />
+  {:else}
   <div class="main-row">
     <!-- Chat panel on LEFT (when avatar is on the right side of screen) -->
     {#if $layoutStore.expanded && $layoutStore.avatarSide === 'right'}
@@ -1281,9 +1419,10 @@
         meshOffsetY={$settingsStore.mesh_avatar_offset_y}
         meshExpressions={$settingsStore.mesh_avatar_expressions}
         meshEmotions={$settingsStore.mesh_avatar_emotions}
+        bgColors={$settingsStore.avatar_bg_colors}
         {meshCustom}
         on:expand={() => layoutStore.toggle()}
-        on:contextmenu={() => invoke('open_settings_window')}
+        on:contextmenu={() => { if (!isRemote) invoke('open_settings_window'); }}
       />
       <DynamicIsland mode={islandMode} audioLevel={audioLevel} />
     </div>
@@ -1303,6 +1442,7 @@
     <div class="stt-row" class:empty={$chatStore.sttText === null} bind:offsetHeight={sttRowH}><SttPanel /></div>
     <div class="status-row"><StatusPanel /></div>
     <div class="reasoning-row" class:empty={!reasoningVisible} bind:offsetHeight={reasoningRowH}><ReasoningPanel visible={reasoningVisible} /></div>
+  {/if}
   {/if}
 
 
@@ -1433,4 +1573,11 @@
   .stt-row.empty { height: 0; padding-top: 0; overflow: hidden; }
   .reasoning-row { padding-top: 6px; width: 100%; flex-shrink: 0; }
   .reasoning-row.empty { height: 0; padding-top: 0; overflow: hidden; }
+
+  /* Phone (remote /ui): MobileLayout fills the screen; the overlays sit above it. */
+  .app-root.remote {
+    height: 100dvh;
+    overflow: hidden;
+    background: #0b0c18;
+  }
 </style>

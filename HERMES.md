@@ -9,14 +9,15 @@ The settings below go in your Hermes profile's `config.yaml` (e.g. `~/.hermes/pr
 ```yaml
 compression:
   enabled: true
-  threshold_tokens: 80000      # absolute trigger; see note 1
+  threshold_tokens: 150000     # absolute trigger; see note 1
+  protect_last_n: 8            # see note 1
 
 auxiliary:
   vision:
     extra_body:
       thinking:
         type: disabled         # GLM only; see note 2
-  compression:
+  compression:                 # on MiniMax: see note 2
     extra_body:
       thinking:
         type: disabled         # GLM only; remove on MiniMax
@@ -27,9 +28,22 @@ computer_use:
 ```
 
 1. **Cap the context.** PA uses one Hermes session per day (`<agent>-YYYY-MM-DD`), so without compression a busy day grows to 150K–370K tokens per request. At that size we saw stream stalls of 5–9 minutes, and a model switch that drops the prompt cache made a single call take ~70s. `compression.threshold` (default `0.5`) is a fraction of the model's context window, so on a 1M-token model it would only fire at 500K and never trigger. Use `threshold_tokens` instead; Hermes takes the lower of the two.
+
+   Do not set it too close to what is left after a compaction. `protect_last_n` keeps that many recent messages verbatim, and PA's tool results are large: with the default 20, about 35K–45K tokens survived each compaction and ~50K remained in total, so an 80K trigger fired again after a few turns (three compactions in one afternoon on the iMac, each a 2–4 minute wait). We use 150K with `protect_last_n: 8`.
 2. **Turn off thinking for auxiliary calls.** Screenshot description and compression summaries do not need reasoning, and output tokens (including reasoning) dominate their latency. On z.ai GLM models, vision went from 25s to 10s and compression from 24s to 13s. For GLM, `auxiliary.<task>.reasoning_effort: none` did **not** disable thinking in our tests; use `extra_body.thinking` as shown. Other providers use different fields.
 
    **These `thinking` settings are for GLM only.** MiniMax models (e.g. `MiniMax-M3.1-Flash`) require adaptive thinking and reject both `thinking.type: disabled` and `reasoning_effort: none` with a 400 (`requires adaptive thinking ... (2013)`). For compression this is silent but costly: no summary is generated (`Failed to generate context summary` in `agent.log`) and old messages are simply dropped. When the main model is MiniMax, delete `auxiliary.compression.reasoning_effort` and `auxiliary.compression.extra_body`. The `auxiliary.vision` entry has no effect on MiniMax, because screenshots go through the main model's native image path (`vision_analyze: native fast path`) instead of the auxiliary vision call; it only matters if you switch back to GLM.
+
+   **On MiniMax, give compression a faster model instead.** Thinking cannot be turned off, but models differ a lot in how much they think. Summarizing the same ~18K characters of a PA session (2026-11-03, direct API calls): `MiniMax-M3.1-Flash` took 32–48s with 11K–13K characters of thinking; `MiniMax-M2.7-highspeed` took 7.5–8.4s; `MiniMax-M2.5-highspeed` 16s; `MiniMax-M3` 23s. Inside Hermes, whose summary prompt asks for more, M3.1-Flash took 122–221s per compaction. The main model stays the same; only the summary call changes, with the same API key:
+
+   ```yaml
+   auxiliary:
+     compression:
+       provider: minimax
+       model: MiniMax-M2.7-highspeed
+   ```
+
+   Do not use M2.7-highspeed as the main model: even a one-line request takes ~7s, against ~1.5s for M3.1-Flash.
 3. **Verify actions with the accessibility tree.** After a click or keypress, `capture_after` re-captures the window. The default `som` mode runs the vision model each time (~11s); `ax` returns window titles, URLs and on-page text in ~1s. Hermes can still request a `som`/`vision` capture explicitly when it needs pixels.
 
 **Restart the gateway after changing `compression` or `no_overlay`.** The gateway caches one agent per session, and that cache is not rebuilt when compression settings change. The cua-driver daemon reads `no_overlay` only when it starts. `auxiliary.*` and `capture_after_mode` are read on every call. With launchd: `launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway-<profile>`.
@@ -64,6 +78,31 @@ The installed copy does not follow the repo. After the skill changes in the repo
 
 - The system prompt's skill index cuts descriptions to 60 characters, so the skill's `description` is kept under that.
 - Hermes builds the skill index once per session. Restart the gateway or wait for the next day's session (`<agent>-YYYY-MM-DD`) before Hermes sees a new or renamed skill. Changes to the body of the installed copy take effect on the next `skill_view`.
+
+## Long tasks and background subagents
+
+While Hermes works, the user only hears silence. On every UI turn PA appends a `LONG RESEARCH` hint (`DELEGATE_HINT` in `src-tauri/src/commands/chat.rs`; bridge turns do not get it): research that will likely take more than about a minute goes to a background subagent with `delegate_task`, Hermes says one sentence that it has started, and ends the turn. Desktop tasks the user watches (`computer_use`) stay in the foreground. This is the one place PA suggests how Hermes should work instead of only relaying facts (agreed with the user on 2026-11-03).
+
+The gateway does not start a turn when an async delegation finishes; it only stores an `async_delegation_complete` row in the session. So while a delegation is out, PA reads the session's latest messages every 15 seconds (`src-tauri/src/api/subagents.rs`). When the completion row appears, PA starts a turn itself as soon as it is idle, with a fixed text asking Hermes to tell the user the result; the result row is already in the session, so Hermes sees it in that turn. If the user speaks first, that turn carries the result instead and no extra turn is sent.
+
+- Top-level `delegate_task` always runs in the background (`tools/delegate_tool.py`); the profile's `delegation` section sets `child_timeout_seconds` and `max_concurrent_children`. Without that section Hermes uses its defaults.
+- PA keeps only delegation ids, never the subagent's text; the result reaches the user through Hermes' reply.
+- The page for the details follows the [Pocket Agent skill](#pocket-agent-skill) ("Background research").
+
+## Pocket Agent MCP server (phone camera, switch_device)
+
+PA serves a small MCP server at `http://127.0.0.1:8650/mcp` with four tools: `phone_camera_open`, `phone_camera_snapshot`, `phone_camera_close` and `switch_device`. Register it in the profile PA connects to, then restart the gateway (Hermes reads `tools/list` only at startup, so restart it again whenever PA's tool list changes):
+
+```yaml
+mcp_servers:
+  pocket_agent:
+    url: http://127.0.0.1:8650/mcp
+    headers:
+      Authorization: Bearer ${API_SERVER_KEY}
+    trust: untrusted   # tools without readOnlyHint need approval; all four current tools carry it
+```
+
+Hermes asks for approval only when the server is `trust: untrusted`, and then only for tools without `readOnlyHint`; there is no per-tool allow list, and Hermes MCP approvals never remember "allow for this session" / "always allow" — every call asks again. So all four tools carry `readOnlyHint` and none asks; `trust: untrusted` stays as a safety net for future tools without the hint. Approvals reach PA's approval prompt through `/v1/runs`; turns sent through `/bridge/send` have nobody to approve, and Hermes treats them as denied after its 60-second timeout. PA adds a one-line fact to UI turns while the phone camera is open, and, once the phone app has connected in this PA run, where PA is right now (on the phone / on this computer with the phone on standby / on this computer with the phone app not connected), marked as the live state that overrides earlier device claims in the conversation. Tool results and the full protocol: [docs/API_MANUAL.md](docs/API_MANUAL.md).
 
 ## Reasoning and status on `/v1/runs` (local patch)
 

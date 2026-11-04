@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::Response,
@@ -229,11 +229,28 @@ pub async fn start_server(app: AppHandle, port: u16) {
 
     let state = Arc::new(ServerState { app, api_key });
 
-    let router = Router::new()
+    crate::api::remote::forward_ui_events(&state.app);
+
+    let bearer = Router::new()
         .route("/health", get(health))
         .route("/push", post(push_handler))
         .route("/bridge/send", post(bridge_send_handler))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
+    // Phone terminal: the sockets check the token themselves (query param, no
+    // open mode); everything else unrouted is the static frontend.
+    let router = Router::new()
+        .merge(bearer)
+        .route("/ui/ws", get(crate::api::remote::ui_ws))
+        .route("/audio", get(crate::api::remote::audio_ws))
+        // Hermes MCP client: checks the bearer itself (no open mode).
+        .route(
+            "/mcp",
+            post(crate::api::mcp::mcp_post)
+                .get(crate::api::mcp::mcp_other)
+                .delete(crate::api::mcp::mcp_other)
+                .layer(DefaultBodyLimit::max(crate::api::mcp::MAX_BODY)),
+        )
+        .fallback(crate::api::remote::static_asset)
         .layer(CorsLayer::permissive())
         .with_state(state);
 

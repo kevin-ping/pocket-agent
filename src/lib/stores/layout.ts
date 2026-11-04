@@ -1,5 +1,6 @@
 import { writable, get } from 'svelte/store';
 import { getCurrentWindow, currentMonitor, LogicalSize, LogicalPosition } from '@tauri-apps/api/window';
+import { isRemote } from '../ipc';
 
 export type AvatarSide = 'left' | 'right';
 
@@ -18,8 +19,10 @@ const EXPANDED_W = AVATAR_W + GAP + CHAT_W; // 408
 const EDGE_THRESHOLD = 180; // px from right edge to flip chat side
 
 function createLayoutStore() {
+  // Remote (phone) has no window to resize: the chat column is always shown
+  // and expand / collapse only flip the flag.
   const { subscribe, set, update } = writable<LayoutState>({
-    expanded: false,
+    expanded: isRemote,
     avatarSide: 'left',
     resizing: false,
   });
@@ -49,6 +52,7 @@ function createLayoutStore() {
   }
 
   async function expand() {
+    if (isRemote) { update(s => ({ ...s, expanded: true })); return; }
     const win = getCurrentWindow();
     const side = await detectSide();
     update(s => ({ ...s, resizing: true, avatarSide: side }));
@@ -76,6 +80,7 @@ function createLayoutStore() {
   }
 
   async function collapse() {
+    if (isRemote) { update(s => ({ ...s, expanded: false })); return; }
     const state = get({ subscribe });
     const win = getCurrentWindow();
     update(s => ({ ...s, resizing: true }));

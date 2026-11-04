@@ -13,7 +13,7 @@
   // 流式时显示累积内容，结束后显示最新一条消息，无消息时显示欢迎语
   $: displayContent = $chatStore.isStreaming
     ? $chatStore.streamingContent
-    : ($chatStore.error ?? $chatStore.messages.at(-1)?.content ?? idleHint($settingsStore));
+    : ($chatStore.error ?? $chatStore.messages[$chatStore.messages.length - 1]?.content ?? idleHint($settingsStore));
 
   $: isError = !$chatStore.isStreaming && !!$chatStore.error;
   $: isStreaming = $chatStore.isStreaming;

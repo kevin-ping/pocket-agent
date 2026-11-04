@@ -202,7 +202,7 @@ mod macos_raw {
         if keycode == ESC_KEYCODE && etype == KCG_EVENT_KEY_DOWN && active {
             if ctx.is_active.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
                 eprintln!("[hotkey] escape pressed, cancelling recording");
-                crate::commands::chat::stop_audio_queue();
+                crate::commands::chat::stop_audio_queue("escape key");
                 let _ = ctx.app.emit("voice-cancel", ());
             }
             return event;
@@ -596,7 +596,7 @@ mod rdev_impl {
                             // Escape
                             if state.is_active.load(Ordering::SeqCst) {
                                 state.is_active.store(false, Ordering::SeqCst);
-                                crate::commands::chat::stop_audio_queue();
+                                crate::commands::chat::stop_audio_queue("escape key");
                                 let _ = state.app.emit("voice-cancel", ());
                             }
                         }

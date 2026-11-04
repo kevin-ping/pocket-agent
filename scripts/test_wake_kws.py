@@ -142,16 +142,16 @@ class EngineTests(unittest.TestCase):
 
 
 class SplitTests(unittest.TestCase):
-    WORDS = frozenset({'HEY', 'MIMI', 'KYU', 'MI', 'KU', 'KEVIN', 'BOT', 'Z', 'ORB', 'LAX',
+    WORDS = frozenset({'HEY', 'MIMI', 'KYU', 'MI', 'KU', 'JARVIS', 'BOT', 'Z', 'ORB', 'LAX',
                        'A', 'B', 'AB', 'ABC', 'BCD', 'D'})
 
     def test_dictionary_words_are_kept(self):
-        self.assertEqual(pronounceable_text('hey kevin', self.WORDS), 'HEY KEVIN')
+        self.assertEqual(pronounceable_text('hey jarvis', self.WORDS), 'HEY JARVIS')
 
     def test_unknown_word_is_split(self):
         self.assertEqual(split_word('MIMIKYU', self.WORDS), ['MIMI', 'KYU'])
         self.assertEqual(pronounceable_text('hey mimikyu', self.WORDS), 'HEY MIMI KYU')
-        self.assertEqual(pronounceable_text('嘿 kevinbot', self.WORDS), '嘿 KEVIN BOT')
+        self.assertEqual(pronounceable_text('嘿 jarvisbot', self.WORDS), '嘿 JARVIS BOT')
 
     def test_single_letter_pieces_are_avoided(self):
         # ABCDE+F is shorter but ends in a letter name; AB+CD+EF has none.

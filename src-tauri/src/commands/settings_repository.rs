@@ -415,7 +415,22 @@ pub fn validate(config: &AppConfig) -> Result<(), String> {
     if !is_complete_mapping(&config.mesh_avatar_emotions, PA_EMOTIONS, MESH_EMOTIONS) {
         return Err("invalid mesh avatar emotion mapping".into());
     }
+    if config.avatar_bg_colors.len() != MESH_STATES.len()
+        || !config
+            .avatar_bg_colors
+            .iter()
+            .all(|(k, v)| MESH_STATES.contains(&k.as_str()) && is_hex_color(v))
+    {
+        return Err("invalid avatar background colors".into());
+    }
     Ok(())
+}
+
+/// `#rrggbb` only.
+fn is_hex_color(value: &str) -> bool {
+    value.len() == 7
+        && value.starts_with('#')
+        && value[1..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Every key in `keys` maps to one of `values`, with no extra keys.
@@ -513,6 +528,42 @@ mod tests {
         let mut c = AppConfig::default();
         c.mesh_avatar_emotions.insert("__proto__".into(), "happy".into());
         assert!(validate(&c).is_err());
+    }
+
+    #[test]
+    fn avatar_bg_colors_require_all_states_and_hex() {
+        let mut c = AppConfig::default();
+        c.avatar_bg_colors.insert("idle".into(), "#A1b2C3".into());
+        assert!(validate(&c).is_ok());
+        for bad in ["#fff", "red", "#12345g", "", "#1234567", "6b8cff"] {
+            let mut c = AppConfig::default();
+            c.avatar_bg_colors.insert("idle".into(), bad.into());
+            assert!(validate(&c).is_err(), "{bad}");
+        }
+        let mut c = AppConfig::default();
+        c.avatar_bg_colors.remove("speaking");
+        assert!(validate(&c).is_err());
+        let mut c = AppConfig::default();
+        c.avatar_bg_colors.insert("dancing".into(), "#000000".into());
+        assert!(validate(&c).is_err());
+    }
+
+    #[test]
+    fn avatar_bg_colors_round_trip_and_default_for_old_databases() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize_schema(&conn).unwrap();
+        let loaded = load_from_connection(&conn).unwrap();
+        assert_eq!(loaded.avatar_bg_colors, AppConfig::default().avatar_bg_colors);
+        assert_eq!(loaded.avatar_bg_colors["idle"], "#6b8cff");
+
+        let mut config = AppConfig::default();
+        config.avatar_bg_colors.insert("idle".into(), "#123abc".into());
+        let tx = conn.transaction().unwrap();
+        write_config(&tx, &config).unwrap();
+        tx.commit().unwrap();
+        let loaded = load_from_connection(&conn).unwrap();
+        assert_eq!(loaded.avatar_bg_colors["idle"], "#123abc");
+        assert_eq!(loaded.avatar_bg_colors["listening"], "#ff6b9d");
     }
 
     #[test]
