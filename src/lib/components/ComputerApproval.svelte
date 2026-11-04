@@ -1,8 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import { invoke } from '@tauri-apps/api/core';
+  import { invoke, listen, type UnlistenFn } from '../ipc';
   import { layoutStore } from '../stores/layout';
 
   type Approval = { run_id: string; request_id: string; command?: string; description?: string; choices: string[] };
@@ -21,19 +20,27 @@
     let disposed = false;
     const listeners: UnlistenFn[] = [];
     function keep(unlisten: UnlistenFn) { if (disposed) unlisten(); else listeners.push(unlisten); }
-    listen<Approval>('computer-approval', ({ payload }) => {
+    function show(payload: Approval) {
       if (!pending.some(p => p.run_id === payload.run_id && p.request_id === payload.request_id)) {
         pending = [...pending, payload];
       }
       if (!get(layoutStore).expanded) layoutStore.expand();
-    }).then(keep);
-    listen<string>('computer-approval-clear', ({ payload }) => {
-      pending = pending.filter(p => p.run_id !== payload);
-    }).then(keep);
-    listen<string>('computer-control-error', ({ payload }) => {
-      error = payload;
-      if (!get(layoutStore).expanded) layoutStore.expand();
-    }).then(keep);
+    }
+    Promise.all([
+      listen<Approval>('computer-approval', ({ payload }) => show(payload)).then(keep),
+      listen<string>('computer-approval-clear', ({ payload }) => {
+        pending = pending.filter(p => p.run_id !== payload);
+      }).then(keep),
+      listen<string>('computer-control-error', ({ payload }) => {
+        error = payload;
+        if (!get(layoutStore).expanded) layoutStore.expand();
+      }).then(keep),
+    ]).then(async () => {
+      // Requests emitted before this frontend mounted (a reload or a phone
+      // reconnecting mid-approval); listening first means none slips between.
+      const waiting = await invoke<Approval[]>('pending_computer_approvals').catch(() => []);
+      if (!disposed) waiting.forEach(show);
+    });
     return () => { disposed = true; listeners.forEach(fn => fn()); };
   });
 

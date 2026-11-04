@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../ipc';
 
 export interface AppSettings {
   volume: number;

@@ -4,7 +4,10 @@
   import { settingsStore } from '../stores/settings';
   import { convLabelsLang } from '../i18n';
 
+  /** Show only the latest N tool steps (phone); 0 = all. */
+  let { maxSteps = 0 }: { maxSteps?: number } = $props();
   let labels = $derived(convLabelsLang($settingsStore.ui_lang));
+  let shownSteps = $derived(maxSteps > 0 ? $chatStore.thinkingSteps.slice(-maxSteps) : $chatStore.thinkingSteps);
 
   let showSetup = $derived(
     $chatStore.voiceSetupState === 'installing' ||
@@ -69,7 +72,7 @@
           <span class="step">{$chatStore.voiceStatus}</span>
         {/if}
         {#if $chatStore.thinkingSteps.length > 0}
-          {#each $chatStore.thinkingSteps as step}
+          {#each shownSteps as step}
             <span class="step single-line">{step}</span>
           {/each}
         {:else if $characterState === 'thinking'}

@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import { invoke } from '@tauri-apps/api/core';
+  import { invoke, isRemote, listen, type UnlistenFn } from './lib/ipc';
   import { getCurrentWindow, LogicalPosition, LogicalSize } from '@tauri-apps/api/window';
 
   import AvatarIcon from './lib/components/AvatarIcon.svelte';
   import DynamicIsland from './lib/components/DynamicIsland.svelte';
+  import MobileLayout from './lib/components/mobile/MobileLayout.svelte';
   import Icon from './lib/components/Icon.svelte';
   import ChatPanel from './lib/components/ChatPanel.svelte';
   import StatusPanel from './lib/components/StatusPanel.svelte';
@@ -23,13 +23,14 @@
   import { STATUS_PHRASES, langFromVoice, detectLang, convLabels, convLabelsLang, type LangKey } from './lib/i18n';
   import { wakeErrorMessage } from './lib/wakeErrors';
 
-  const appWindow = getCurrentWindow();
+  // Remote mode (phone WebView over /ui) has no native window.
+  const appWindow = isRemote ? null : getCurrentWindow();
 
   // ─── Drag (avatar only) ───
   function handleAvatarDragStart(e: MouseEvent) {
     const target = e.target as HTMLElement;
     if (target.closest('button, input, select, [role="textbox"]')) return;
-    appWindow.startDragging();
+    appWindow?.startDragging();
   }
 
   // ─── Chat send ───
@@ -243,7 +244,7 @@
       islandMode = 'recording';
       spiritPhase = 0;
       firstStreamDelta = false;
-      chatStore.clear();
+      chatStore.clear({ keepTranscript: true });
       chatStore.setVoiceStatus(voiceListeningText());
       characterState.toListening();
       invoke('start_continuous_conversation', {
@@ -374,9 +375,17 @@
   // The mouth no longer waits for the speaking state (status speech plays during thinking),
   // so no path that leaves the turn may leave it open.
   $: if ($characterState === 'idle' || $characterState === 'listening') mouthActive = false;
-  // A new listen starts a new utterance: drop the previous one (covers fn key, manual
-  // start and continuous-mode re-listen alike).
-  $: if ($characterState === 'listening') { chatStore.setSttText(null); chatStore.clearReasoning(); }
+  // A new listen drops the previous reasoning; the user's last utterance stays on screen
+  // (the next stt-result replaces it) until the idle wipe below.
+  $: if ($characterState === 'listening') chatStore.clearReasoning();
+  // Privacy: 30 s after PA goes idle, what both sides said leaves the screen.
+  const IDLE_WIPE_MS = 30_000;
+  let idleWipeTimer: ReturnType<typeof setTimeout> | null = null;
+  $: scheduleIdleWipe($characterState === 'idle');
+  function scheduleIdleWipe(idle: boolean) {
+    if (idleWipeTimer) { clearTimeout(idleWipeTimer); idleWipeTimer = null; }
+    if (idle) idleWipeTimer = setTimeout(() => { idleWipeTimer = null; chatStore.clear(); }, IDLE_WIPE_MS);
+  }
   $: extraStatusH = $chatStore.thinkingSteps.length === 0
     ? 0
     : Math.min(STATUS_MAX_EXTRA_H, STATUS_BLOCK_PAD + $chatStore.thinkingSteps.length * STATUS_LINE_H);
@@ -388,11 +397,12 @@
   $: if ($layoutStore.expanded && !$layoutStore.resizing) {
     const targetH = STATUS_BASE_H + sttRowH + extraStatusH + reasoningRowH;
     queueMicrotask(() => {
-      appWindow.setSize(new LogicalSize(STATUS_EXPANDED_W, targetH)).catch(() => {});
+      appWindow?.setSize(new LogicalSize(STATUS_EXPANDED_W, targetH)).catch(() => {});
     });
   }
 
   async function openChatHistory() {
+    if (isRemote) return; // a Mac window — not reachable from the phone
     try {
       await invoke('open_chat_history');
     } catch (e) {
@@ -929,7 +939,7 @@
           spiritPhase = 0;
           firstStreamDelta = false;
           characterState.toListening();
-          chatStore.clear();
+          chatStore.clear({ keepTranscript: true });
           conversationActive = true;
           invoke('start_continuous_conversation', {
             silenceTimeoutSecs: cfg.silence_timeout_secs,
@@ -1200,6 +1210,7 @@
   let posDragTimer: ReturnType<typeof setTimeout> | null = null;
 
   async function saveCurrentPosition() {
+    if (!appWindow) return;
     let pos, scale;
     try {
       pos = await appWindow.outerPosition();
@@ -1221,6 +1232,7 @@
 
   // ─── Listen for window drag + save on close ───
   async function setupWindowPositionSave() {
+    if (!appWindow) return;
     // Debounced save on window move (fires during drag)
     const unlistenMove = await appWindow.onMoved(() => {
       if (posDragTimer) clearTimeout(posDragTimer);
@@ -1238,7 +1250,7 @@
   // ─── Restore window position on mount ───
   async function restoreWindowPosition() {
     const settings = get(settingsStore);
-    if (settings.window_x !== null && settings.window_y !== null) {
+    if (appWindow && settings.window_x !== null && settings.window_y !== null) {
       try {
         await appWindow.setPosition(new LogicalPosition(settings.window_x, settings.window_y));
       } catch (e) { console.warn('[POS] restore failed:', e); }
@@ -1254,7 +1266,7 @@
 // 启动音效 + 窗口显示：后端所有服务就绪后才显示窗口并播放声效
     const playStartSound = async () => {
       console.log("[app] all services ready, showing window + playing start sound");
-      try { await appWindow.show(); } catch (e) { console.warn("[app] show failed:", e); }
+      try { await appWindow?.show(); } catch (e) { console.warn("[app] show failed:", e); }
       try {
         const audio = new Audio("app_start.mp3");
         audio.volume = 0.3;
@@ -1279,6 +1291,8 @@
     // Old macOS: the sherpa compat build installs after startup, then stt-server
     // reloads it. Wake could not start before — try again now.
     listen('voice-engine-reloaded', () => armWakeListenerIfEnabled()).catch(console.error);
+    // Phone attached or left: Rust stopped wake on the old source; listen on the new one.
+    listen('audio-source-changed', () => armWakeListenerIfEnabled()).catch(console.error);
 
     const settingsLoaded = await settingsStore.load();
     void refreshMeshCustom();
@@ -1307,6 +1321,7 @@
   });
 
   onDestroy(() => {
+    if (idleWipeTimer) clearTimeout(idleWipeTimer);
     unlisten.forEach((fn) => fn());
     if (audioLevelTimer) clearInterval(audioLevelTimer);
     clearBridgeFallbackTimer();
@@ -1322,11 +1337,31 @@
 <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
 <main
   class="app-root"
+  class:remote={isRemote}
   class:expanded={$layoutStore.expanded}
   class:avatar-right={$layoutStore.avatarSide === 'right'}
   role="application"
   aria-label="Pocket Agent"
 >
+  {#if isRemote}
+  <MobileLayout
+    {islandMode}
+    {audioLevel}
+    {reasoningVisible}
+    avatar={{
+      avatarImage: $settingsStore.avatar_image ?? null,
+      mediaSkins,
+      emotion: avatarEmotion,
+      interrupted: interruptedReply,
+      mouthActive,
+      meshEnabled: $settingsStore.mesh_avatar_enabled,
+      meshExpressions: $settingsStore.mesh_avatar_expressions,
+      meshEmotions: $settingsStore.mesh_avatar_emotions,
+      meshCustom,
+      bgColors: $settingsStore.avatar_bg_colors,
+    }}
+  />
+  {:else}
   <div class="main-row">
     <!-- Chat panel on LEFT (when avatar is on the right side of screen) -->
     {#if $layoutStore.expanded && $layoutStore.avatarSide === 'right'}
@@ -1359,7 +1394,7 @@
         bgColors={$settingsStore.avatar_bg_colors}
         {meshCustom}
         on:expand={() => layoutStore.toggle()}
-        on:contextmenu={() => invoke('open_settings_window')}
+        on:contextmenu={() => { if (!isRemote) invoke('open_settings_window'); }}
       />
       <DynamicIsland mode={islandMode} audioLevel={audioLevel} />
     </div>
@@ -1379,6 +1414,7 @@
     <div class="stt-row" class:empty={$chatStore.sttText === null} bind:offsetHeight={sttRowH}><SttPanel /></div>
     <div class="status-row"><StatusPanel /></div>
     <div class="reasoning-row" class:empty={!reasoningVisible} bind:offsetHeight={reasoningRowH}><ReasoningPanel visible={reasoningVisible} /></div>
+  {/if}
   {/if}
 
 
@@ -1509,4 +1545,11 @@
   .stt-row.empty { height: 0; padding-top: 0; overflow: hidden; }
   .reasoning-row { padding-top: 6px; width: 100%; flex-shrink: 0; }
   .reasoning-row.empty { height: 0; padding-top: 0; overflow: hidden; }
+
+  /* Phone (remote /ui): MobileLayout fills the screen; the overlays sit above it. */
+  .app-root.remote {
+    height: 100dvh;
+    overflow: hidden;
+    background: #0b0c18;
+  }
 </style>

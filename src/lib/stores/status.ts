@@ -1,5 +1,5 @@
 import { writable, derived } from 'svelte/store';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../ipc';
 import { settingsStore } from './settings';
 import { convLabelsLang } from '../i18n';
 
