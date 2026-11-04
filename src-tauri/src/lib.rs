@@ -88,7 +88,11 @@ pub fn run() {
                                     || voice::stt::restart_when_idle(reload_handle),
                                 );
                             }
-                            Err(e) => eprintln!("[venv] bootstrap failed: {}", e),
+                            Err(e) => {
+                                eprintln!("[venv] bootstrap failed: {}", e);
+                                // venv-setup-error carries the message; the window must be up to show it.
+                                voice::stt::reveal_main_window(&venv_handle, "venv setup failed");
+                            }
                         }
                     })
                     .ok();

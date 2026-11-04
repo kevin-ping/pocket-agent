@@ -221,6 +221,10 @@
     });
   }
 
+  function showSetupStatus() {
+    if (!get(layoutStore).expanded) void layoutStore.expand();
+  }
+
   /// Start or stop a continuous conversation. Shared by fn-key-down and
   /// fn-key-up: the hotkey state machine alternates which of the two it emits,
   /// so treating either as the toggle keeps one press = one action regardless
@@ -386,9 +390,17 @@
     if (idleWipeTimer) { clearTimeout(idleWipeTimer); idleWipeTimer = null; }
     if (idle) idleWipeTimer = setTimeout(() => { idleWipeTimer = null; chatStore.clear(); }, IDLE_WIPE_MS);
   }
-  $: extraStatusH = $chatStore.thinkingSteps.length === 0
+  // Voice setup rows: header + phase, or header + an error detail that wraps
+  // (~40 chars per line at the panel width).
+  $: setupLines = $chatStore.voiceSetupState === 'installing'
+    ? ($chatStore.voiceSetupPhase ? 2 : 1)
+    : $chatStore.voiceSetupState === 'error'
+      ? 1 + Math.ceil($chatStore.voiceSetupDetail.length / 40)
+      : 0;
+  $: statusLines = $chatStore.thinkingSteps.length + setupLines;
+  $: extraStatusH = statusLines === 0
     ? 0
-    : Math.min(STATUS_MAX_EXTRA_H, STATUS_BLOCK_PAD + $chatStore.thinkingSteps.length * STATUS_LINE_H);
+    : Math.min(STATUS_MAX_EXTRA_H, STATUS_BLOCK_PAD + statusLines * STATUS_LINE_H);
   // Measured: 0 while no STT text, else 6 px row padding + panel (content capped at 88 px).
   let sttRowH = 0;
   // Same as sttRowH, for the reasoning row below the status panel.
@@ -1143,11 +1155,14 @@
       }),
 
       // ─── First-launch PA venv bootstrap (~/.pocket-agent/venv) ───
+      // The status panel only renders in the expanded layout; open it so a
+      // first-run install or a voice failure is visible.
       listen('venv-setup-ready', () => {
         chatStore.setVoiceSetup({ voiceSetupState: 'ready', voiceSetupPhase: '', voiceSetupDetail: '' });
       }),
       listen('venv-setup-started', () => {
         chatStore.setVoiceSetup({ voiceSetupState: 'installing', voiceSetupPhase: '', voiceSetupDetail: '' });
+        showSetupStatus();
       }),
       listen<{ phase: string; detail: string }>('venv-setup-progress', (e) => {
         chatStore.setVoiceSetup({
@@ -1165,6 +1180,19 @@
           voiceSetupPhase: e.payload.phase,
           voiceSetupDetail: e.payload.message ?? '',
         });
+        showSetupStatus();
+      }),
+      // stt-server after setup: slow first start (model download), up, or exited.
+      listen<{ state: 'starting' | 'ready' | 'failed'; message: string }>('voice-service-status', (e) => {
+        if (e.payload.state === 'starting') {
+          chatStore.setVoiceSetup({ voiceSetupState: 'installing', voiceSetupPhase: 'starting-service', voiceSetupDetail: '' });
+          showSetupStatus();
+        } else if (e.payload.state === 'failed') {
+          chatStore.setVoiceSetup({ voiceSetupState: 'error', voiceSetupPhase: 'voice-service', voiceSetupDetail: e.payload.message ?? '' });
+          showSetupStatus();
+        } else {
+          chatStore.setVoiceSetup({ voiceSetupState: 'ready', voiceSetupPhase: '', voiceSetupDetail: '' });
+        }
       }),
 
       listen('accessibility-permission-required', () => {

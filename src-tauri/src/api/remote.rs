@@ -55,7 +55,7 @@ pub const UI_EVENTS: &[&str] = &[
     "conversation-state", "fn-key-down", "fn-key-up", "settings-changed", "stt-error",
     "stt-result", "subagent-delivered", "venv-setup-done", "venv-setup-error",
     "venv-setup-progress", "venv-setup-ready", "venv-setup-started", "voice-cancel",
-    "voice-engine-reloaded", "wake-check-done", "wake-checking", "wake-listener-error",
+    "voice-engine-reloaded", "voice-service-status", "wake-check-done", "wake-checking", "wake-listener-error",
     "wake-listener-started", "wake-listener-stopped", "wake-word-detected",
 ];
 

@@ -4,7 +4,9 @@
 >
 > **v0.3.0** — see [releases/0.3.0.md](releases/0.3.0.md) for changelog
 
-Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust**. It connects to a local AI agent gateway ([Hermes](https://github.com/nousresearch/hermes) or [OpenClaw](https://github.com/nousresearch/openclaw)) via SSE streaming for real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
+Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust**. It connects to a local [Hermes](https://github.com/nousresearch/hermes) agent gateway via SSE streaming for real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
+
+> **Platform status:** PA runs on **macOS only**; Windows is not developed yet. The only supported backend is **Hermes** (OpenClaw is no longer supported). The **Android phone terminal is experimental**: there is no store release, so you build the APK yourself and install it over `adb`, which needs **Developer options → USB debugging** turned on on the phone (see [android/README.md](android/README.md)).
 
 ---
 
@@ -15,40 +17,40 @@ Install Hermes and Pocket Agent on each Mac, then enable the Hermes API computer
 ## How It Works
 
 ```
-+-------------------------------------------------------------+
-|                      Pocket Agent                            |
-|  +----------+  +----------+  +---------------------------+  |
-|  |  Avatar   |  |  Chat    |  |  Dynamic Island           |  |
-|  |  Widget   |  |  Panel   |  |  (recording indicator)    |  |
-|  +----------+  +----------+  +---------------------------+  |
-|       |             |                                        |
-|  Svelte 5      Svelte 5                                     |
-|  (frontend)    (frontend)                                   |
-|       |             |                                        |
-|  +----+-------------+------------------------------------+  |
-|  |              Tauri Bridge                               |  |
-|  |         (invoke / events / state)                      |  |
-|  +----+-------------+------------------------------------+  |
-|       |             |                                        |
-|  +----+------+  +---+-----------+                            |
-|  |  Voice    |  |    Chat       |                            |
-|  |  Pipeline |  |    Engine     |                            |
-|  |           |  |               |                            |
-|  | - hotkey  |  | - SSE stream  |                            |
-|  | - record  |  | - TTS play    |                            |
-|  | - STT     |  | - lang detect |                            |
-|  +----+------+  +---+-----------+                            |
-+-------+-------------+----------------------------------------+
-        |             |
-   WAV audio     HTTP/SSE
-        |             |
-        v             v
-  +------------------+   +--------------+
-  | Voice service    |   | Hermes /     |
-  | :8651 (local)    |   | OpenClaw     |
-  | Whisper + VAD    |   | :8642/:18789 |
-  | + speaker + KWS  |   +--------------+
-  +------------------+
++---------------------------------------------------------------+
+|                          Pocket Agent                         |
+|  +----------+  +----------+  +---------------------------+    |
+|  |  Avatar  |  |  Chat    |  |  Dynamic Island           |    |
+|  |  Widget  |  |  Panel   |  |  (recording indicator)    |    |
+|  +----------+  +----------+  +---------------------------+    |
+|       |             |                                         |
+|  Svelte 5      Svelte 5                                       |
+|  (frontend)    (frontend)                                     |
+|       |             |                                         |
+|  +----+-------------+--------------------------------------+  |
+|  |                    Tauri Bridge                         |  |
+|  |               (invoke / events / state)                 |  |
+|  +----+-------------+--------------------------------------+  |
+|       |             |                                         |
+|  +----+------+  +---+-----------+  +-----------------------+  |
+|  |  Voice    |  |    Chat       |  |  API server :8650     |  |
+|  |  Pipeline |  |    Engine     |  |                       |  |
+|  |           |  |               |  |  /push  /bridge/send  |  |
+|  | - hotkey  |  | - SSE stream  |  |  /ui  /ui/ws  /audio  |  |
+|  | - record  |  | - TTS play    |  |  /mcp (tools for      |  |
+|  | - STT     |  | - lang detect |  |        Hermes)        |  |
+|  +----+------+  +---+-----------+  +---+---------------+---+  |
++-------+-------------+------------------+---------------+------+
+        |             |                  ^               ^
+   WAV audio     HTTP/SSE       MCP tools (camera,   WS /ui/ws
+        |             |         switch_device)       + /audio
+        v             v                  |               |
+  +-----+--------+  +-+------------------+-+  +----------+-------+
+  | Voice service|  | Hermes gateway       |  | Android phone    |
+  | :8651 (local)|  | :8642                |  | (same LAN)       |
+  | Whisper + VAD|  +----------------------+  | screen, mic,     |
+  | speaker + KWS|                            | speaker, camera  |
+  +--------------+                            +------------------+
 ```
 
 ### Voice Pipeline
@@ -57,7 +59,7 @@ Install Hermes and Pocket Agent on each Mac, then enable the Hermes API computer
 2. **Recording starts** — pre-warmed cpal Stream Daemon activates instantly (~11ms latency)
 3. **Press hotkey again** — recording stops, WAV saved to temp file
 4. **STT** — faster-whisper transcribes locally (auto language detection, configurable model via `STT_MODEL`)
-5. **Send to backend** — text + voice hint streamed to configured gateway (Hermes :8642 or OpenClaw :18789). A local Hermes gateway with `API_AGENT` empty and desktop integration available uses `/v1/runs` (tool progress, approvals, a real stop command); everything else uses `/v1/chat/completions`
+5. **Send to backend** — text + voice hint streamed to the Hermes gateway (:8642). A local Hermes gateway with `API_AGENT` empty and desktop integration available uses `/v1/runs` (tool progress, approvals, a real stop command); everything else uses `/v1/chat/completions`
 6. **TTS playback** — edge-tts generates audio, rodio plays it via system speakers
 
 Press **Escape** during recording to cancel. Minimum recording: 1.5s. Maximum: 30s (auto-cutoff).
@@ -104,7 +106,6 @@ always-on mic → sherpa-onnx KWS (wake phrase)
 - **TTS voice response** — edge-tts with automatic language detection (Chinese, English, Japanese, Korean + more)
 - **Session memory** — daily auto-rotating sessions with compressed context summaries
 - **Language tracking** — auto-detects user language per message, follows user's language seamlessly
-- **OpenClaw support** — connect to OpenClaw gateway with multi-agent routing (openclaw/agent-a, openclaw/agent-b, etc.); server connection configured via `.env` only
 - **Multi-language voice** — configure primary + auxiliary TTS voices, auto-switch based on detected language
 - **Configurable hotkey** — capture any key via Settings, no restart required
 - **Local + SSH hotkey parity** — fn/globe and modifier hotkeys behave consistently whether PA is launched locally or from an SSH session
@@ -118,8 +119,8 @@ always-on mic → sherpa-onnx KWS (wake phrase)
 - **TTS toggle** — disable voice output for text-only mode
 - **Animated mesh avatar** — the widget circle shows a 2D mesh avatar (xingyin) that blinks and idles, reacts to listening / thinking / speaking, and follows the reply emotion; falls back to the image or CSS avatar if it can't load (see [docs/mesh-avatar.md](docs/mesh-avatar.md))
 - **Compact widget** — 220x360px always-on-top window, dark sci-fi aesthetic
-- **Phone terminal** — an Android phone on the same LAN can be PA's screen, microphone and speaker (`android/`); the desktop window hides while the phone drives. Hermes can open, flip and read the phone camera and move PA between the phone and the Mac by voice (`switch_device`), through PA's own MCP server
-- **macOS native** — global hotkey via CGEventTap, CoreAudio recording, menu bar tray
+- **Phone terminal (experimental)** — an Android phone on the same LAN can be PA's screen, microphone and speaker (`android/`); the desktop window hides while the phone drives. Hermes can open, flip and read the phone camera and move PA between the phone and the Mac by voice (`switch_device`), through PA's own MCP server. The APK is built and installed over `adb` with USB debugging on (see [android/README.md](android/README.md))
+- **macOS native** (macOS only; no Windows build yet) — global hotkey via CGEventTap, CoreAudio recording, menu bar tray
 
 ---
 
@@ -151,10 +152,9 @@ See [docs/API_MANUAL.md](docs/API_MANUAL.md) for full API details.
 
 **AI / Voice**
 - [Hermes Agent](https://github.com/nousresearch/hermes) gateway (default `http://localhost:8642`)
-- [OpenClaw](https://github.com/nousresearch/openclaw) gateway (default `http://localhost:18789`) with multi-agent routing via model field
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for local speech-to-text
 - [edge-tts](https://github.com/rany2/edge-tts) for text-to-speech
-- Any OpenAI-compatible LLM (tested with GLM-5 on Hermes, Qwen/QwQ on OpenClaw)
+- Any OpenAI-compatible LLM configured in Hermes (tested with GLM-5)
 
 ---
 
@@ -162,11 +162,10 @@ See [docs/API_MANUAL.md](docs/API_MANUAL.md) for full API details.
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| **Hermes Agent** | Supported | Primary tested backend |
-| **OpenClaw** | Supported | Multi-agent routing via model field, ENV-driven |
-| **Other OpenAI-compatible** | Possible | Must support `/v1/chat/completions` streaming |
+| **Hermes Agent** | Supported | The only supported backend |
+| **OpenClaw** | Not supported | Support has been dropped |
 
-Pocket Agent communicates via OpenAI-compatible chat completions API over SSE. Any server implementing this interface can be used as a drop-in replacement.
+Pocket Agent talks to Hermes over its OpenAI-compatible API (`/v1/runs`, falling back to `/v1/chat/completions`) with SSE streaming. Other gateways are not supported.
 
 ---
 
@@ -180,7 +179,7 @@ Pocket Agent is a local desktop client. Please understand these boundaries:
 - **Wake engine on macOS older than 13.4** — the stock sherpa-onnx wheel cannot load there, so on first launch PA downloads a compatible build (sherpa-onnx 1.12.26 + onnxruntime 1.19.2) from this project's GitHub Release `sherpa-compat-1.12.26-ort1.19.2` over HTTPS. The archive's SHA256 is pinned in the source and checked before extraction; only the two expected library files are installed into PA's venv. The download runs in the background: the rest of PA starts normally, and wake word / voiceprint become available once the voice service reloads the new build while idle. Newer macOS versions never make this request. The build is reproducible with `scripts/build-sherpa-compat.sh`.
 - **Avatar** — the mesh avatar is bundled with the app and loaded from the app's own origin; it makes no network requests. A custom `.mavatar` is picked from a local file and stored in the settings database (zip header and 10 MB limit checked).
 - **Phone terminal** — `/ui/ws`, `/audio` and `/mcp` refuse every request when `API_SERVER_KEY` is not set. Keep port 8650 on the LAN and never port-forward it: a `/ui` client can approve computer actions on the Mac. Camera frames stay in memory and are never written to disk; opening the camera needs no Hermes approval, but the phone screen shows the viewfinder while it is open (see [docs/API_MANUAL.md](docs/API_MANUAL.md)).
-- **Conversation persistence** — sessions are stored in the configured gateway (Hermes: `~/.hermes/sessions/`, OpenClaw: `~/.openclaw/agents/<agent>/sessions/`). These contain full conversation text. Consider disk encryption.
+- **Conversation persistence** — sessions are stored in the configured gateway (Hermes: `~/.hermes/sessions/`). These contain full conversation text. Consider disk encryption.
 
 ### Desktop Interaction
 
@@ -202,92 +201,181 @@ The responsibility for safe operation is shared across three layers:
 
 ## Getting Started
 
-> **For agent-driven installation** (PA and Hermes/OpenClaw on the same machine): see [README_AGENTS.md](README_AGENTS.md)
+> **For agent-driven installation** (PA and Hermes on the same machine): see [README_AGENTS.md](README_AGENTS.md)
 >
-> **Agents: when installing, also read the guide for the backend you connect to** — [HERMES.md](HERMES.md) for Hermes, `OPENCLAW.md` for OpenClaw (once it exists) — and carry out its setup steps, such as copying PA's skills into the backend profile.
+> **Agents: when installing, also read [HERMES.md](HERMES.md)** and carry out its setup steps, such as copying PA's skills into the backend profile.
 
-### Before You Run
+Pocket Agent runs on **macOS 12+** only. Every install needs a running **Hermes** gateway (set it up first, below). Then pick one route:
 
-- macOS with Accessibility and Microphone permissions available
-- Rust toolchain installed
-- Node.js 18+ and npm
-- Python 3.10+ with `faster-whisper` and `edge-tts`
-- Hermes or OpenClaw gateway running and reachable
+- **[Route A — from source](#route-a--from-source-development)**: build and run with `npm run tauri dev`. Use this to develop PA or to try it.
+- **[Route B — .app / DMG](#route-b--app--dmg)**: build the app once with `npm run tauri build`, then run it like any Mac app.
 
-### Prerequisites
+You do **not** install Python packages by hand. On first launch PA creates its own Python environment at `~/.pocket-agent/venv` and installs `src-tauri/resources/requirements-stt.txt` into it (see [First launch](#first-launch-what-happens)).
 
-- **macOS** (primary supported platform today)
-- **Rust** — [install](https://rustup.rs/)
-- **Node.js** 18+ and npm
-- **Python 3.10+** — install voice dependencies:
+### Set up Hermes from scratch
 
-```bash
-# edge-tts for text-to-speech
-pipx install edge-tts
+Tested with Hermes v0.22.5. Commands below come from Hermes' own docs and `hermes --help`; check them against your Hermes version.
 
-# faster-whisper for local speech-to-text
-pip install faster-whisper
-```
+1. **Install Hermes** (official installer):
 
-> For the **packaged app** (built `.dmg`), Python deps must be available globally or via `pipx`.  
-> PA runs `EDGE_TTS_BIN` if set, else the copy in its own venv (`~/.pocket-agent/venv/bin/edge-tts`), else `edge-tts` from PATH.  
-> If TTS fails with a WebSocket **403**, your `edge-tts` is outdated (Microsoft rejects old client versions) — run `pip install -U edge-tts` (or `~/.pocket-agent/venv/bin/pip install -U edge-tts`).  
-> If `faster-whisper` Python is not the system default, set `STT_PYTHON` in `~/.pocket-agent/.env`.
+   ```bash
+   curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+   source ~/.zshrc     # or open a new terminal
+   hermes --version
+   ```
 
-- **Backend gateway** — [Hermes Agent](https://github.com/nousresearch/hermes) (`localhost:8642`) or [OpenClaw](https://github.com/nousresearch/openclaw) (`localhost:18789`)
+2. **Configure a model and its credentials:**
 
-### Setup
+   ```bash
+   hermes setup
+   ```
 
-1. **Clone and install dependencies:**
+3. **Turn on the API server.** Add to `~/.hermes/.env`:
 
-```bash
-git clone https://github.com/YOUR_USERNAME/pocket-agent.git
-cd pocket-agent
-npm install
-```
+   ```bash
+   API_SERVER_ENABLED=true
+   API_SERVER_KEY=<a long random string>   # e.g. from: openssl rand -hex 24
+   ```
 
-2. **Configure environment:**
+4. **Start the gateway** — in the foreground:
 
-```bash
-cp .env.example .env
-```
+   ```bash
+   hermes gateway run
+   ```
 
-For development (`tauri dev`), edit `.env` in the project root.  
-For the **packaged app** (`.dmg`), create `~/.pocket-agent/.env` instead.
+   or as a launchd background service: `hermes gateway install`, then `hermes gateway start`. The API server listens on `http://127.0.0.1:8642`.
 
-All server connection settings (`API_SERVER`, `API_SERVER_KEY`, `API_AGENT`) are configured **only** via `.env`:
+5. **Check that a real model reply streams back** (an open port or health check alone does not prove the model works):
 
-```bash
-# Required: backend connection
-API_SERVER=http://localhost:8642
-API_SERVER_KEY=           # leave empty for no auth
-API_AGENT=                 # OpenClaw agent name; leave empty for Hermes
+   ```bash
+   curl -N http://127.0.0.1:8642/v1/chat/completions \
+     -H "Authorization: Bearer <your API_SERVER_KEY>" \
+     -H "Content-Type: application/json" \
+     -d '{"model": "hermes-agent", "stream": true, "messages": [{"role": "user", "content": "Say hello in one sentence."}]}'
+   ```
 
-# Optional
-# EDGE_TTS_BIN=/path/to/edge-tts
-# STT_PYTHON=/path/to/python3
-# STT_MODEL=base  # Whisper model: tiny | base | small
-```
+   You should see `data: {...}` chunks with the reply text, ending with `data: [DONE]`. Fix Hermes first if you get `401` (wrong key), a connection error (gateway not running) or an error chunk (model or credentials).
+
+6. **In PA's `.env`** (created in Route A or B): `API_SERVER=http://localhost:8642`, `API_SERVER_KEY=` the same key as in `~/.hermes/.env`, and leave `API_AGENT` empty.
+
+Optional, not needed for a first install: the context-compression and model settings, skills and local patches in [HERMES.md](HERMES.md), and desktop control in [docs/computer-interaction.md](docs/computer-interaction.md).
 
 > **`API_AGENT` with Hermes:** leave it empty. Setting it sends every turn to `/v1/chat/completions`, which has no stop command: when PA interrupts a turn it can only disconnect, and Hermes keeps running the turn (and its tools) after the disconnect. It also replaces PA's desktop hint with "no local desktop integration".
 
 > **Hermes gateway mode:** point `API_SERVER` at a standalone gateway for your profile (e.g. `hermes -p <profile> gateway install`), with that profile's `API_SERVER_KEY`. Hermes multiplex mode (`gateway.multiplex_profiles: true`) is not supported: under `/p/<profile>/`, `/v1/runs` resolves the model with the default profile's config and fails, so every turn ends immediately. If a turn ends right after `[SSE] >>> sending to LLM`, look for `[SSE] turn failed:` in the Pocket Agent log and check `hermes gateway list` / `lsof -iTCP:8642`.
 
-3. **Run in development mode:**
+### Route A — from source (development)
 
-```bash
-npm run tauri dev
-```
+1. **Xcode Command Line Tools** — the compiler and SDK Rust needs, plus the Python 3.9 (`/usr/bin/python3`) PA uses for its voice environment:
 
-First build takes 3-5 minutes for Rust compilation. Subsequent builds are ~20 seconds.
+   ```bash
+   xcode-select --install          # skip if already installed
+   xcode-select -p                 # prints a path, e.g. /Library/Developer/CommandLineTools
+   /usr/bin/python3 --version      # Python 3.9 or newer
+   ```
 
-### macOS Permissions
+   Wait until the installer has finished before going on.
 
-On first launch, grant in **System Settings → Privacy & Security**:
+2. **Rust** — install with [rustup](https://rustup.rs/), then check `rustc --version` and `cargo --version`.
 
-1. **Accessibility** — required for global hotkey capture. Add Pocket Agent, then **restart the app**.
-2. **Microphone** — prompted automatically on first recording.
-3. **Input Monitoring** — required when running `npm run tauri dev` from a terminal app (for example iTerm2). Grant it to the terminal you use to launch PA, then restart that terminal.
+3. **Node.js 18+ and npm** — e.g. `brew install node`, then check `node --version`.
+
+4. **Clone and install:**
+
+   ```bash
+   git clone https://github.com/kevin-ping/pocket-agent.git
+   cd pocket-agent
+   npm install
+   ```
+
+5. **Configure** — still in `pocket-agent/`:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   Set `API_SERVER`, `API_SERVER_KEY` and `API_AGENT` as in step 6 of the Hermes setup:
+
+   ```bash
+   API_SERVER=http://localhost:8642
+   API_SERVER_KEY=           # the key from ~/.hermes/.env
+   # API_AGENT stays unset
+
+   # Optional
+   # STT_MODEL=base          # Whisper model: tiny | base | small
+   # EDGE_TTS_BIN=/path/to/edge-tts
+   # STT_PYTHON=/path/to/python3   # advanced, see below
+   ```
+
+6. **Run:**
+
+   ```bash
+   npm run tauri dev
+   ```
+
+7. **Grant macOS permissions** (System Settings → Privacy & Security):
+   - **Input Monitoring** for the terminal app you launch PA from (Terminal, iTerm2, …), then restart that terminal. Without it the hotkey does nothing in dev mode.
+   - **Accessibility** for Pocket Agent (or the terminal, if macOS lists that), then restart PA.
+   - **Microphone** — macOS asks on the first recording.
+
+### Route B — .app / DMG
+
+There is no published installer: build the app yourself on a Mac with Route A's steps 1–4 done.
+
+1. **Build:**
+
+   ```bash
+   npm run tauri build
+   ```
+
+   The app is at `src-tauri/target/release/bundle/macos/Pocket Agent.app` and a disk image at `src-tauri/target/release/bundle/dmg/Pocket Agent_<version>_<arch>.dmg`. The build is for the Mac's own architecture (Apple Silicon or Intel). It is not signed for distribution or notarized; it is meant for the machine that built it.
+
+2. **Install:** open the DMG and drag Pocket Agent to Applications (or copy the `.app`).
+
+3. **Configure:** the packaged app reads `~/.pocket-agent/.env`, not the repository's `.env`:
+
+   ```bash
+   mkdir -p ~/.pocket-agent
+   cp .env.example ~/.pocket-agent/.env
+   ```
+
+   Then set `API_SERVER` / `API_SERVER_KEY` / `API_AGENT` as above.
+
+4. **Launch** Pocket Agent and grant **Accessibility** and **Microphone** to it (restart PA after granting Accessibility). The machine still needs the Command Line Tools from Route A step 1: they provide the Python PA builds its voice environment from.
+
+### Python and the voice environment
+
+- PA creates `~/.pocket-agent/venv` with the first suitable interpreter of: `/usr/bin/python3` (Command Line Tools), `python3` on PATH, Homebrew / `/usr/local` `python3.12`, `python3.11`, `python3.10`, then their `python3`. It must be **Python 3.9–3.12** with the `venv` module: `requirements-stt.txt` pins `numpy<2` (no 3.13 wheels), and the wake engine's build for macOS < 13.4 is Python 3.9 only. If none qualifies, the error lists every interpreter checked with its version.
+- An existing venv is reused; it is not rebuilt when a different Python is installed later.
+- **`STT_PYTHON`** (advanced override) only changes which interpreter **runs** the voice service. It does not affect which Python builds the venv, and it must point to an interpreter that already has everything in `requirements-stt.txt` installed.
+- TTS runs `EDGE_TTS_BIN` if set, else PA's `~/.pocket-agent/venv/bin/edge-tts`, else `edge-tts` from PATH. A WebSocket **403** in the `[TTS]` log means that copy is outdated: `~/.pocket-agent/venv/bin/pip install -U edge-tts`.
+
+### First launch: what happens
+
+Times depend on the machine and the network, so none are promised here. The status panel under the avatar shows each stage; it opens on its own when setup is running or something fails.
+
+| Stage | Network | If it fails |
+|---|---|---|
+| 1. Rust compile (Route A only; later runs are incremental) | crates.io (first time) | Fix the compiler error shown in the terminal; usually missing Command Line Tools (Route A step 1). |
+| 2. Voice environment: PA finds Python, creates `~/.pocket-agent/venv`, runs `pip install` | **PyPI** (pypi.org, files.pythonhosted.org) | The window shows "Voice environment setup failed" with pip's error. Check the network or proxy, then restart PA; it retries automatically. "No usable Python" means installing the Command Line Tools (`xcode-select --install`). |
+| 3. Models: Whisper (`STT_MODEL`, default `base`) and the voiceprint model | **HuggingFace** (huggingface.co) | Past 30 s the window shows "starting voice service" and keeps waiting. If the voice service exits, the window says so; check the network and restart PA. A failed voiceprint-model download only disables voiceprints (owner-only wake); dictation still works and the download is retried when a voiceprint is first used. |
+| 4. Health check on `127.0.0.1:8651` | — | As in stage 3. |
+| 5. Ready: the window is shown (if it was not already) and the start sound plays | — | — |
+
+On macOS older than 13.4, PA additionally downloads a wake-engine build from this project's GitHub Release in the background (see [Privacy and Security](#privacy-and-security)).
+
+Logs: with Route A they appear in the terminal running `npm run tauri dev` (`[venv]`, `[stt]`, `[stt-server]`). For the `.app`, run `"/Applications/Pocket Agent.app/Contents/MacOS/pocket-agent"` from a terminal to see the same lines. To force a clean voice environment, quit PA, delete `~/.pocket-agent/venv` and `~/.pocket-agent/.venv-ready`, and start PA again.
+
+### Check the install, step by step
+
+Check each layer before moving on; when one fails, the layers below it are not worth testing yet.
+
+1. **Text chat** — type a message in the chat panel; Hermes replies.
+2. **Dictation** — press the hotkey shown in the chat panel (default `RightShift`), speak, press it again; your words appear and are sent.
+3. **TTS** — the reply is spoken (Voice Output is on in Settings).
+4. **Interrupt** — while PA is speaking, press the hotkey: playback stops at once and recording starts. `Escape` during recording cancels it.
+5. *(Optional)* **Wake word and voiceprint** — enable and enroll in Settings → Voice (see [Wake-Word Configuration](#wake-word-configuration)).
+6. *(Optional)* **Computer tools** — see [docs/computer-interaction.md](docs/computer-interaction.md).
 
 If Accessibility was denied initially, re-enable it and restart the app. If local dev hotkeys still do nothing after that, check the terminal app's Input Monitoring permission before debugging the code.
 
@@ -311,6 +399,8 @@ Open **Settings** from the tray menu.
 ### Mesh Avatar
 
 The avatar circle shows the bundled mesh avatar `public/avatars/xingyin.mavatar` by default. In **Settings → Avatar** you can turn it off, zoom (50–200%) and offset it (±40 px) with a live preview, upload your own `.mavatar` (or restore the built-in one), and change the expressions and emotion mapping below. While it is on and loads successfully, it covers the **Avatar image** and per-state media skins. Those show when it is turned off or fails to load (bad file or no WebGL2).
+
+**Making your own animated avatar:** PA's avatar is made with [mesh-avatar-studio](https://github.com/shinshin86/mesh-avatar-studio), the same project whose runtime PA uses to play it. Build your character there, export it with `npm run pack-avatar -- projects/<name> --no-source` (`--no-source` leaves the source image out, so the file can only be played), then upload the `.mavatar` in **Settings → Avatar**.
 
 Defaults (configurable):
 

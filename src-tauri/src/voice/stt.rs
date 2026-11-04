@@ -23,14 +23,49 @@ fn mark_app_ready(notify: impl FnOnce()) {
     }
 }
 
+/// Show the main window without declaring PA ready, so first-run setup and
+/// voice failures are visible. The start sound and wake still wait for `app-ready`.
+pub fn reveal_main_window(handle: &tauri::AppHandle, source: &str) {
+    // A /ui client (the phone) drives PA: the desktop window stays hidden.
+    if let Some(window) = handle.get_webview_window("main").filter(|_| !crate::api::remote::is_ui_remote_active()) {
+        let _ = window.show();
+        eprintln!("[stt] window shown ({source})");
+    }
+}
+
 fn show_main_window(handle: Option<&tauri::AppHandle>, source: &str) {
     if let Some(h) = handle {
-        // A /ui client (the phone) drives PA: the desktop window stays hidden.
-        if let Some(window) = h.get_webview_window("main").filter(|_| !crate::api::remote::is_ui_remote_active()) {
-            let _ = window.show();
-            eprintln!("[stt] window shown ({source})");
-        }
+        reveal_main_window(h, source);
         let _ = h.emit("app-ready", ());
+    }
+}
+
+/// `voice-service-status`: `starting` (slow first start), `ready`, or
+/// `failed` with a message telling the user how to recover.
+fn emit_service_status(handle: Option<&tauri::AppHandle>, state: &str, message: &str) {
+    if let Some(h) = handle {
+        let _ = h.emit("voice-service-status", serde_json::json!({ "state": state, "message": message }));
+    }
+}
+
+fn report_service_failure(handle: Option<&tauri::AppHandle>, message: &str) {
+    eprintln!("[stt] voice service failed: {message}");
+    emit_service_status(handle, "failed", message);
+    if let Some(h) = handle {
+        reveal_main_window(h, "voice service failed");
+    }
+}
+
+/// Whether the spawned server process has exited. A missing child means it
+/// was shut down on purpose (PA quitting or a reload): stop quietly.
+fn child_state() -> Option<Probe> {
+    let mut guard = STT_CHILD.lock().unwrap_or_else(|p| p.into_inner());
+    match guard.as_mut() {
+        None => Some(Probe::Superseded),
+        Some(child) => match child.try_wait() {
+            Ok(Some(status)) => Some(Probe::Exited(status.to_string())),
+            _ => None,
+        },
     }
 }
 
@@ -286,7 +321,10 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
 
     let server_script = server_path();
     if !server_script.exists() {
-        eprintln!("[stt] stt-server.py not found at {}, skipping auto-start", server_script.display());
+        report_service_failure(
+            app_handle.as_ref(),
+            &format!("找不到语音服务脚本 {}。请重新安装 Pocket Agent。", server_script.display()),
+        );
         return;
     }
 
@@ -343,10 +381,9 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
             }
             eprintln!("[stt] STT server spawned (pid={}, python={})", pid, python);
 
-            // Poll /health for up to 6s in a background thread. If the server
-            // never comes up, print one high-visibility hint with the venv path
-            // and the exact pip install command — instead of silently slipping
-            // into the ~13s subprocess fallback on every utterance.
+            // Poll /health in a background thread. Past 30 s the window is
+            // shown with a "starting" status and polling continues until the
+            // server is healthy, replaced by a reload, or has exited.
             let python_for_hint = python.clone();
             let probe_handle = app_handle.clone();
             std::thread::Builder::new()
@@ -366,33 +403,43 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
                     let probe_deadline_s: u64 = 30;
                     let deadline = std::time::Instant::now()
                         + std::time::Duration::from_secs(probe_deadline_s);
-                    let outcome = probe_health(
-                        generation,
-                        deadline,
-                        std::time::Duration::from_millis(500),
-                        || client.get(&url).send().map(|r| r.status().is_success()).unwrap_or(false),
-                    );
+                    let interval = std::time::Duration::from_millis(500);
+                    let healthy = || client.get(&url).send().map(|r| r.status().is_success()).unwrap_or(false);
+                    let mut outcome = probe_health(generation, Some(deadline), interval, healthy, child_state);
+                    if outcome == Probe::TimedOut {
+                        eprintln!(
+                            "[stt] resident server not up on :8651 after {}s (first start may be downloading the Whisper model); still waiting.\n\
+                             [stt]   venv python: {}",
+                            probe_deadline_s, python_for_hint,
+                        );
+                        emit_service_status(probe_handle.as_ref(), "starting", "");
+                        if let Some(h) = probe_handle.as_ref() {
+                            reveal_main_window(h, "voice service slow to start");
+                        }
+                        outcome = probe_health(generation, None, interval, healthy, child_state);
+                    }
                     match outcome {
                         Probe::Healthy => {
                             eprintln!("[stt] resident server healthy on :8651");
+                            emit_service_status(probe_handle.as_ref(), "ready", "");
                             mark_app_ready(|| show_main_window(probe_handle.as_ref(), "new server"));
-                            return;
                         }
-                        Probe::Superseded => return,
-                        Probe::TimedOut => {}
+                        Probe::Exited(status) => report_service_failure(
+                            probe_handle.as_ref(),
+                            &format!(
+                                "语音服务进程已退出（{status}）。首次启动需要联网下载语音模型（HuggingFace），\
+                                 请检查网络后重启 Pocket Agent；在终端里运行 PA 可以看到 [stt-server] 的详细日志。"
+                            ),
+                        ),
+                        Probe::Superseded | Probe::TimedOut => {}
                     }
-                    eprintln!(
-                        "[stt] WARNING: resident server did not respond on :8651 within {}s.\n\
-                         [stt]   STT will fall back to slow per-utterance subprocess.\n\
-                         [stt]   venv python: {}\n\
-                         [stt]   If this persists, delete ~/.pocket-agent/.venv-ready and restart PA\n\
-                         [stt]   to trigger a fresh venv bootstrap.",
-                        probe_deadline_s, python_for_hint,
-                    );
                 })
                 .ok();
         }
-        Err(e) => eprintln!("[stt] failed to spawn STT server: {}", e),
+        Err(e) => report_service_failure(
+            app_handle.as_ref(),
+            &format!("语音服务启动失败（{python}: {e}）。删除 ~/.pocket-agent/.venv-ready 后重启 Pocket Agent 会重建语音环境。"),
+        ),
     }
 }
 
@@ -401,22 +448,29 @@ enum Probe {
     Healthy,
     Superseded,
     TimedOut,
+    /// The server process exited; carries its exit status.
+    Exited(String),
 }
 
-/// Poll `healthy` until the deadline, giving up as soon as a newer server
-/// process (a reload) owns the port.
+/// Poll `healthy` until the deadline (`None`: no deadline), giving up as soon
+/// as a newer server process (a reload) owns the port or `child_state`
+/// reports the process gone.
 fn probe_health(
     generation: u64,
-    deadline: std::time::Instant,
+    deadline: Option<std::time::Instant>,
     interval: std::time::Duration,
     healthy: impl Fn() -> bool,
+    child_state: impl Fn() -> Option<Probe>,
 ) -> Probe {
-    while std::time::Instant::now() < deadline {
+    while deadline.map_or(true, |d| std::time::Instant::now() < d) {
         if SERVER_GEN.load(Ordering::Acquire) != generation {
             return Probe::Superseded;
         }
         if healthy() {
             return Probe::Healthy;
+        }
+        if let Some(end) = child_state() {
+            return end;
         }
         std::thread::sleep(interval);
     }
@@ -551,6 +605,36 @@ mod tests {
     }
 
     #[test]
+    fn probe_keeps_waiting_past_the_first_deadline_until_healthy() {
+        let _serial = test_serial();
+        let generation = SERVER_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+        let soon = Instant::now() + Duration::from_millis(50);
+        assert_eq!(probe_health(generation, Some(soon), Duration::from_millis(10), || false, || None), Probe::TimedOut);
+        let healthy_at = Instant::now() + Duration::from_millis(80);
+        assert_eq!(
+            probe_health(generation, None, Duration::from_millis(10), || Instant::now() >= healthy_at, || None),
+            Probe::Healthy
+        );
+    }
+
+    #[test]
+    fn probe_stops_when_the_server_exits_or_is_replaced() {
+        let _serial = test_serial();
+        let generation = SERVER_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+        assert_eq!(
+            probe_health(generation, None, Duration::from_millis(10), || false, || Some(Probe::Exited("exit status: 1".into()))),
+            Probe::Exited("exit status: 1".into())
+        );
+        let (tx, rx) = mpsc::channel();
+        let probe = std::thread::spawn(move || {
+            probe_health(generation, None, Duration::from_millis(10), || { let _ = tx.send(()); false }, || None)
+        });
+        rx.recv().unwrap();
+        SERVER_GEN.fetch_add(1, Ordering::AcqRel);
+        assert_eq!(probe.join().unwrap(), Probe::Superseded);
+    }
+
+    #[test]
     fn reload_before_first_health_still_shows_the_window_once() {
         let _serial = test_serial();
         APP_READY.store(false, Ordering::Release);
@@ -558,10 +642,10 @@ mod tests {
         let first = SERVER_GEN.fetch_add(1, Ordering::AcqRel) + 1;
         let (gen_tx, gen_rx) = mpsc::channel();
         let old_probe = std::thread::spawn(move || {
-            let outcome = probe_health(first, Instant::now() + Duration::from_secs(2), Duration::from_millis(10), || {
+            let outcome = probe_health(first, Some(Instant::now() + Duration::from_secs(2)), Duration::from_millis(10), || {
                 let _ = gen_tx.send(());
                 false
-            });
+            }, || None);
             if outcome == Probe::Healthy {
                 mark_app_ready(|| panic!("old probe must not report ready"));
             }
@@ -573,7 +657,7 @@ mod tests {
         assert_eq!(old_probe.join().unwrap(), Probe::Superseded);
 
         let mut shown = 0;
-        assert_eq!(probe_health(second, Instant::now() + Duration::from_secs(1), Duration::from_millis(10), || true), Probe::Healthy);
+        assert_eq!(probe_health(second, Some(Instant::now() + Duration::from_secs(1)), Duration::from_millis(10), || true, || None), Probe::Healthy);
         mark_app_ready(|| shown += 1);
         mark_app_ready(|| shown += 1);
         assert_eq!(shown, 1, "app-ready fires for the first healthy server only");

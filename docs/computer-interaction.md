@@ -81,7 +81,7 @@ Pocket Agent 的受支持部署方式是 **Pocket Agent、Hermes 和 CuaDriver �
 | 权限未授予 | 在系统设置为实际 CuaDriver 身份授权。AX 文字读取与截图依赖不同能力，应以实际调用结果判断。 |
 | 视觉分析失败 | 核对 Hermes auxiliary.vision 和模型凭据，不能把工具 enabled 当作模型已验证。 |
 
-远程地址及 OpenClaw 等已有聊天兼容性保留，但 **PA 的本机 Computer Use 仅在本机 Hermes UI 路径生效**。配置 `API_AGENT` 的 OpenClaw、远程网关和 bridge 不会被当作用户本机桌面入口，也不会回退到旧命令执行。电脑工具操作驱动所在的机器，远程 Hermes 不会自动看到 PA 客户端。SSH 转发、代理或远程驱动即使用 localhost 地址，也不证明是同机；当前检测不是主机身份认证，请按同机方式部署。本功能不新建远程控制服务。
+PA 只支持 Hermes(不再支持 OpenClaw)。**PA 的本机 Computer Use 仅在本机 Hermes UI 路径生效**。配置了 `API_AGENT` 的连接、远程网关和 bridge 不会被当作用户本机桌面入口，也不会回退到旧命令执行。电脑工具操作驱动所在的机器，远程 Hermes 不会自动看到 PA 客户端。SSH 转发、代理或远程驱动即使用 localhost 地址，也不证明是同机；当前检测不是主机身份认证，请按同机方式部署。本功能不新建远程控制服务。
 
 本机 Hermes 不要设置 `API_AGENT`:设置后 PA 改走 `/v1/chat/completions`,该接口没有停止命令。PA 打断时只能断开连接，Hermes 记下 `SSE client disconnected; interrupted agent task` 后仍会继续执行这一轮和它的工具(2026-11-02 实测：断开后一轮继续操作 Chrome 二十多分钟，只能重启网关停止)。
 
