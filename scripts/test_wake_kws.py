@@ -171,17 +171,48 @@ class SplitTests(unittest.TestCase):
         kws = WakeKws(tempfile.gettempdir(), tempfile.gettempdir(), Mock())
         kws.path = lexicon.parent
         seen = {}
+        def text2token(text, tokens, lexicon):
+            seen['text'] = text; return ['HH', 'EY1']
         class FakeSherpa:
-            @staticmethod
-            def text2token(texts, tokens, **kw):
-                seen['text'] = texts[0]; return [['HH', 'EY1']]
             class KeywordSpotter:
                 def __init__(self, keywords_file, **kw): seen['keyword'] = Path(keywords_file).read_text()
         with patch.object(wake_kws, 'FILES', ['en.phone'] * 3), patch.dict(sys.modules, sherpa_onnx=FakeSherpa), \
-                patch.object(wake_kws, 'engine_error', return_value=None):
+                patch.object(wake_kws, 'engine_error', return_value=None), patch.object(wake_kws, 'text2token', text2token):
             kws._model(dict(phrase='hey mimikyu', kws_threshold=0.25))
         self.assertEqual(seen['text'], 'HEY MIMI KYU')
         self.assertTrue(seen['keyword'].strip().endswith('@hey_mimikyu'))
+
+
+
+MODEL = Path.home() / '.pocket-agent/models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20'
+
+
+class Text2TokenTests(unittest.TestCase):
+    """Built-in phone+ppinyin conversion; must match sherpa-onnx 1.12.26 text2token."""
+    def files(self, lexicon, tokens):
+        d = Path(tempfile.mkdtemp())
+        (d / 'en.phone').write_text(lexicon, encoding='utf-8')
+        (d / 'tokens.txt').write_text(''.join(f'{t} {i}\n' for i, t in enumerate(tokens)), encoding='utf-8')
+        return str(d / 'tokens.txt'), str(d / 'en.phone')
+
+    def test_english_from_lexicon_and_chinese_as_partial_pinyin(self):
+        tokens, lexicon = self.files('HEY HH EY1\n', ['HH', 'EY1', 'x', 'iǎo', 'īng'])
+        self.assertEqual(wake_kws.text2token('HEY 小星', tokens, lexicon), ['HH', 'EY1', 'x', 'iǎo', 'x', 'īng'])
+
+    def test_word_not_in_lexicon_is_empty(self):
+        tokens, lexicon = self.files('HEY HH EY1\n', ['HH', 'EY1'])
+        self.assertEqual(wake_kws.text2token('HEY QQQ', tokens, lexicon), [])
+
+    def test_token_missing_from_table_is_empty(self):
+        tokens, lexicon = self.files('HEY HH EY1\n', ['HH'])
+        self.assertEqual(wake_kws.text2token('HEY', tokens, lexicon), [])
+
+    @unittest.skipUnless((MODEL / 'tokens.txt').is_file(), 'wake model not downloaded')
+    def test_real_model_matches_sherpa_1_12_26(self):
+        args = str(MODEL / 'tokens.txt'), str(MODEL / 'en.phone')
+        self.assertEqual(' '.join(wake_kws.text2token('你好小星', *args)), 'n ǐ h ǎo x iǎo x īng')
+        self.assertEqual(' '.join(wake_kws.text2token('HELLO COMPUTER', *args)), 'HH AH0 L OW1 K AH0 M P Y UW1 T ER0')
+        self.assertEqual(wake_kws.text2token('ZZQXJ', *args), [])
 
 
 if __name__ == '__main__': unittest.main()

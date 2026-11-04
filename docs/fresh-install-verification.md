@@ -224,3 +224,24 @@ cancelled_transcribe_result=Ok("after cancel")
 | 上述两组变异检查 | 新测试在旧逻辑下按预期失败，恢复后通过 |
 
 “测试全部通过”只说明上述模拟 / 临时目录场景成立。R3 的打包版中断复测、R5 的界面端到端取消，以及第一轮列出的 A01、A03 真实 macOS 12、麦克风权限、断网、Hermes 回合、TTS、打断、Esc 仍未执行。
+
+## 升级路径与旧 macOS 唤醒（2026-11-05，0.3.1）
+
+来源：一台装过旧版 PA 的 macOS 12.6.3 Intel 机器 `git pull` 后，先是 vite 找不到 `mesh-avatar-element`，随后唤醒词 / 声纹不可用（sherpa-onnx 1.12.26 自带的 onnxruntime 需要 macOS 13.4；兜底的自建兼容包从未发布，下载 404）。本批改动见 `.auto-work/docs/changes-20261105-005756.md`：`npm run dev` / `build` 前检查 npm 依赖；macOS < 13.4 改装 PyPI 上的 sherpa-onnx 1.10.46，`wake_kws.py` 自带发音转换；删除兼容包下载与 stt-server 重载。
+
+| 编号 | 结果 | 类型 | 证据 / 原因 |
+|---|---|---|---|
+| A18 | 部分 | 本机 | 两个 venv（1.10.46 / 1.12.26）经 `WakeKws.create/feed`，`say` 合成的「你好小星」「hello computer」均命中、负样本不命中；自带转换与 1.12.26 `text2token` 对 7 个短语结果相同。**未在真实旧系统上运行** |
+| A21 | 部分 | 本机 | npm 部分通过：移走 `node_modules/mesh-avatar-element` 后 `check-deps.js` 与 `npm run dev` 打印包名和 npm install 提示、退出 1，`npm install` 后退出 0。Python 部分只验证了选择规则：新版 packaging 与 pip 21.2.4 内置的 packaging 21.0 对 Darwin 20.6 / 21.6 / 22.4 均选 1.10.46，22.5 / 22.6 / 25.6 / Linux / Windows 均选 1.12.26。**未在装过旧版的机器上实际 `git pull` 启动** |
+| A22 | 未执行 | — | 没有 macOS 12 Intel 机器。1.10.46 x86_64 wheel 来自 PyPI，dylib minos 为 10.14 / 11.0（onnxruntime 1.17.1） |
+
+| 命令 | 结果 |
+|---|---|
+| `cd src-tauri && cargo build` | 0 警告 |
+| `cd src-tauri && cargo test --lib` | 151 通过、0 失败（删除兼容包、重载与租约相关的测试） |
+| `node --test scripts/*.mjs` | 27 通过、0 失败（新增 `test_check_deps.mjs`；Node 22 的 `node --test` 不接受目录参数） |
+| `python scripts/test_wake_kws.py` | 24 通过（含真实模型对照） |
+| `python scripts/test_kws_integration.py` | 通过（PA 安装的模型不含 `test_wavs/`，用临时模型目录 + `say` 合成的 `en_0.wav`） |
+| `npx tsc --noEmit`、`npm run build` | 通过 |
+
+未执行：`npm run tauri build`；macOS 12.6.3 Intel 实机上重启后 pip 自动降级、设置唤醒词并唤醒、日志无 `[sherpa-compat]`。

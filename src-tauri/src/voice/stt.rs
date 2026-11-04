@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio, Child};
 use std::io::BufRead;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 
 /// Store the STT server child process so we can kill it when PA exits.
@@ -80,70 +80,6 @@ fn child_state() -> Option<Probe> {
             _ => None,
         },
     }
-}
-
-/// Requests in flight against the resident server, and whether a reload is
-/// swapping the server (and its token) out from under them.
-struct VoiceGate {
-    active: u32,
-    reloading: bool,
-}
-
-static VOICE_GATE: Mutex<VoiceGate> = Mutex::new(VoiceGate { active: 0, reloading: false });
-static VOICE_GATE_CV: Condvar = Condvar::new();
-
-fn voice_gate() -> std::sync::MutexGuard<'static, VoiceGate> {
-    VOICE_GATE.lock().unwrap_or_else(|p| p.into_inner())
-}
-
-/// Lease on the resident server for one request. A reload waits until no
-/// lease is held; a new lease waits until the reloaded server is healthy.
-pub struct VoiceTxn(());
-
-pub fn voice_txn() -> VoiceTxn {
-    let mut gate = VOICE_GATE_CV
-        .wait_while(voice_gate(), |g| g.reloading)
-        .unwrap_or_else(|p| p.into_inner());
-    gate.active += 1;
-    VoiceTxn(())
-}
-
-/// Like `voice_txn`, but `None` instead of waiting while a reload is running.
-pub fn try_voice_txn() -> Option<VoiceTxn> {
-    let mut gate = voice_gate();
-    if gate.reloading {
-        return None;
-    }
-    gate.active += 1;
-    Some(VoiceTxn(()))
-}
-
-impl Drop for VoiceTxn {
-    fn drop(&mut self) {
-        voice_gate().active -= 1;
-        VOICE_GATE_CV.notify_all();
-    }
-}
-
-/// Held for the whole reload; dropping it lets waiting requests through.
-struct ReloadLease(());
-
-impl Drop for ReloadLease {
-    fn drop(&mut self) {
-        voice_gate().reloading = false;
-        VOICE_GATE_CV.notify_all();
-    }
-}
-
-/// Claim the server for a reload only if no request is in flight and `idle`
-/// still holds, checked under the same lock new requests take.
-fn try_begin_reload(idle: impl Fn() -> bool) -> Option<ReloadLease> {
-    let mut gate = voice_gate();
-    if gate.active > 0 || gate.reloading || !idle() {
-        return None;
-    }
-    gate.reloading = true;
-    Some(ReloadLease(()))
 }
 
 const STT_SERVER_URL: &str = "http://127.0.0.1:8651";
@@ -385,7 +321,6 @@ pub fn transcribe(wav_path: &str) -> Result<SttResult, String> {
 
 /// `transcribe`, ended by any `cancel_fallback` after `token` was taken.
 pub fn transcribe_until(wav_path: &str, token: CancelToken) -> Result<SttResult, String> {
-    let _txn = voice_txn();
     transcribe_staged(
         &|| token.cancelled(),
         std::time::Duration::from_secs(1),
@@ -668,64 +603,6 @@ fn probe_health(
     }
 }
 
-/// No microphone owner, conversation or wake listener — nothing is waiting on
-/// the resident server. In-flight requests are tracked by `VoiceTxn`.
-fn voice_idle() -> bool {
-    crate::voice::record::current_owner() == crate::voice::record::OWNER_NONE
-        && !crate::voice::conversation::is_active()
-        && !crate::voice::sherpa_wake::is_wake_active()
-}
-
-fn server_idle() -> bool {
-    voice_idle() && voice_gate().active == 0
-}
-
-/// Restart the resident server once voice has been idle for a while, so it
-/// re-imports native modules replaced on disk. Requests started meanwhile wait
-/// for the new server; `voice-engine-reloaded` follows once it is healthy. A
-/// server PA did not spawn is left alone: starting a second one would
-/// overwrite its token (see stt-server token file).
-pub fn restart_when_idle(app: tauri::AppHandle) {
-    const QUIET_SECS: u32 = 10;
-    if !STT_CHILD.lock().map(|g| g.is_some()).unwrap_or(false) {
-        eprintln!("[stt] server not owned by this PA; restart PA to load the new voice engine");
-        return;
-    }
-    let mut quiet = 0;
-    let _lease = loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        quiet = if server_idle() { quiet + 1 } else { 0 };
-        if quiet >= QUIET_SECS {
-            match try_begin_reload(voice_idle) {
-                Some(lease) => break lease,
-                None => quiet = 0,
-            }
-        }
-    };
-    eprintln!("[stt] voice idle; restarting STT server to load the new voice engine");
-    shutdown_stt_server();
-    // Keep the handle: if the first server never got healthy, this one shows
-    // the main window instead of the superseded probe.
-    ensure_stt_server(Some(app.clone()));
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_millis(500))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while std::time::Instant::now() < deadline {
-        if voice_service_healthy(&client) {
-            eprintln!("[stt] STT server reloaded");
-            let _ = app.emit("voice-engine-reloaded", ());
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
-    eprintln!("[stt] WARNING: STT server did not come back within 30s after reload");
-}
-
 /// Kill the resident STT server. Called when PA exits.
 pub fn shutdown_stt_server() {
     if let Ok(mut guard) = STT_CHILD.lock() {
@@ -738,17 +615,11 @@ pub fn shutdown_stt_server() {
     }
 }
 
-/// Serializes tests that touch the process-wide voice gate.
+/// Serializes tests that touch process-wide server state.
 #[cfg(test)]
 pub(crate) fn test_serial() -> std::sync::MutexGuard<'static, ()> {
     static SERIAL: Mutex<()> = Mutex::new(());
     SERIAL.lock().unwrap_or_else(|p| p.into_inner())
-}
-
-/// Puts the gate in the reloading state until the returned lease drops.
-#[cfg(test)]
-pub(crate) fn hold_reload_for_test() -> impl Drop {
-    try_begin_reload(|| true).expect("gate idle")
 }
 
 #[cfg(test)]
@@ -756,40 +627,6 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
-
-    #[test]
-    fn reload_waits_for_requests_in_flight() {
-        let _serial = test_serial();
-        let txn = voice_txn();
-        assert!(try_begin_reload(|| true).is_none(), "a /transcribe in flight blocks the reload");
-        drop(txn);
-        assert!(try_begin_reload(|| true).is_some());
-    }
-
-    #[test]
-    fn reload_rechecks_idle_under_the_gate() {
-        let _serial = test_serial();
-        // A conversation started after the last quiet sample.
-        assert!(try_begin_reload(|| false).is_none());
-        assert!(!voice_gate().reloading);
-    }
-
-    #[test]
-    fn requests_started_during_reload_wait_for_the_new_server() {
-        let _serial = test_serial();
-        let lease = try_begin_reload(|| true).expect("idle");
-        assert!(try_voice_txn().is_none(), "VAD does not wait out a reload");
-        let (tx, rx) = mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            let _txn = voice_txn();
-            tx.send(()).unwrap();
-        });
-        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "no request reaches the old server");
-        drop(lease);
-        rx.recv_timeout(Duration::from_secs(2)).expect("released once the server is back");
-        worker.join().unwrap();
-        assert_eq!(voice_gate().active, 0);
-    }
 
     #[test]
     fn probe_keeps_waiting_past_the_first_deadline_until_healthy() {
@@ -825,7 +662,7 @@ mod tests {
     fn reload_before_first_health_still_shows_the_window_once() {
         let _serial = test_serial();
         APP_READY.store(false, Ordering::Release);
-        // First server spawned; compat install finishes before it is healthy.
+        // First server spawned; a second one replaces it before it is healthy.
         let first = SERVER_GEN.fetch_add(1, Ordering::AcqRel) + 1;
         let (gen_tx, gen_rx) = mpsc::channel();
         let old_probe = std::thread::spawn(move || {

@@ -2,7 +2,7 @@
 
 > A minimal desktop AI voice companion that lives on your screen — press a key, speak, get things done.
 >
-> **v0.3.0** — see [releases/0.3.0.md](releases/0.3.0.md) for changelog
+> **v0.3.1** — see [releases/0.3.1.md](releases/0.3.1.md) for changelog
 
 Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust**. It connects to a local [Hermes](https://github.com/nousresearch/hermes) agent gateway via SSE streaming for real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
 
@@ -176,7 +176,7 @@ Pocket Agent is a local desktop client. Please understand these boundaries:
 - **API key handling** — `API_SERVER_KEY` is stored in `.env` (plaintext on disk). Never commit `.env` to version control.
 - **Global input monitoring** — the hotkey listener uses macOS Accessibility APIs (CGEventTap). This grants system-level input monitoring capability. Only run builds you trust.
 - **Microphone access** — audio is captured via CoreAudio and processed **entirely locally** by faster-whisper. No audio data leaves your machine for STT.
-- **Wake engine on macOS older than 13.4** — the stock sherpa-onnx wheel cannot load there, so on first launch PA downloads a compatible build (sherpa-onnx 1.12.26 + onnxruntime 1.19.2) from this project's GitHub Release `sherpa-compat-1.12.26-ort1.19.2` over HTTPS. The archive's SHA256 is pinned in the source and checked before extraction; only the two expected library files are installed into PA's venv. The download runs in the background: the rest of PA starts normally, and wake word / voiceprint become available once the voice service reloads the new build while idle. Newer macOS versions never make this request. The build is reproducible with `scripts/build-sherpa-compat.sh`.
+- **Wake engine on macOS older than 13.4** — sherpa-onnx 1.12.26 cannot load there (its bundled onnxruntime needs macOS 13.4), so the voice environment installs sherpa-onnx 1.10.46 from PyPI instead, like every other dependency. Nothing is downloaded from outside PyPI.
 - **Avatar** — the mesh avatar is bundled with the app and loaded from the app's own origin; it makes no network requests. A custom `.mavatar` is picked from a local file and stored in the settings database (zip header and 10 MB limit checked).
 - **Phone terminal** — `/ui/ws`, `/audio` and `/mcp` refuse every request when `API_SERVER_KEY` is not set. Keep port 8650 on the LAN and never port-forward it: a `/ui` client can approve computer actions on the Mac. Camera frames stay in memory and are never written to disk; opening the camera needs no Hermes approval, but the phone screen shows the viewfinder while it is open (see [docs/API_MANUAL.md](docs/API_MANUAL.md)).
 - **Conversation persistence** — sessions are stored in the configured gateway (Hermes: `~/.hermes/sessions/`). These contain full conversation text. Consider disk encryption.
@@ -345,6 +345,16 @@ There is no published installer: build the app yourself on a Mac with Route A's 
 
 4. **Launch** Pocket Agent and grant **Accessibility** and **Microphone** to it (restart PA after granting Accessibility). The machine still needs the Command Line Tools from Route A step 1: they provide the Python PA builds its voice environment from.
 
+### Updating
+
+From the repository (Route A):
+
+```bash
+git pull && npm install && npm run tauri dev
+```
+
+`npm run dev` / `npm run build` stop with "run npm install first" when `node_modules` no longer matches `package-lock.json`, which is common right after `git pull`. The Python voice environment needs no manual step: when the bundled `requirements-stt.txt` changes, PA re-runs `pip install` on its next start, and keeps the previous environment if that fails (offline, for example). For a `.app` (Route B), pull, run `npm install`, and build it again.
+
 ### Where PA reads its configuration
 
 | Build | `.env` file read |
@@ -371,7 +381,6 @@ On startup PA logs one line saying which applies, without the key itself, e.g. `
 | Install | Rust crates, npm packages (Route A) | crates.io, npmjs.org |
 | First launch | Voice environment | PyPI (pypi.org, files.pythonhosted.org) |
 | First launch | Whisper and voiceprint models | HuggingFace (huggingface.co); cached afterwards |
-| First launch, macOS < 13.4 only | Wake-engine compat build | this project's GitHub Release |
 | Every reply | Spoken replies (edge-tts) | **Microsoft's online TTS service** — there is no offline voice |
 | Every turn | The model | whatever your Hermes backend uses (a cloud API needs the internet, a local model does not) |
 
@@ -389,7 +398,7 @@ Times depend on the machine and the network, so none are promised here. The stat
 | 4. Health check on `127.0.0.1:8651` | — | As in stage 3. |
 | 5. Ready: the window is shown (if it was not already) and the start sound plays | — | — |
 
-On macOS older than 13.4, PA additionally downloads a wake-engine build from this project's GitHub Release in the background (see [Privacy and Security](#privacy-and-security)).
+On macOS older than 13.4, stage 2 installs sherpa-onnx 1.10.46 instead of 1.12.26 for the wake word (see [Privacy and Security](#privacy-and-security)).
 
 Logs: with Route A they appear in the terminal running `npm run tauri dev` (`[venv]`, `[stt]`, `[stt-server]`). For the `.app`, run `"/Applications/Pocket Agent.app/Contents/MacOS/pocket-agent"` from a terminal to see the same lines. To force a clean voice environment, quit PA, delete `~/.pocket-agent/venv` and `~/.pocket-agent/.venv-ready`, and start PA again.
 
@@ -507,6 +516,9 @@ The old behavior queued a Stop command onto the audio thread, but the playback t
 
 ### Why does `npm run tauri dev` stop with "port 1420 is in use"?
 Vite serves the dev frontend on port 1420. Before it starts, `scripts/clear-dev-port.js` checks the port. It never stops anything: if any process is listening on 1420 (including an old vite from this repo), it prints the PID and command and `npm run dev` stops. If the check itself cannot run (e.g. `lsof` fails), it says so and stops as well, rather than assuming the port is free. Find it with `lsof -iTCP:1420 -sTCP:LISTEN`, stop it yourself with `kill <PID>` (or move the other project to another port), then run `npm run tauri dev` again.
+
+### Why does `npm run dev` stop with "run npm install first"?
+Before vite starts (and before `npm run build`), `scripts/check-deps.js` compares every dependency in `package.json` with `package-lock.json` and `node_modules`. After a `git pull` that adds or bumps a package, it lists what is missing or at the wrong version and stops, instead of vite failing later with `Failed to resolve import`. Run `npm install`, then start again. Nothing is installed automatically. A missing `package-lock.json` also stops it, since the check cannot run.
 
 ### What should I test after upgrading to v0.2.4?
 - Launch locally from your normal terminal app and verify `fn` starts/stops recording

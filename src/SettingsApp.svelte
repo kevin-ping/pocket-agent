@@ -155,8 +155,6 @@
     } catch (e) { if (!error) error = wakeErrorMessage(lang(), e); }
   }
   void refreshWakeModel();
-  // The sherpa compat build can finish installing while this page is open.
-  if (isTauri) void listen('voice-engine-reloaded', () => void refreshWakeModel());
 
   let text = $derived(settingsText(local?.ui_lang ?? 'en'));
   let dirty = $derived((!!local && JSON.stringify(local) !== baseline) || pendingWakeDeletes.length > 0 || meshAvatarChanged);
