@@ -239,7 +239,7 @@ PA 主界面的前端(打包进 app 的静态资源，不含 key);远程模式�
 
 - **鉴权**:`Authorization: Bearer {API_SERVER_KEY}`;没配 key 时一律 401(无开放模式)。
 - 只处理 `initialize`、`ping`、`tools/list`、`tools/call`;通知(无 `id`)回 202;其他方法 / 未知工具回 JSON-RPC 错误;不支持批量。请求体上限 64 KB。`GET` / `DELETE` → 405(没有服务端推送流和会话)。
-- Hermes 注册(`~/.hermes/profiles/xingli/config.yaml`,改完重启网关):
+- Hermes 注册(`~/.hermes/profiles/<profile>/config.yaml`,改完重启网关):
 
 ```yaml
 mcp_servers:
@@ -250,6 +250,6 @@ mcp_servers:
     trust: untrusted   # 没标 readOnlyHint 的工具要审批;现有四个工具都标了
 ```
 
-Hermes 里的工具名是 `mcp__pocket_agent__<工具名>`。**审批**:Hermes 只在服务器配了 `trust: untrusted` 时，对没标 `readOnlyHint` 的工具弹审批(默认 `trust: full` 一律不弹),没有按工具放行的配置。而且 Hermes 的 MCP 审批不会记住「本会话允许 / 始终允许」,每次调用都会再问。所以现在四个工具都标了 `readOnlyHint`,都不审批(`phone_camera_open` 原来要审批，用户撤销了这一条，见 decision-20261104-153000;`switch_device` 实际会改状态，但用户要求不审批，见 decision-20261104-130000);xingli 的 `pocket_agent` 仍配 `trust: untrusted`,给以后加的、没标 `readOnlyHint` 的工具兜底。审批经 `/v1/runs` 的审批事件转发到 PA 的审批界面(PA 兼容两种事件格式：旧的 `request_id`,以及 session authority 模式的 `prompt_id` + `execution_generation`,回应时按原格式带回);`/bridge/send` 回合走 chat/completions,没人能批，Hermes 等审批超时(60 秒)后按未批准处理。
+Hermes 里的工具名是 `mcp__pocket_agent__<工具名>`。**审批**:Hermes 只在服务器配了 `trust: untrusted` 时，对没标 `readOnlyHint` 的工具弹审批(默认 `trust: full` 一律不弹),没有按工具放行的配置。而且 Hermes 的 MCP 审批不会记住「本会话允许 / 始终允许」,每次调用都会再问。所以现在四个工具都标了 `readOnlyHint`,都不审批(`phone_camera_open` 原来要审批，用户撤销了这一条，见 decision-20261104-153000;`switch_device` 实际会改状态，但用户要求不审批，见 decision-20261104-130000);Hermes profile 里的 `pocket_agent` 仍配 `trust: untrusted`,给以后加的、没标 `readOnlyHint` 的工具兜底。审批经 `/v1/runs` 的审批事件转发到 PA 的审批界面(PA 兼容两种事件格式：旧的 `request_id`,以及 session authority 模式的 `prompt_id` + `execution_generation`,回应时按原格式带回);`/bridge/send` 回合走 chat/completions,没人能批，Hermes 等审批超时(60 秒)后按未批准处理。
 
-**PA 更新了工具列表后要重启 Hermes 网关**(`launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway-xingli`),Hermes 只在启动时读 `tools/list`。
+**PA 更新了工具列表后要重启 Hermes 网关**(`launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway-<profile>`),Hermes 只在启动时读 `tools/list`。
