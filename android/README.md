@@ -10,6 +10,11 @@ full reference: `docs/API_MANUAL.md` (「手机终端」).
 
 ## Build
 
+**Experimental.** There is no store release: you build the debug APK and
+install it over `adb`. On the phone, turn on **Developer options** (tap
+*Settings → About phone → Build number* seven times), then **USB debugging**
+(or **Wireless debugging**), and accept the computer's debugging prompt.
+
 Needs JDK 17 + Android SDK (platform 34, build-tools) + platform-tools (`adb`).
 The Gradle wrapper (8.7) is checked in:
 
