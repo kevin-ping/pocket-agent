@@ -309,3 +309,36 @@ Step 2 已 `cd pocket-agent`；构建验证中的 `cd src-tauri && cargo check`�
 | 真正全新 Mac、Intel、旧版 macOS、真实录音/TTS/唤醒 | 本轮未执行，继续保留为待验收 |
 
 本轮只追加本审核记录，未修改产品实现或用户配置。
+
+## 第三轮发现修复状态（2026-11-04，Claude）
+
+实测环境同上（macOS 26.6.2 arm64）。「延迟实测」指：在 `setupListeners()` 前临时加 15 秒等待（测完已删除），用 debug 构建 + `vite` 开发服务器，工作目录 `/tmp`（不读仓库 `.env`）、临时 `HOME`、不设 `STT_PYTHON`，等后端状态发出后再看前端加载完的界面（`screencapture` 截图）。
+
+| 发现 | 状态 | 证据 |
+| --- | --- | --- |
+| A. 初始化状态在前端订阅前丢失 | 已修复，延迟实测通过 | 新增 `voice/setup_status.rs`：所有 `venv-setup-*` 和 `voice-service-status` 都经 `publish()` 发送，在同一把锁里更新最新状态快照（`seq`、`state`、`phase`、`detail`）并把 `seq` 加进事件；新命令 `voice_setup_status` 返回快照，已加入 `UI_COMMANDS` 和 `/ui` dispatch（手机主控也能补读）。前端 `App.svelte` 先订阅、再读快照，`src/lib/voiceSetup.ts` 只应用比已应用的更新的 `seq`；进入 installing / error（含只收到 progress 的情况）时展开状态面板，每行 pip 输出不会重复展开。单测：`snapshot_follows_events_in_sequence`（快照随事件更新、并发发送时 seq 唯一且递增）、`scripts/test_voice_setup.mjs`（旧 seq 的快照不覆盖新事件、重复 seq 只应用一次、seq 0 的空快照忽略）。延迟实测：①资源缺失（不设 `CARGO_MANIFEST_DIR`）——错误在 1 秒内发出，前端加载后面板显示「Voice environment setup failed」+ 错误（该错误顺带补上恢复办法：重新安装 / 在仓库根目录运行开发版）；②全新 HOME 安装中——`venv-setup-started` 早于订阅，加载后面板展开显示「Setting up voice environment … downloading dependencies」；③venv 已就绪——服务在订阅前已健康，加载后窗口保持收起、无状态面板（正常启动回归） |
+| B. README_AGENTS Step 5 重复 `cd` | 已修复（文档） | Step 5 删除 `cd pocket-agent`，注明在仓库根目录（Step 2 结束时所在位置）运行。按顺序走：Step 2 进入仓库 → `cd src-tauri && … cd ..` 回到根 → Step 3 在根 → Step 5 直接 `npm run tauri dev` |
+| C. README 默认录音键矛盾 | 已修复（文档） | README 的 Voice Pipeline 和 Configuration / Record Key 改为默认 `RightShift`（Record Key 注明 `fn` 等修饰键也可用）；`fn` 只留在 v0.2.4 相关 FAQ / Troubleshooting。搜索 `default: \`fn\`` / `(default: fn` 无残留。上述延迟实测的全新设置界面显示「Press RightShift to talk」，与代码默认 `hotkey_code: 60` 一致 |
+
+未覆盖：手机主控时补读快照只由 `UI_COMMANDS` / dispatch 单测保证，未实机复现；「待验收」清单不变。
+
+## 第四轮独立复审（2026-11-04，Codex）
+
+**结论：上一轮剩余的 A / B / C 三项均已修复，本轮在这些修复及安装相关路径中未发现新的阻断问题。文档与代码复审通过；全新机器端到端验收仍未完成。**
+
+| 上轮发现 | 独立复核结果 |
+| --- | --- |
+| A. 初始化状态在订阅前丢失 | 已修复。`voice/setup_status.rs` 在锁内保存完整状态及递增 seq，所有安装/服务状态发布均经过该模块；前端完成事件订阅后查询 `voice_setup_status`，用 `createSetupSequencer` 丢弃旧快照或旧事件。首次进入 installing / error 时展开面板，也覆盖仅收到 progress 的情况。Tauri 命令注册、手机端白名单及 dispatch 均已接通。并发 seq 单测和前端顺序测试通过 |
+| B. 安装步骤重复进入目录 | 已修复。README_AGENTS Step 5 明确从 Step 2 留下的仓库根目录运行，删除多余 `cd pocket-agent` |
+| C. 默认热键说明矛盾 | 已修复。README 的 Voice Pipeline、Record Key 和安装验收步骤均为 RightShift，与代码默认设置一致 |
+
+本轮实际执行：
+
+- `npm run build`：通过，168 个模块。
+- `node scripts/test_voice_setup.mjs`：3 项通过、0 失败，覆盖旧快照不覆盖新事件、重复 seq 去重及 seq 0 忽略。
+- `cargo test --locked --offline --lib`：在获准的沙箱外环境执行，133 项通过、0 失败，包含新增状态快照并发测试及原资源/Python/服务探测测试。
+- 静态核对初始化事件发布入口、快照读取顺序、手机端路由和安装命令连续性。
+
+本轮没有重新构建/运行安装包，没有重复 Claude 所记载的 GUI 延迟实验，没有在真正的全新 Mac 或 Intel/旧版 macOS 上安装，也没有进行真实麦克风、TTS、打断、唤醒及手机接管验收。因此本轮通过范围是安装相关代码与文档复审和上述自动化验证，不是“任意新机器均已实测成功”。
+
+本轮仅追加本审核记录，未修改实现或用户配置。

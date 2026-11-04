@@ -68,7 +68,7 @@ pub const UI_COMMANDS: &[&str] = &[
     "reset_hotkey_active_state", "respond_computer_approval", "save_chat_message", "send_message", "set_double_click_mode",
     "settle_background_subagents", "speak_status", "speak_text", "start_continuous_conversation",
     "start_wake_word_listening", "stop_continuous_conversation", "stop_wake_word_listening",
-    "wake_model_status", "is_ui_parked", "set_ui_visible", "take_over", "park",
+    "voice_setup_status", "wake_model_status", "is_ui_parked", "set_ui_visible", "take_over", "park",
 ];
 
 /// All a parked phone may do: ask whether it is parked, report whether it is
@@ -441,6 +441,7 @@ async fn dispatch(app: &AppHandle, client: u64, cmd: &str, a: &Value) -> Result<
         "get_config" => ok(config::get_config(app.clone()).await?),
         "get_setting_asset" => ok(config::get_setting_asset(arg(a, "key")?).await?),
         "is_app_ready" => ok(voice::is_app_ready()),
+        "voice_setup_status" => ok(crate::voice::setup_status::voice_setup_status()),
         "get_audio_level" => ok(voice::get_audio_level()),
         "notify_conversation_tts_started" => ok(voice::notify_conversation_tts_started()?),
         "notify_conversation_tts_done" => ok(voice::notify_conversation_tts_done(arg(a, "generation")?)?),

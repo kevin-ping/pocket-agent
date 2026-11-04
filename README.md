@@ -55,7 +55,7 @@ Install Hermes and Pocket Agent on each Mac, then enable the Hermes API computer
 
 ### Voice Pipeline
 
-1. **Press hotkey** (default: `fn`) — macOS CGEventTap captures the global hotkey
+1. **Press hotkey** (default: `RightShift`) — macOS CGEventTap captures the global hotkey
 2. **Recording starts** — pre-warmed cpal Stream Daemon activates instantly (~11ms latency)
 3. **Press hotkey again** — recording stops, WAV saved to temp file
 4. **STT** — faster-whisper transcribes locally (auto language detection, configurable model via `STT_MODEL`)
@@ -388,7 +388,7 @@ Open **Settings** from the tray menu.
 - **Server connection** — API server URL, auth key, and agent name are configured via `.env` only (see `.env.example`)
 - **Mesh avatar** — on/off, zoom and offset with a live preview, a custom `.mavatar` file, and the state → expression / reply emotion mappings — see below.
 - **Avatar image** — optional custom character avatar. Only shown when the mesh avatar is off or unavailable.
-- **Record Key** — capture any key as your push-to-talk hotkey (default: `fn`). Changes take effect immediately.
+- **Record Key** — capture any key as your push-to-talk hotkey (default: `RightShift`; `fn` and other modifiers also work). Changes take effect immediately.
 - **TTS voices** — primary, auxiliary 1, auxiliary 2 (grouped by language)
 - **Fixed language mode** — force LLM to always respond in a specific language
 - **Voice Output** — enable/disable TTS playback. When off, responses are text-only.

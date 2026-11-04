@@ -192,6 +192,7 @@ pub fn run() {
             commands::voice::stop_wake_word_listening,
             commands::voice::is_wake_word_active,
             commands::voice::is_app_ready,
+            voice::setup_status::voice_setup_status,
             commands::voice::start_enroll_recording,
             commands::voice::stop_enroll_recording,
             commands::voice::enroll_speaker,

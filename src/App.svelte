@@ -22,6 +22,7 @@
   import { onBackgroundSubagents, onSpeechDetected, onTurnEnd, onTurnStart, onTurnStep, refreshComputerStatus, settleSubagents } from './lib/stores/status';
   import { STATUS_PHRASES, langFromVoice, detectLang, convLabels, convLabelsLang, type LangKey } from './lib/i18n';
   import { wakeErrorMessage } from './lib/wakeErrors';
+  import { createSetupSequencer, type SetupSnapshot } from './lib/voiceSetup';
 
   // Remote mode (phone WebView over /ui) has no native window.
   const appWindow = isRemote ? null : getCurrentWindow();
@@ -224,6 +225,14 @@
   function showSetupStatus() {
     if (!get(layoutStore).expanded) void layoutStore.expand();
   }
+
+  // Setup states apply in backend order. Entering installing / error opens the
+  // panel once — not on every pip line, so a user who collapses it stays collapsed.
+  const applySetup = createSetupSequencer((s) => {
+    const entering = get(chatStore).voiceSetupState !== s.state;
+    chatStore.setVoiceSetup({ voiceSetupState: s.state, voiceSetupPhase: s.phase, voiceSetupDetail: s.detail });
+    if (entering && (s.state === 'installing' || s.state === 'error')) showSetupStatus();
+  });
 
   /// Start or stop a continuous conversation. Shared by fn-key-down and
   /// fn-key-up: the hotkey state machine alternates which of the two it emits,
@@ -1157,41 +1166,30 @@
       // ─── First-launch PA venv bootstrap (~/.pocket-agent/venv) ───
       // The status panel only renders in the expanded layout; open it so a
       // first-run install or a voice failure is visible.
-      listen('venv-setup-ready', () => {
-        chatStore.setVoiceSetup({ voiceSetupState: 'ready', voiceSetupPhase: '', voiceSetupDetail: '' });
+      listen<{ seq: number }>('venv-setup-ready', (e) => {
+        applySetup({ seq: e.payload.seq, state: 'ready', phase: '', detail: '' });
       }),
-      listen('venv-setup-started', () => {
-        chatStore.setVoiceSetup({ voiceSetupState: 'installing', voiceSetupPhase: '', voiceSetupDetail: '' });
-        showSetupStatus();
+      listen<{ seq: number }>('venv-setup-started', (e) => {
+        applySetup({ seq: e.payload.seq, state: 'installing', phase: '', detail: '' });
       }),
-      listen<{ phase: string; detail: string }>('venv-setup-progress', (e) => {
-        chatStore.setVoiceSetup({
-          voiceSetupState: 'installing',
-          voiceSetupPhase: e.payload.phase,
-          voiceSetupDetail: e.payload.detail ?? '',
-        });
+      listen<{ seq: number; phase: string; detail: string }>('venv-setup-progress', (e) => {
+        applySetup({ seq: e.payload.seq, state: 'installing', phase: e.payload.phase, detail: e.payload.detail ?? '' });
       }),
-      listen('venv-setup-done', () => {
-        chatStore.setVoiceSetup({ voiceSetupState: 'ready', voiceSetupPhase: '', voiceSetupDetail: '' });
+      listen<{ seq: number }>('venv-setup-done', (e) => {
+        applySetup({ seq: e.payload.seq, state: 'ready', phase: '', detail: '' });
       }),
-      listen<{ phase: string; message: string }>('venv-setup-error', (e) => {
-        chatStore.setVoiceSetup({
-          voiceSetupState: 'error',
-          voiceSetupPhase: e.payload.phase,
-          voiceSetupDetail: e.payload.message ?? '',
-        });
-        showSetupStatus();
+      listen<{ seq: number; phase: string; message: string }>('venv-setup-error', (e) => {
+        applySetup({ seq: e.payload.seq, state: 'error', phase: e.payload.phase, detail: e.payload.message ?? '' });
       }),
       // stt-server after setup: slow first start (model download), up, or exited.
-      listen<{ state: 'starting' | 'ready' | 'failed'; message: string }>('voice-service-status', (e) => {
-        if (e.payload.state === 'starting') {
-          chatStore.setVoiceSetup({ voiceSetupState: 'installing', voiceSetupPhase: 'starting-service', voiceSetupDetail: '' });
-          showSetupStatus();
-        } else if (e.payload.state === 'failed') {
-          chatStore.setVoiceSetup({ voiceSetupState: 'error', voiceSetupPhase: 'voice-service', voiceSetupDetail: e.payload.message ?? '' });
-          showSetupStatus();
+      listen<{ seq: number; state: 'starting' | 'ready' | 'failed'; message: string }>('voice-service-status', (e) => {
+        const { seq, state, message } = e.payload;
+        if (state === 'starting') {
+          applySetup({ seq, state: 'installing', phase: 'starting-service', detail: '' });
+        } else if (state === 'failed') {
+          applySetup({ seq, state: 'error', phase: 'voice-service', detail: message ?? '' });
         } else {
-          chatStore.setVoiceSetup({ voiceSetupState: 'ready', voiceSetupPhase: '', voiceSetupDetail: '' });
+          applySetup({ seq, state: 'ready', phase: '', detail: '' });
         }
       }),
 
@@ -1334,6 +1332,8 @@
     }
     await restoreWindowPosition();
     await setupListeners();
+    // Setup events sent before the listeners existed are lost: read the latest state.
+    await invoke<SetupSnapshot>('voice_setup_status').then(applySetup).catch(console.error);
     await setupWindowPositionSave();
     prevWakeEnabled = s.wake_word_enabled;
     unsubSettings = settingsStore.subscribe((cur) => {

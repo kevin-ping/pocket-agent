@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_json::json;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
+
+use super::setup_status;
 
 const VENV_DIR_RELATIVE: &str = ".pocket-agent/venv";
 const VENV_MARKER_RELATIVE: &str = ".pocket-agent/.venv-ready";
@@ -173,18 +175,13 @@ pub fn find_system_python3() -> Result<String, String> {
 }
 
 fn emit_progress(app: &AppHandle, phase: &str, detail: Option<&str>) {
-    let _ = app.emit(
-        "venv-setup-progress",
-        json!({ "phase": phase, "detail": detail.unwrap_or("") }),
-    );
+    let detail = detail.unwrap_or("");
+    setup_status::publish(app, "venv-setup-progress", json!({ "phase": phase, "detail": detail }), "installing", phase, detail);
 }
 
 fn emit_error(app: &AppHandle, phase: &str, message: &str) {
     eprintln!("[venv] {} failed: {}", phase, message);
-    let _ = app.emit(
-        "venv-setup-error",
-        json!({ "phase": phase, "message": message }),
-    );
+    setup_status::publish(app, "venv-setup-error", json!({ "phase": phase, "message": message }), "error", phase, message);
 }
 
 fn run_streaming(
@@ -261,19 +258,19 @@ fn run_streaming(
 /// (interrupted pip install) won't be mistaken for ready on next launch.
 pub fn ensure_venv(app: &AppHandle) -> Result<(), String> {
     if venv_ready() {
-        let _ = app.emit("venv-setup-ready", ());
+        setup_status::publish(app, "venv-setup-ready", json!({}), "ready", "", "");
         return Ok(());
     }
 
     // Marker present but stale: a full install succeeded on an earlier launch.
     let had_previous_install = previous_install(&venv_python_path(), &marker_path());
-    let _ = app.emit("venv-setup-started", ());
+    setup_status::publish(app, "venv-setup-started", json!({}), "installing", "", "");
     // The install takes minutes; show its progress instead of a hidden window.
     crate::voice::stt::reveal_main_window(app, "venv setup");
 
     let requirements = resource_path("requirements-stt.txt");
     if !requirements.exists() {
-        let msg = format!("requirements-stt.txt 缺失: {}", requirements.display());
+        let msg = format!("requirements-stt.txt 缺失: {}。安装包不完整：请重新安装 Pocket Agent(源码运行请在仓库根目录执行 npm run tauri dev)。", requirements.display());
         emit_error(app, "checking-resources", &msg);
         return Err(msg);
     }
@@ -330,7 +327,7 @@ pub fn ensure_venv(app: &AppHandle) -> Result<(), String> {
             // voice down: keep the old install and retry on the next launch.
             if had_previous_install && core_deps_importable(&venv_python_path()) {
                 eprintln!("[venv] dependency update failed ({e}); keeping the previous install, will retry next launch");
-                let _ = app.emit("venv-setup-ready", ());
+                setup_status::publish(app, "venv-setup-ready", json!({}), "ready", "", "");
                 return Ok(());
             }
             let msg = format!(
@@ -354,7 +351,7 @@ pub fn ensure_venv(app: &AppHandle) -> Result<(), String> {
         return Err(msg);
     }
 
-    let _ = app.emit("venv-setup-done", ());
+    setup_status::publish(app, "venv-setup-done", json!({}), "ready", "", "");
     eprintln!("[venv] PA venv ready at {}", venv_root().display());
     Ok(())
 }

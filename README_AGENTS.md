@@ -120,8 +120,9 @@ Then read [HERMES.md](HERMES.md) and carry out its setup steps, such as copying 
 
 ## Step 5: Run Pocket Agent
 
+From the repository root (where Step 2 left you):
+
 ```bash
-cd pocket-agent
 npm run tauri dev
 ```
 

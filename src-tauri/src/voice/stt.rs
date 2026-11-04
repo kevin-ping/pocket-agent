@@ -44,7 +44,20 @@ fn show_main_window(handle: Option<&tauri::AppHandle>, source: &str) {
 /// `failed` with a message telling the user how to recover.
 fn emit_service_status(handle: Option<&tauri::AppHandle>, state: &str, message: &str) {
     if let Some(h) = handle {
-        let _ = h.emit("voice-service-status", serde_json::json!({ "state": state, "message": message }));
+        // Same mapping as the venv-setup-* events: slow start shows as installing.
+        let (setup_state, phase) = match state {
+            "starting" => ("installing", "starting-service"),
+            "failed" => ("error", "voice-service"),
+            _ => ("ready", ""),
+        };
+        crate::voice::setup_status::publish(
+            h,
+            "voice-service-status",
+            serde_json::json!({ "state": state, "message": message }),
+            setup_state,
+            phase,
+            message,
+        );
     }
 }
 
