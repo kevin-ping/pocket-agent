@@ -89,6 +89,21 @@ The gateway does not start a turn when an async delegation finishes; it only sto
 - PA keeps only delegation ids, never the subagent's text; the result reaches the user through Hermes' reply.
 - The page for the details follows the [Pocket Agent skill](#pocket-agent-skill) ("Background research").
 
+## Pocket Agent MCP server (phone camera, switch_device)
+
+PA serves a small MCP server at `http://127.0.0.1:8650/mcp` with four tools: `phone_camera_open`, `phone_camera_snapshot`, `phone_camera_close` and `switch_device`. Register it in the profile PA connects to, then restart the gateway (Hermes reads `tools/list` only at startup, so restart it again whenever PA's tool list changes):
+
+```yaml
+mcp_servers:
+  pocket_agent:
+    url: http://127.0.0.1:8650/mcp
+    headers:
+      Authorization: Bearer ${API_SERVER_KEY}
+    trust: untrusted   # tools without readOnlyHint (phone_camera_open) need approval
+```
+
+Hermes asks for approval only when the server is `trust: untrusted`, and then only for tools without `readOnlyHint`; there is no per-tool allow list. So only `phone_camera_open` asks. Approvals reach PA's approval prompt through `/v1/runs`; turns sent through `/bridge/send` have nobody to approve, and Hermes treats them as denied after its 60-second timeout. PA adds a one-line fact to UI turns while the phone camera is open, and where PA is (phone / parked) while the phone app is connected. Tool results and the full protocol: [docs/API_MANUAL.md](docs/API_MANUAL.md).
+
 ## Reasoning and status on `/v1/runs` (local patch)
 
 PA's reasoning panel needs the model's reasoning in the stream, and its status panel needs Hermes' lifecycle status (e.g. context compaction). `/v1/chat/completions` sends it (`delta.reasoning_content`), but `/v1/runs`, which PA uses for local desktop turns, registers no `reasoning_callback`, so the run stream carries none. Do not switch PA to chat completions to get it back: that endpoint has no stop command, and after PA disconnects Hermes logs `SSE client disconnected; interrupted agent task` but keeps running the turn (seen 2026-11-02: one turn kept driving Chrome for over 20 minutes).

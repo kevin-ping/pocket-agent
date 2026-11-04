@@ -118,6 +118,7 @@ always-on mic → sherpa-onnx KWS (wake phrase)
 - **TTS toggle** — disable voice output for text-only mode
 - **Animated mesh avatar** — the widget circle shows a 2D mesh avatar (xingyin) that blinks and idles, reacts to listening / thinking / speaking, and follows the reply emotion; falls back to the image or CSS avatar if it can't load (see [docs/mesh-avatar.md](docs/mesh-avatar.md))
 - **Compact widget** — 220x360px always-on-top window, dark sci-fi aesthetic
+- **Phone terminal** — an Android phone on the same LAN can be PA's screen, microphone and speaker (`android/`); the desktop window hides while the phone drives. Hermes can open, flip and read the phone camera and move PA between the phone and the Mac by voice (`switch_device`), through PA's own MCP server
 - **macOS native** — global hotkey via CGEventTap, CoreAudio recording, menu bar tray
 
 ---
@@ -129,6 +130,8 @@ Pocket Agent runs a local HTTP server on port `8650`.
 - **POST /push** — push message for TTS playback
 - **POST /bridge/send** — bridge third-party apps to Hermes
 - **GET /health** — health check
+- **GET /ui/, WS /ui/ws, WS /audio** — phone terminal (PA's frontend, commands / events, and mic / speaker audio)
+- **POST /mcp** — MCP server for Hermes: `phone_camera_open` / `phone_camera_snapshot` / `phone_camera_close` / `switch_device`
 
 See [docs/API_MANUAL.md](docs/API_MANUAL.md) for full API details.
 
@@ -176,6 +179,7 @@ Pocket Agent is a local desktop client. Please understand these boundaries:
 - **Microphone access** — audio is captured via CoreAudio and processed **entirely locally** by faster-whisper. No audio data leaves your machine for STT.
 - **Wake engine on macOS older than 13.4** — the stock sherpa-onnx wheel cannot load there, so on first launch PA downloads a compatible build (sherpa-onnx 1.12.26 + onnxruntime 1.19.2) from this project's GitHub Release `sherpa-compat-1.12.26-ort1.19.2` over HTTPS. The archive's SHA256 is pinned in the source and checked before extraction; only the two expected library files are installed into PA's venv. The download runs in the background: the rest of PA starts normally, and wake word / voiceprint become available once the voice service reloads the new build while idle. Newer macOS versions never make this request. The build is reproducible with `scripts/build-sherpa-compat.sh`.
 - **Avatar** — the mesh avatar is bundled with the app and loaded from the app's own origin; it makes no network requests. A custom `.mavatar` is picked from a local file and stored in the settings database (zip header and 10 MB limit checked).
+- **Phone terminal** — `/ui/ws`, `/audio` and `/mcp` refuse every request when `API_SERVER_KEY` is not set. Keep port 8650 on the LAN and never port-forward it: a `/ui` client can approve computer actions on the Mac. Camera frames stay in memory and are never written to disk; opening the camera needs approval in Hermes (`trust: untrusted`, see [docs/API_MANUAL.md](docs/API_MANUAL.md)).
 - **Conversation persistence** — sessions are stored in the configured gateway (Hermes: `~/.hermes/sessions/`, OpenClaw: `~/.openclaw/agents/<agent>/sessions/`). These contain full conversation text. Consider disk encryption.
 
 ### Desktop Interaction
@@ -408,6 +412,7 @@ pocket-agent/
 │       │   ├── Character.svelte       # Character animation
 │       │   ├── ChatPanel.svelte       # Chat input + message display
 │       │   ├── ComputerApproval.svelte # Approval prompt for computer_use actions
+│       │   ├── mobile/                # Phone layout (MobileLayout / MobileAvatar / MobileParked)
 │       │   ├── BreakConfirmModal.svelte
 │       │   ├── ContextMenu.svelte / CustomSelect.svelte / Icon.svelte
 │       │   ├── DialogBox.svelte       # Dialog bubble with typewriter effect
@@ -415,6 +420,7 @@ pocket-agent/
 │       │   ├── StatusPanel.svelte     # Thinking steps & status display
 │       │   └── settings/              # Settings page sections
 │       ├── stores/                    # chat / character / layout / settings
+│       ├── ipc.ts                     # Tauri invoke/listen, or the /ui/ws socket on the phone
 │       └── i18n.ts, settingsI18n.ts   # Language detection + settings i18n
 ├── src-tauri/                    # Rust backend
 │   ├── Cargo.toml                # Rust dependencies (incl. rusqlite)
@@ -430,7 +436,10 @@ pocket-agent/
 │       ├── api/
 │       │   ├── client.rs         # Gateway SSE client
 │       │   ├── runs.rs           # Hermes /v1/runs (tool events, approvals, stop)
-│       │   └── server.rs         # Local HTTP API :8650 (/push, /bridge/send, /health)
+│       │   ├── subagents.rs      # Background subagent completion polling
+│       │   ├── remote.rs         # Phone terminal: /ui, /ui/ws, /audio, standby, switch_device
+│       │   ├── mcp.rs            # MCP server for Hermes (phone camera, switch_device)
+│       │   └── server.rs         # Local HTTP API :8650 (routes)
 │       ├── commands/
 │       │   ├── chat.rs           # send_message: SSE → TTS → emit
 │       │   ├── computer.rs       # Desktop status + COMPUTER_HINT prompt
@@ -445,10 +454,12 @@ pocket-agent/
 │           ├── sherpa_wake.rs    # Wake-word (KWS) listener lifecycle
 │           ├── wake_window.rs    # Wake audio windowing / VAD submission
 │           ├── conversation.rs   # Continuous conversation state machine + barge-in
+│           ├── remote.rs         # Phone audio source / sink + camera state
 │           └── venv.rs           # Managed Python venv (~/.pocket-agent/venv)
+├── android/                      # Android shell app for the phone terminal (Kotlin)
 ├── public/avatars/               # Bundled mesh avatar (xingyin.mavatar)
 ├── docs/                         # computer-interaction.md, mesh-avatar.md, API_MANUAL.md
-├── scripts/                      # dev + voice test scripts
+├── scripts/                      # dev + voice test scripts (phone_sim.py: fake phone on /audio)
 ├── assets/media/                 # Demo videos + screenshots
 ├── .env.example                  # Environment template
 ├── HERMES.md                     # Hermes tuning for PA (latency, agent cursor)
