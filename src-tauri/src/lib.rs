@@ -1,4 +1,5 @@
 mod api;
+mod platform;
 mod commands;
 mod voice;
 
@@ -92,21 +93,25 @@ pub fn run() {
                 });
             }
             // ── macOS top menu bar (app name next to Apple logo) ──
-            use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
-            let about_item = PredefinedMenuItem::about(app, None, None)?;
-            let sep = PredefinedMenuItem::separator(app)?;
-            let app_settings = MenuItemBuilder::with_id("app-settings", "Settings…").build(app)?;
-            let sep2 = PredefinedMenuItem::separator(app)?;
-            let quit_item = PredefinedMenuItem::quit(app, None)?;
-            let app_submenu = Submenu::with_items(app, "Pocket Agent", true, &[&about_item, &sep, &app_settings, &sep2, &quit_item])?;
-            let menu = Menu::with_items(app, &[&app_submenu])?;
-            app.set_menu(menu)?;
+            // Windows/Linux would put this bar inside every window, so macOS only.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
+                let about_item = PredefinedMenuItem::about(app, None, None)?;
+                let sep = PredefinedMenuItem::separator(app)?;
+                let app_settings = MenuItemBuilder::with_id("app-settings", "Settings…").build(app)?;
+                let sep2 = PredefinedMenuItem::separator(app)?;
+                let quit_item = PredefinedMenuItem::quit(app, None)?;
+                let app_submenu = Submenu::with_items(app, "Pocket Agent", true, &[&about_item, &sep, &app_settings, &sep2, &quit_item])?;
+                let menu = Menu::with_items(app, &[&app_submenu])?;
+                app.set_menu(menu)?;
 
-            app.on_menu_event(move |app, event| {
-                if event.id().as_ref() == "app-settings" {
-                    let _ = commands::config::open_settings_window(app.clone());
-                }
-            });
+                app.on_menu_event(move |app, event| {
+                    if event.id().as_ref() == "app-settings" {
+                        let _ = commands::config::open_settings_window(app.clone());
+                    }
+                });
+            }
 
             // ── Tray icon (right side of menu bar) ──
             let tray_settings = MenuItemBuilder::with_id("tray-settings", "Settings…").build(app)?;

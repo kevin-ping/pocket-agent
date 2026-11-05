@@ -674,11 +674,14 @@ fn spawn_transcribe(
     std::thread::Builder::new()
         .name("conv-transcribe".into())
         .spawn(move || {
-            let path = format!(
-                "/tmp/pocket-agent-conversation-{}-{}.wav",
-                std::process::id(),
-                READY_ID.fetch_add(1, Ordering::Relaxed)
-            );
+            let path = std::env::temp_dir()
+                .join(format!(
+                    "pocket-agent-conversation-{}-{}.wav",
+                    std::process::id(),
+                    READY_ID.fetch_add(1, Ordering::Relaxed)
+                ))
+                .to_string_lossy()
+                .into_owned();
             let wav_result = write_wav(&samples, sample_rate, &path);
             let wav_path = match wav_result {
                 Ok(()) => path.as_str(),

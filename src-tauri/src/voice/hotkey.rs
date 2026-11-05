@@ -31,19 +31,23 @@ static HOTKEY_CODE: AtomicI64 = AtomicI64::new(60);
 
 /// Tracks whether a modifier-key hotkey (e.g. RightShift) is currently held down
 /// Prevents the release (flags changed) from toggling recording off immediately
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 static MODIFIER_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// After capturing a modifier hotkey, swallow the very next FLAGS_CHANGED release event
 /// so it doesn't immediately toggle recording or poison MODIFIER_HELD state.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 static SUPPRESS_CAPTURE_RELEASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// macOS CGEventTap handle stored globally so the callback can re-enable the tap
 /// after kCGEventTapDisabledByTimeout / kCGEventTapDisabledByUserInput.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 static EVENT_TAP_PTR: AtomicUsize = AtomicUsize::new(0);
 
 /// When a modifier hotkey press is handled via FLAGS_CHANGED, some environments
 /// (notably SSH-launched app sessions) also deliver an immediate KEY_DOWN for the
 /// same physical press. Swallow that one duplicate to avoid start-then-stop.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 static SUPPRESS_NEXT_KEYDOWN: AtomicBool = AtomicBool::new(false);
 
 /// Double-click detection: timestamp of last hotkey press (in milliseconds)
@@ -493,9 +497,19 @@ pub fn poll_capture() -> Option<(i64, String)> {
     }
 }
 
-#[cfg(target_os = "macos")]
+/// Display name for a stored hotkey code. Codes are macOS virtual keycodes on
+/// every platform (the settings file keeps that format), so Windows maps its keys
+/// onto the same numbers (see `rdev_impl::mac_code`) and only some names differ.
 fn keycode_name(code: i64) -> &'static str {
     // Note: returns "" for unknown keys — poll_capture converts to Key(code) fallback
+    #[cfg(not(target_os = "macos"))]
+    match code {
+        55 => return "Win", 54 => return "RightWin",
+        58 => return "Alt", 61 => return "RightAlt",
+        59 => return "Ctrl", 62 => return "RightCtrl",
+        51 => return "Backspace", 117 => return "Delete",
+        _ => {}
+    }
     match code {
         0 => "A", 1 => "S", 2 => "D", 3 => "F",
         4 => "H", 5 => "G", 6 => "Z", 7 => "X",
@@ -556,16 +570,105 @@ pub fn check_accessibility(app: &AppHandle) {
 }
 
 // ─── Non-macOS platform support ─────────────────────────────────────────
+//
+// rdev installs low-level keyboard hooks (WH_KEYBOARD_LL on Windows). Behaviour
+// mirrors the macOS tap: a press toggles recording (or a double press in
+// double-click mode), Escape cancels, and capture records the next key. Held
+// keys auto-repeat KeyPress on Windows, so a key counts only on its first press
+// until it is released. Known limit: while an elevated (administrator) window
+// is in the foreground, a non-elevated PA does not receive keys.
 
 #[cfg(not(target_os = "macos"))]
 mod rdev_impl {
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tauri::{AppHandle, Emitter};
 
-    struct HotkeyState {
-        app: AppHandle,
-        is_active: Arc<AtomicBool>,
+    const ESC_KEYCODE: i64 = 53;
+
+    /// rdev key → macOS virtual keycode (the format stored in settings).
+    pub fn mac_code(key: rdev::Key) -> Option<i64> {
+        use rdev::Key::*;
+        Some(match key {
+            KeyA => 0, KeyS => 1, KeyD => 2, KeyF => 3, KeyH => 4, KeyG => 5,
+            KeyZ => 6, KeyX => 7, KeyC => 8, KeyV => 9, KeyB => 11, KeyQ => 12,
+            KeyW => 13, KeyE => 14, KeyR => 15, KeyY => 16, KeyT => 17, KeyO => 31,
+            KeyU => 32, KeyI => 34, KeyP => 35, KeyL => 37, KeyJ => 38, KeyK => 40,
+            KeyN => 45, KeyM => 46,
+            Num1 => 18, Num2 => 19, Num3 => 20, Num4 => 21, Num5 => 23, Num6 => 22,
+            Num7 => 26, Num8 => 28, Num9 => 25, Num0 => 29,
+            Return => 36, Tab => 48, Space => 49, Backspace => 51, Escape => 53,
+            Delete => 117,
+            BackQuote => 50, Minus => 27, Equal => 24, LeftBracket => 33,
+            RightBracket => 30, BackSlash => 42, SemiColon => 41, Quote => 39,
+            Comma => 43, Dot => 47, Slash => 44,
+            MetaLeft => 55, MetaRight => 54, ShiftLeft => 56, ShiftRight => 60,
+            CapsLock => 57, Alt => 58, AltGr => 61, ControlLeft => 59, ControlRight => 62,
+            F1 => 122, F2 => 120, F3 => 99, F4 => 118, F5 => 96, F6 => 97,
+            F7 => 98, F8 => 100, F9 => 101, F10 => 109, F11 => 103, F12 => 111,
+            LeftArrow => 123, RightArrow => 124, DownArrow => 125, UpArrow => 126,
+            PageUp => 116, PageDown => 121, End => 119, Home => 115,
+            _ => return None,
+        })
+    }
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    fn toggle(app: &AppHandle, is_active: &AtomicBool, mode: &str) {
+        if !is_active.load(Ordering::SeqCst) {
+            if is_active.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                eprintln!("[hotkey] {} mode: start recording", mode);
+                let _ = app.emit("fn-key-down", ());
+            }
+        } else if is_active.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            eprintln!("[hotkey] {} mode: stop recording", mode);
+            let _ = app.emit("fn-key-up", ());
+        }
+    }
+
+    fn on_press(app: &AppHandle, is_active: &AtomicBool, code: i64) {
+        if super::CAPTURING.load(Ordering::SeqCst) {
+            super::CAPTURING.store(false, Ordering::SeqCst);
+            if code == ESC_KEYCODE {
+                super::CAPTURED_KEY.store(-1, Ordering::SeqCst);
+                let _ = app.emit("hotkey-captured", (-1i64, "escape"));
+                eprintln!("[capture] escape pressed, cancelled");
+            } else {
+                super::CAPTURED_KEY.store(code, Ordering::SeqCst);
+                let _ = app.emit("hotkey-captured", (code, super::keycode_name(code)));
+                eprintln!("[capture] keycode={} stored + emitted", code);
+            }
+            return;
+        }
+
+        if code == ESC_KEYCODE {
+            if is_active.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                eprintln!("[hotkey] escape pressed, cancelling recording");
+                crate::commands::chat::stop_audio_queue("escape key");
+                let _ = app.emit("voice-cancel", ());
+            }
+            return;
+        }
+
+        if code != super::HOTKEY_CODE.load(Ordering::SeqCst) {
+            return;
+        }
+
+        if super::DOUBLE_CLICK_MODE.load(Ordering::SeqCst) {
+            let now = now_ms();
+            let last = super::LAST_HOTKEY_PRESS.swap(now, Ordering::SeqCst);
+            if last > 0 && now.saturating_sub(last) < super::DOUBLE_CLICK_THRESHOLD_MS {
+                toggle(app, is_active, "double-click");
+            }
+        } else {
+            toggle(app, is_active, "single-click");
+        }
     }
 
     pub fn spawn_hotkey_thread(app: AppHandle) {
@@ -575,52 +678,86 @@ mod rdev_impl {
                 let is_active = super::HOTKEY_ACTIVE_STATE
                     .get_or_init(|| Arc::new(AtomicBool::new(false)))
                     .clone();
-                let state = Arc::new(HotkeyState {
-                    app,
-                    is_active,
-                });
+                let held: Mutex<HashSet<i64>> = Mutex::new(HashSet::new());
 
-                let callback = move |event: rdev::Event| {
-                    if let rdev::EventType::KeyPress(key) = event.event_type {
-                        let code = key as i64;
-                        if code == super::HOTKEY_CODE.load(Ordering::SeqCst) {
-                            let s = state.clone();
-                            if !s.is_active.load(Ordering::SeqCst) {
-                                s.is_active.store(true, Ordering::SeqCst);
-                                let _ = s.app.emit("fn-key-down", ());
-                            } else {
-                                s.is_active.store(false, Ordering::SeqCst);
-                                let _ = s.app.emit("fn-key-up", ());
-                            }
-                        } else if code == 53 {
-                            // Escape
-                            if state.is_active.load(Ordering::SeqCst) {
-                                state.is_active.store(false, Ordering::SeqCst);
-                                crate::commands::chat::stop_audio_queue("escape key");
-                                let _ = state.app.emit("voice-cancel", ());
-                            }
+                let callback = move |event: rdev::Event| match event.event_type {
+                    rdev::EventType::KeyPress(key) => {
+                        let Some(code) = mac_code(key) else { return };
+                        // Auto-repeat: only the first press of a held key counts.
+                        if !held.lock().unwrap().insert(code) {
+                            return;
+                        }
+                        on_press(&app, &is_active, code);
+                    }
+                    rdev::EventType::KeyRelease(key) => {
+                        if let Some(code) = mac_code(key) {
+                            held.lock().unwrap().remove(&code);
                         }
                     }
+                    _ => {}
                 };
 
-                match rdev::listen(callback) {
-                    Ok(()) => {}
-                    Err(e) => eprintln!("[hotkey] rdev listen error: {:?}", e),
+                eprintln!(
+                    "[hotkey] listening for hotkey (code={}) via rdev...",
+                    super::HOTKEY_CODE.load(Ordering::SeqCst)
+                );
+                if let Err(e) = rdev::listen(callback) {
+                    eprintln!("[hotkey] rdev listen error: {:?}", e);
                 }
             })
             .expect("failed to spawn hotkey thread");
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::mac_code;
+
+        #[test]
+        fn default_hotkey_and_escape_map_to_mac_codes() {
+            assert_eq!(mac_code(rdev::Key::ShiftRight), Some(60));
+            assert_eq!(mac_code(rdev::Key::Escape), Some(super::ESC_KEYCODE));
+            assert_eq!(mac_code(rdev::Key::Unknown(0)), None);
+        }
+
+        #[test]
+        fn every_mapped_key_has_a_name() {
+            use rdev::Key::*;
+            for k in [ShiftLeft, ShiftRight, ControlRight, AltGr, MetaLeft, F12, KeyA, Num0, Delete] {
+                let code = mac_code(k).unwrap();
+                assert!(!crate::voice::hotkey::keycode_name(code).is_empty(), "{:?}", k);
+            }
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn spawn_hotkey_listener(app: AppHandle, _hotkey_code: i64) {
+pub fn spawn_hotkey_listener(app: AppHandle, hotkey_code: i64) {
+    HOTKEY_CODE.store(hotkey_code, Ordering::SeqCst);
     rdev_impl::spawn_hotkey_thread(app);
 }
 
+/// Start capture mode — the rdev callback stores the next key in CAPTURED_KEY.
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-pub fn capture_hotkey() -> Result<(i64, String), String> {
-    Err("capture not supported on this platform".to_string())
+pub fn start_capture() {
+    CAPTURED_KEY.store(-1, Ordering::SeqCst);
+    CAPTURING.store(true, Ordering::SeqCst);
+    eprintln!("[capture] capture mode activated, waiting for key...");
+}
+
+/// Poll for the captured key (same contract as the macOS version).
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub fn poll_capture() -> Option<(i64, String)> {
+    let kc = CAPTURED_KEY.load(Ordering::SeqCst);
+    if kc >= 0 {
+        CAPTURING.store(false, Ordering::SeqCst);
+        let name = keycode_name(kc);
+        let display = if name.is_empty() { format!("Key({})", kc) } else { name.to_string() };
+        Some((kc, display))
+    } else {
+        None
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
