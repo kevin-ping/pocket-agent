@@ -104,6 +104,57 @@ mcp_servers:
 
 Hermes asks for approval only when the server is `trust: untrusted`, and then only for tools without `readOnlyHint`; there is no per-tool allow list, and Hermes MCP approvals never remember "allow for this session" / "always allow" — every call asks again. So all four tools carry `readOnlyHint` and none asks; `trust: untrusted` stays as a safety net for future tools without the hint. Approvals reach PA's approval prompt through `/v1/runs`; turns sent through `/bridge/send` have nobody to approve, and Hermes treats them as denied after its 60-second timeout. PA adds a one-line fact to UI turns while the phone camera is open, and, once the phone app has connected in this PA run, where PA is right now (on the phone / on this computer with the phone on standby / on this computer with the phone app not connected), marked as the live state that overrides earlier device claims in the conversation. Tool results and the full protocol: [docs/API_MANUAL.md](docs/API_MANUAL.md).
 
+## Optional: agent-desktop MCP server (background desktop control)
+
+> Third-party tool: [agent-desktop](https://github.com/vercel-labs/agent-desktop) by Vercel Labs, Apache-2.0. Not bundled or modified by Pocket Agent; install it yourself. Docs: <https://agent-browser.dev/desktop>.
+
+agent-desktop (macOS 13+) reads each app's accessibility tree and acts on element refs. Clicks and typing are delivered without moving the pointer or taking focus, and it can start an app that isn't running. It sits next to `computer_use`; Hermes picks between them, PA's prompt names neither. Tested 2026-11-05 with agent-desktop 1.2.0. Comparison and caveats: [docs/computer-interaction.md](docs/computer-interaction.md#可选agent-desktop后台操作不抢焦点).
+
+1. `brew install agent-desktop`.
+2. Build the launcher below. The gateway runs as launchd → osascript → Python → MCP child, and macOS charges the Accessibility check to `/usr/bin/osascript`, so agent-desktop gets `PERM_DENIED` even with its own grant. The launcher starts it as its own responsible process. **Don't grant Accessibility to osascript instead**: every osascript script on the Mac would get it.
+
+   ```c
+   // ~/.hermes/tools/disclaim/disclaim.c — build: clang -O2 -o disclaim disclaim.c
+   #include <spawn.h>
+   #include <stdio.h>
+   #include <sys/wait.h>
+   extern char **environ;
+   int responsibility_spawnattrs_setdisclaim(posix_spawnattr_t *attrs, int disclaim);
+   int main(int argc, char **argv) {
+       if (argc < 2) { fprintf(stderr, "usage: disclaim <program> [args...]\n"); return 2; }
+       posix_spawnattr_t attr;
+       posix_spawnattr_init(&attr);
+       responsibility_spawnattrs_setdisclaim(&attr, 1);
+       pid_t pid;
+       int err = posix_spawn(&pid, argv[1], NULL, &attr, argv + 1, environ);
+       if (err) { perror("posix_spawn"); return 127; }
+       int status;
+       waitpid(pid, &status, 0);
+       return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+   }
+   ```
+
+3. System Settings → Privacy & Security → Accessibility: turn on agent-desktop by its **real path**, `/opt/homebrew/Cellar/agent-desktop/<version>/bin/agent-desktop`. The `/opt/homebrew/bin/agent-desktop` symlink shows up as a separate entry with the same name, and turning only that one on has no effect. The binary is ad-hoc signed and the path changes with every `brew upgrade`, so grant it again after upgrading.
+4. Register it in the profile PA connects to and restart the gateway:
+
+   ```yaml
+   mcp_servers:
+     agent_desktop:
+       command: /Users/YOU/.hermes/tools/disclaim/disclaim
+       args: [/opt/homebrew/bin/agent-desktop, mcp]
+       enabled: true
+       trust: full   # see below
+       tools:
+         include: [desktop_snapshot, desktop_find, desktop_get, desktop_click, desktop_type,
+                   desktop_set_value, desktop_press, desktop_scroll, desktop_select, desktop_launch,
+                   desktop_list_apps, desktop_list_windows, desktop_focus_window, desktop_wait]
+   ```
+
+   None of its 67 tools carries `readOnlyHint`, so under `trust: untrusted` every call, even a snapshot, asks for approval, and "always allow" is not remembered (see above). `trust: full` means clicks and typing run without approval. `tools.include` registers 14 tools instead of 67 (about 13 KB of tool schemas instead of 41 KB).
+5. Check: `launchctl submit -l ad.check -- /usr/bin/osascript -l JavaScript -e "ObjC.import('stdlib'); \$.system('$HOME/.hermes/tools/disclaim/disclaim /opt/homebrew/bin/agent-desktop status > /tmp/ad.json')"`, then `launchctl remove ad.check`; `/tmp/ad.json` must show `"accessibility":{"state":"granted"}`. In `logs/agent.log`, its calls show up as `mcp__agent_desktop__desktop_*`.
+
+To turn it off, set `enabled: false` and restart the gateway.
+
 ## Reasoning and status on `/v1/runs` (local patch)
 
 PA's reasoning panel needs the model's reasoning in the stream, and its status panel needs Hermes' lifecycle status (e.g. context compaction). `/v1/chat/completions` sends it (`delta.reasoning_content`), but `/v1/runs`, which PA uses for local desktop turns, registers no `reasoning_callback`, so the run stream carries none. Do not switch PA to chat completions to get it back: that endpoint has no stop command, and after PA disconnects Hermes logs `SSE client disconnected; interrupted agent task` but keeps running the turn (seen 2026-11-02: one turn kept driving Chrome for over 20 minutes).

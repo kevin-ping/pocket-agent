@@ -630,6 +630,12 @@ MIT
 
 - Mesh avatar runtime: [mesh-avatar-element / mesh-avatar](https://github.com/shinshin86/mesh-avatar-studio) (MIT)
 
+### Optional Third-Party Tools
+
+Not bundled with Pocket Agent; you install them yourself if you want them.
+
+- Background desktop control for Hermes: [agent-desktop](https://github.com/vercel-labs/agent-desktop) by Vercel Labs (Apache-2.0), tested with 1.2.0. Installed with Homebrew and registered as a Hermes MCP server; Pocket Agent does not ship or modify it. Setup: [HERMES.md](HERMES.md#optional-agent-desktop-mcp-server-background-desktop-control).
+
 ### Third-Party Audio
 
 - 提示音：Sound Effect by DRAGON-STUDIO from Pixabay

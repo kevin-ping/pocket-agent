@@ -67,7 +67,31 @@ Pocket Agent 的受支持部署方式是 **Pocket Agent、Hermes 和 CuaDriver �
 
 2026-10-28 起，提示词不再包含「无窗口即停」和观察次数上限，这些判断交给 Hermes。
 
-在 `computer_use` 内部根治，需要 Hermes 把 `launch_app` 暴露为 action，记于 `.auto-work/roadmap.md` 的 `ROAD-CU1`。
+在 `computer_use` 内部根治，需要 Hermes 把 `launch_app` 暴露为 action，记于 `.auto-work/roadmap.md` 的 `ROAD-CU1`。另一条路是下一节的 agent-desktop,它的 `desktop_launch` 可以直接启动没在运行的应用。
+
+## 可选:agent-desktop(后台操作、不抢焦点)
+
+> 第三方工具:[agent-desktop](https://github.com/vercel-labs/agent-desktop),作者 Vercel Labs,Apache-2.0 协议,文档见 <https://agent-browser.dev/desktop>。PA 不打包、不修改它,需要的话由你自己安装。
+
+agent-desktop 作为 Hermes 的 MCP 服务器,和 `computer_use` 并存,由 Hermes 自己选用哪一个。PA 提示词不点名任何工具,PA 代码也不需要改动。安装和配置步骤见 [HERMES.md](../HERMES.md#optional-agent-desktop-mcp-server-background-desktop-control)。需要 macOS 13 及以上;更老的系统只能用 `computer_use`。
+
+2026-11-05 在本机实测(agent-desktop 1.2.0、Hermes `/v1/runs`、PA 的 `COMPUTER_HINT`):
+
+| 项目 | 结果 |
+| --- | --- |
+| 启动没在运行的应用 | `launch com.apple.TextEdit` 8/8 成功,每次约 0.64 秒。`--activate` 要配 bundle id;配应用名每次都报 `APP_NOT_FOUND` |
+| 不打扰用户 | 按元素编号点击约 0.27 秒、输入约 0.10 秒,前台应用保持不变,中文输入正确。双击、悬停、拖动在默认模式下会被拒绝 |
+| 「打开文本编辑,新建文稿,写一句话」 | 用 agent-desktop 67 秒(7 次模型往返,工具本身约 4 秒;Hermes 默认不加载所有工具,模型要先 `tool_search` / `tool_describe` 找到它,多出 2 次往返);只开 `computer_use` 时 32.7 秒(Hermes 用 `execute_code` 启动应用,再用 `computer_use` 输入)。两边各只跑了 1 次 |
+
+取舍:
+
+- **它的长处是不抢焦点**。点击和输入不移动鼠标、不切前台,适合你自己正在用电脑、PA 在旁边操作的场景。「启动没在运行的应用」在 Hermes 可以用 `terminal` / `execute_code` 之后,已经不是它独有的了。
+- **它的代价是慢**。上面这个任务比 `computer_use` 慢一倍,主要多在模型往返上。
+- **审批**:它的 67 个工具都没有标「只读」,按 `trust: untrusted` 接入时每次调用都要审批,所以本机配置为 `trust: full`,也就是它的点击和输入不再经过审批。这是用户 2026-11-05 选定的取舍,并用白名单只开放 14 个常用工具。
+- **权限**:「辅助功能」要授给 agent-desktop 的实际文件路径(Homebrew 的 Cellar 路径),而且要经 HERMES.md 里的 disclaim 启动器运行。网关下的权限会被算到 osascript 头上,**不要给 osascript 授权**。每次 `brew upgrade` 之后都要重新授权。
+- 截图、快照、剪贴板内容都会发给模型,隐私影响和 `computer_use` 相同。
+
+## 检查结果的含义
 
 ## 检查结果的含义
 
