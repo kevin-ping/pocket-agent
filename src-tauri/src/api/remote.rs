@@ -745,7 +745,8 @@ fn on_phone_message(conn: u64, message: PhoneMessage) -> bool {
 /// `jpeg` = camera unavailable).
 /// Downstream: `{"type":"play","seq":N}` then one binary frame (the sentence's
 /// mp3), `{"type":"clear"}` (drop everything queued and stop now), or
-/// `{"type":"snapshot","id":N}` (send the current camera frame).
+/// `{"type":"snapshot","id":N}` (send the current camera frame), or
+/// `{"type":"wake"}` (the wake word was heard: light the screen, show the page).
 async fn audio_session(app: AppHandle, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Outbound>();
@@ -770,6 +771,7 @@ async fn audio_session(app: AppHandle, socket: WebSocket) {
                     Some(Outbound::Snapshot { id }) => {
                         sink.send(Message::Text(json!({ "type": "snapshot", "id": id }).to_string().into())).await
                     }
+                    Some(Outbound::Wake) => sink.send(Message::Text(r#"{"type":"wake"}"#.into())).await,
                     None => break,
                 },
                 _ = ping.tick() => sink.send(Message::Ping(Default::default())).await,

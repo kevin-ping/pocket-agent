@@ -108,6 +108,7 @@ pub enum Outbound {
     Play { seq: u64, audio: Vec<u8> },
     Clear,
     Snapshot { id: u64 },
+    Wake,
 }
 
 type Phone = Option<(u64, tokio::sync::mpsc::UnboundedSender<Outbound>)>;
@@ -260,6 +261,18 @@ pub fn clear() {
     *pending = None;
     drop(pending);
     PLAYBACK_CHANGED.notify_all();
+}
+
+/// The owner's wake word was heard (BUG-DEV3): the phone turns its screen on
+/// and brings the page forward, since Chromium freezes a hidden page and the
+/// conversation logic lives there. Only when the phone is the audio source,
+/// i.e. it heard the word; a desktop-driven PA never lights the phone.
+pub fn wake_phone() -> bool {
+    let outbound = lock(&OUTBOUND);
+    if !is_online() {
+        return false;
+    }
+    outbound.as_ref().map(|(_, tx)| tx.send(Outbound::Wake).is_ok()).unwrap_or(false)
 }
 
 // ── Camera snapshot (FEAT-CAM1) ──────────────────────────────────────────────
@@ -773,6 +786,22 @@ mod tests {
         detach_capture(id);
         detach_phone(again);
         crate::api::remote::set_ui_remote_active(false);
+    }
+
+    #[test]
+    fn wake_reaches_the_phone_only_while_it_is_the_audio_source() {
+        let _t = lock(&TEST_LOCK);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let conn = attach_phone(tx);
+        ONLINE.store(false, Ordering::Release);
+        assert!(!wake_phone(), "local mic heard it: the phone stays dark");
+        assert!(rx.try_recv().is_err());
+        ONLINE.store(true, Ordering::Release);
+        assert!(wake_phone());
+        assert!(matches!(rx.try_recv(), Ok(Outbound::Wake)));
+        detach_phone(conn);
+        assert!(!wake_phone(), "no phone");
+        ONLINE.store(false, Ordering::Release);
     }
 
     #[test]

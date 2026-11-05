@@ -377,6 +377,7 @@ fn wake_http_worker_loop(
                     WAKE_PAUSED.store(true, Ordering::Release);
                     crate::voice::hotkey::set_active_state(true);
                     let _ = app.emit("fn-key-down", ());
+                    crate::voice::remote::wake_phone();
                     pcm.clear();
                     break;
                 }

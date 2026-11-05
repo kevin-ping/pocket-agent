@@ -52,9 +52,15 @@ class MainActivity : Activity() {
     private data class CameraRequest(val left: Int, val top: Int, val width: Int, val height: Int, val front: Boolean)
 
     // Plugged in → keep the screen on (it doubles as a desk display).
+    private var plugged = false
     private val powerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) = keepScreenOnWhenPlugged(intent)
     }
+    // A conversation is going on (the wake word or PA speaking within VOICE_WINDOW_MS):
+    // the screen stays on, since Chromium freezes the page once the activity stops.
+    private var voiceWindow = false
+    // From AudioService: a stopped activity has to be brought forward for the page to run.
+    private val voiceActive: (Boolean) -> Unit = { wake -> voiceActive(wake, bringForward = wake && !resumed) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,6 +68,13 @@ class MainActivity : Activity() {
             ?.let { keepScreenOnWhenPlugged(it) }
         if (Config.load(this) == null) showSettings() else start()
         AudioService.onDisconnect = disconnect
+        AudioService.onVoiceActive = voiceActive
+        if (intent.getBooleanExtra(EXTRA_WAKE, false)) voiceActive(wake = true, bringForward = false)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_WAKE, false)) voiceActive(wake = true, bringForward = false)
     }
 
     override fun onResume() {
@@ -86,10 +99,14 @@ class MainActivity : Activity() {
     override fun onStop() {
         super.onStop()
         stopCamera()
+        // Power button / Home: next time the lock screen shows as usual.
+        setShowWhenLocked(false)
+        setTurnScreenOn(false)
     }
 
     override fun onDestroy() {
         if (AudioService.onDisconnect === disconnect) AudioService.onDisconnect = null
+        if (AudioService.onVoiceActive === voiceActive) AudioService.onVoiceActive = null
         camera?.close()
         unregisterReceiver(powerReceiver)
         handler.removeCallbacksAndMessages(null)
@@ -103,9 +120,36 @@ class MainActivity : Activity() {
     }
 
     private fun keepScreenOnWhenPlugged(battery: Intent) {
-        val plugged = battery.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
-        if (plugged) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        plugged = battery.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
+        updateKeepScreenOn()
+    }
+
+    private fun updateKeepScreenOn() {
+        if (plugged || voiceWindow) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    /**
+     * PA heard the wake word (`wake`) or is speaking: keep the screen on for
+     * VOICE_WINDOW_MS more. The wake word also lights the screen and shows the
+     * page over the lock screen (user's choice, 2026-11-05) — only for this
+     * window, so the power button still leads to the lock screen.
+     */
+    private fun voiceActive(wake: Boolean, bringForward: Boolean) {
+        if (wake) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
+        if (bringForward) startActivity(wakeIntent(this))
+        voiceWindow = true
+        updateKeepScreenOn()
+        handler.removeCallbacksAndMessages(VOICE)
+        handler.postDelayed({
+            voiceWindow = false
+            updateKeepScreenOn()
+            setShowWhenLocked(false)
+            setTurnScreenOn(false)
+        }, VOICE, VOICE_WINDOW_MS)
     }
 
     private fun start() {
@@ -299,10 +343,20 @@ class MainActivity : Activity() {
         })
     }
 
-    private companion object {
-        const val REQUEST_MIC = 1
-        const val REQUEST_CAMERA = 2
-        const val RETRY_MS = 3000L
-        val RETRY = Any()
+    companion object {
+        private const val REQUEST_MIC = 1
+        private const val REQUEST_CAMERA = 2
+        private const val RETRY_MS = 3000L
+        private const val VOICE_WINDOW_MS = 3 * 60 * 1000L
+        private const val EXTRA_WAKE = "com.hermes.pocketagent.phone.WAKE"
+        private val RETRY = Any()
+        private val VOICE = Any()
+
+        private fun wakeIntent(context: Context) = Intent(context, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            .putExtra(EXTRA_WAKE, true)
+
+        /** The wake word with no activity alive: start one, it lights the screen itself. */
+        fun wake(context: Context) = context.startActivity(wakeIntent(context))
     }
 }

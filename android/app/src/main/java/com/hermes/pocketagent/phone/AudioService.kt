@@ -43,6 +43,8 @@ import java.util.concurrent.TimeUnit
  *  - down: `{"type":"play","seq":N}` + one binary mp3 → played in order,
  *          answered with `playing` / `done`; `{"type":"clear"}` stops at once;
  *          `{"type":"snapshot","id":N}` → one camera frame from [CameraHub];
+ *          `{"type":"wake"}` → the owner said the wake word: light the screen
+ *          and bring the page forward (a hidden page is frozen, see [MainActivity.voiceActive]);
  *  - up:   [CameraHub.stateJson] whenever the camera opens, closes or switches lens.
  * Reconnects on its own; a foreground service so it survives the screen off
  * and Home. Swiping the app away or the notification's 「断开」 stops it, so
@@ -163,7 +165,11 @@ class AudioService : Service() {
             override fun onMessage(webSocket: WebSocket, text: String) {
                 val msg = try { JSONObject(text) } catch (e: Exception) { return }
                 when (msg.optString("type")) {
-                    "play" -> expectSeq = msg.getLong("seq")
+                    "play" -> {
+                        expectSeq = msg.getLong("seq")
+                        voiceActive(wake = false)
+                    }
+                    "wake" -> voiceActive(wake = true)
                     "clear" -> clearPlayback()
                     "snapshot" -> {
                         val id = msg.getLong("id")
@@ -200,6 +206,13 @@ class AudioService : Service() {
         // PA has switched back to the Mac's own speaker; nothing queued here still applies.
         clearPlayback()
         if (running) handler.postDelayed(::connect, RECONNECT_MS)
+    }
+
+    /** On the main thread, like the activity's other callbacks. */
+    private fun voiceActive(wake: Boolean) = handler.post {
+        val activity = onVoiceActive
+        if (activity != null) activity(wake)
+        else if (wake) MainActivity.wake(this) // the system destroyed the activity meanwhile
     }
 
     private fun send(json: String) {
@@ -299,6 +312,8 @@ class AudioService : Service() {
     companion object {
         /** Set by the visible MainActivity; run on 「断开」 before the service stops. */
         @Volatile var onDisconnect: (() -> Unit)? = null
+        /** Set by MainActivity: PA is talking with the user (`true` = the wake word was just heard). */
+        @Volatile var onVoiceActive: ((Boolean) -> Unit)? = null
 
         private const val ACTION_DISCONNECT = "com.hermes.pocketagent.phone.DISCONNECT"
         private const val TAG = "PocketAgent"

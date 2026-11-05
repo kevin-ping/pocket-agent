@@ -35,6 +35,11 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
    service (and with 「断开」 also the camera and the page): PA goes back to the
    Mac's mic and speaker. Opening the app again reconnects. PA only uses the
    phone's mic and speaker while the phone page is driving (not parked).
+   With the screen off, the wake word (owner's voice) turns the screen on and
+   shows PA over the lock screen, without unlocking — the page is frozen while
+   hidden, so it has to come forward. The wake word and every reply keep the
+   screen on for 3 more minutes; after that the lock screen comes back and the
+   screen goes off as usual. Plugged in, the screen stays on.
 4. Debug: `adb logcat -s PocketAgent`, `adb exec-out screencap -p > shot.png`.
 5. Without a phone: `scripts/phone_sim.py hello.wav` plays the phone's part on
    `/audio` (`--camera test.jpg` answers snapshots with a fixed image).
