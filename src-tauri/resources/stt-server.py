@@ -517,7 +517,7 @@ def _download_speaker_model(dest: Path) -> None:
         print(f"[stt-server] downloading speaker model to {dest} ...", file=sys.stderr, flush=True)
         with urllib.request.urlopen(_SPEAKER_MODEL_HF_URL, timeout=30) as resp, open(tmp, "wb") as out:
             shutil.copyfileobj(resp, out)
-        tmp.rename(dest)
+        os.replace(tmp, dest)  # Path.rename fails on Windows when dest exists
         print(f"[stt-server] speaker model downloaded ({dest.stat().st_size // 1024 // 1024} MB)",
               file=sys.stderr, flush=True)
     except Exception as e:
@@ -886,7 +886,9 @@ def _startup_selfcheck() -> list[str]:
     try:
         importlib.import_module("av")
     except ImportError:
-        fatal.append("MISSING: av>=12.0.0,<13 (PyAV). If install fails on x86_64 macOS: brew install pkg-config ffmpeg")
+        hint = ("If install fails on x86_64 macOS: brew install pkg-config ffmpeg" if sys.platform == "darwin"
+                else "If install fails, use a 64-bit Python 3.10-3.12, which has prebuilt PyAV wheels")
+        fatal.append(f"MISSING: av>=12.0.0,<13 (PyAV). {hint}")
 
     # 5. sherpa-onnx native libs only fail at load time (e.g. on macOS < 13.4),
     # so import it for real. Wake word and owner voice checks depend on it;

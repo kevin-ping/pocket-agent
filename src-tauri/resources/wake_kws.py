@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 import hashlib
 import math
+import os
 import platform
 import re
 import shutil
@@ -222,14 +223,20 @@ class WakeKws:
             raise WakeError('wake_phrase_unpronounceable', 'Unable to convert this wake phrase to pronunciations',
                             word=config['phrase'])
         keyword = ' '.join(tokens) + ' @' + config['phrase'].replace(' ', '_')
-        # KeywordSpotter reads the file during construction only.
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', encoding='utf-8') as f:
-            f.write(keyword + '\n'); f.flush()
+        # KeywordSpotter reads the file during construction only. The file is
+        # closed before sherpa opens it: Windows refuses a second open of a
+        # NamedTemporaryFile that is still open.
+        f = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', encoding='utf-8', delete=False)
+        try:
+            with f:
+                f.write(keyword + '\n')
             model = sherpa_onnx.KeywordSpotter(
                 tokens=str(self.path / 'tokens.txt'), encoder=str(self.path / FILES[0]),
                 decoder=str(self.path / FILES[1]), joiner=str(self.path / FILES[2]),
                 keywords_file=f.name, keywords_threshold=config['kws_threshold'],
                 num_threads=2, provider='cpu')
+        finally:
+            os.unlink(f.name)
         self.models[key] = model
         while len(self.models) > 2:
             self.models.popitem(last=False)
