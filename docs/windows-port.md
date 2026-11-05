@@ -68,6 +68,17 @@
 ### 10. 开发脚本(BUG-WIN10)
 - `scripts/clear-dev-port.js:39` 不匹配英文 `LISTENING`,改按状态列/端口解析。
 
+## 第一批实施记录(2026-11-06,Windows 10 机上)
+未用 auto-work,本会话按上面顺序直接实现。与设计的差异和新发现:
+- **Hermes home**:Windows 上 Hermes 装在 `%LOCALAPPDATA%\hermes`,不是 `~/.hermes`。新增 `platform::hermes_home()`(优先 `HERMES_HOME`),用于 pa-summaries 路径和 401 提示;HERMES.md 补了 Windows 技能目录。
+- **cargo test 起不来**:测试 exe 链接了 tauri,缺 Common Controls v6 manifest 时报 `STATUS_ENTRYPOINT_NOT_FOUND`。`build.rs` 改为自己给所有目标嵌入 `windows-app-manifest.xml`(内容同 tauri-build 默认),并让 tauri-build 不再嵌入。
+- **端口探测**:Windows 上连接本机未监听端口约 2 秒后才被拒绝，原 2 秒 HTTP 超时会把「空闲」误判成「被占用」。超时后再用直接 TCP 连接确认。
+- **Python 子进程编码**:管道默认是 ANSI 代码页，中文会出错;所有 Python 子进程设 `PYTHONUTF8=1`。
+- **黑窗**:`no_window` 只在 PA 自己没有控制台时设 `CREATE_NO_WINDOW`;dev 模式下子进程共用终端，不弹窗且日志仍可见。
+- **热键语义**:与 macOS 一致(按一下开始、再按一下结束，不是按住说话);忽略 Windows 的按键自动重复。设置页本来就没有 fn 选项，无需隐藏。
+- **麦克风**:Windows 隐私设置挡住时可能是打开失败，也可能录到全零;两种情况都给出设置路径。
+- 提交按条目拆分，但 WIN1–WIN5 的 Rust 改动交织，合并为一个提交。
+
 ## 第二批(本批不做，写入 roadmap)
 唤醒词与声纹实机验收、连续对话、`tauri.conf.json` 加 `bundle.windows`(WebView2 安装方式、NSIS)、托盘彩色图标、日志落文件(GUI 无控制台)、Windows 防火墙放行 8650(手机终端)、README/README_AGENTS/HERMES 的 Windows 安装章节、`silero-vad` 拉进 torch 导致安装体积大的问题、agent-desktop 与 computer_use 在 Windows 上的对照实测。
 
