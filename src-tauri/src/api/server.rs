@@ -258,7 +258,11 @@ pub async fn start_server(app: AppHandle, port: u16) {
     eprintln!("[API] listening on http://{}", addr);
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
+        Ok(l) => {
+            #[cfg(windows)]
+            crate::platform::not_inherited(&l);
+            l
+        }
         Err(e) => {
             eprintln!("[API] bind failed: {} (port {} in use?)", e, port);
             return;

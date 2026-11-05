@@ -83,6 +83,23 @@ pub fn kill_tree(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
+/// Keep a listening socket out of child processes. On Windows the socket
+/// tokio creates is inheritable, so stt-server held PA's port 8650 after PA
+/// died: the port stayed bound, nobody answered, and the next PA could not
+/// bind it. No-op elsewhere (Rust sockets are close-on-exec there).
+#[cfg(windows)]
+pub fn not_inherited(socket: &impl std::os::windows::io::AsRawSocket) {
+    extern "system" {
+        fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 1;
+    // SAFETY: the socket is open for the duration of the call; only its
+    // inherit flag changes.
+    if unsafe { SetHandleInformation(socket.as_raw_socket() as _, HANDLE_FLAG_INHERIT, 0) } == 0 {
+        eprintln!("[platform] could not mark socket non-inheritable: {}", std::io::Error::last_os_error());
+    }
+}
+
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
