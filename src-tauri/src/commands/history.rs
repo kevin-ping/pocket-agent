@@ -587,8 +587,11 @@ pub async fn open_chat_history(_app: tauri::AppHandle) -> Result<(), String> {
     
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(&["/C", "start", html_path.to_str().unwrap_or("")])
+        // `start`'s first quoted argument is the window title: pass an empty
+        // one so a path with spaces (quoted by Command) is opened, not used as it.
+        crate::platform::no_window(&mut std::process::Command::new("cmd"))
+            .args(["/C", "start", ""])
+            .arg(&html_path)
             .spawn()
             .map_err(|e| e.to_string())?;
     }

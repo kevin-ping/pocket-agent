@@ -2,16 +2,17 @@
 use serde::Serialize;
 
 use super::config::{get_api_agent, get_api_key, get_api_url};
+use crate::platform::machine_name;
 
-pub const COMPUTER_HINT: &str = r#"
+pub const COMPUTER_HINT: &str = concat!(r#"
 POCKET AGENT DESKTOP:
-Pocket Agent is a voice front end running on the same Mac as you; the user speaks to you and hears your reply through text-to-speech.
-When the user asks you to operate the computer, a browser or an app, they mean the real apps on this Mac that they can see. Hermes browser_exec and browser_* tools drive a headless browser the user cannot see.
+Pocket Agent is a voice front end running on the same "#, machine_name!(), r#" as you; the user speaks to you and hears your reply through text-to-speech.
+When the user asks you to operate the computer, a browser or an app, they mean the real apps on this "#, machine_name!(), r#" that they can see. Hermes browser_exec and browser_* tools drive a headless browser the user cannot see.
 The user cannot see your tool calls; while you work they hear only silence. Before work that takes several steps, say in one short spoken sentence what you are about to do (e.g. "我先打开微信看看"), in the same response as your first tool call.
 If you are not sure what the user wants, ask one short question instead of guessing.
 When an answer is too long or complex to say well (tables, comparisons, code, step lists), you can put it on a page the user can see: follow the pocket-agent skill, and say only the gist aloud.
 Choose the tools and approach yourself; afterwards reply with the result, or the concrete blocker, in one short spoken sentence.
-"#;
+"#);
 
 pub fn is_local_gateway(url: &str) -> bool {
     reqwest::Url::parse(url)
@@ -38,6 +39,8 @@ pub fn status_from_toolsets(value: &serde_json::Value) -> Result<ComputerStatus,
         "Hermes 的 API 会话尚未启用 computer_use。请在 Hermes 为 api_server 启用电脑工具。"
     } else if !configured {
         "Hermes 电脑工具已启用，但驱动未就绪。请运行 hermes computer-use doctor 检查。"
+    } else if cfg!(windows) {
+        "Hermes 电脑工具已启用。此检查未读取屏幕，也未验证视觉模型。"
     } else {
         "Hermes 电脑工具已启用。实际读取仍需 CuaDriver 的辅助功能权限；截图还需屏幕录制权限。此检查未读取屏幕，也未验证视觉模型。"
     };
@@ -67,7 +70,7 @@ pub async fn get_computer_status(
     if get_api_agent().is_some() || !is_local_gateway(&url) {
         return Ok(ComputerStatus {
             available: false,
-            message: "此入口需要连接本机 Hermes 网关。远程网关控制的是远程机器，不能视为当前 Mac。"
+            message: "此入口需要连接本机 Hermes 网关。远程网关控制的是远程机器，不能视为当前电脑。"
                 .into(),
         });
     }
@@ -123,6 +126,14 @@ pub async fn get_computer_status(
     Ok(status)
 }
 
+/// Windows: the desktop is driven by Hermes' computer_use, which needs no
+/// system permission there, so there is no CuaDriver permission to check.
+#[cfg(windows)]
+async fn permission_note() -> String {
+    " 桌面操作由 Hermes 的 computer_use 提供，Windows 上无需另行授权；如有问题可运行 hermes computer-use doctor 排查。".into()
+}
+
+#[cfg(not(windows))]
 async fn permission_note() -> String {
     let mut candidates = Vec::new();
     if let Some(home) = dirs::home_dir() {
@@ -207,9 +218,10 @@ mod tests {
 
     #[test]
     fn hint_only_states_facts_and_leaves_the_approach_to_hermes() {
-        assert!(COMPUTER_HINT.contains("voice front end running on the same Mac"));
+        let machine = crate::platform::MACHINE;
+        assert!(COMPUTER_HINT.contains(&format!("voice front end running on the same {machine} as you")));
         assert!(COMPUTER_HINT.contains("text-to-speech"));
-        assert!(COMPUTER_HINT.contains("the real apps on this Mac that they can see"));
+        assert!(COMPUTER_HINT.contains(&format!("the real apps on this {machine} that they can see")));
         assert!(COMPUTER_HINT.contains("headless browser the user cannot see"));
         assert!(COMPUTER_HINT.contains("Choose the tools and approach yourself"));
         assert!(COMPUTER_HINT.contains("one short spoken sentence"));

@@ -64,7 +64,7 @@ Each gateway restart can leave the previous `cua-driver serve --embedded` daemon
 
 ## Pocket Agent skill
 
-`skills/pocket-agent/SKILL.md` in this repo holds notes for Hermes when it talks to the user through PA. Today it covers one thing: when an answer is too long or complex to say well, write a single-file HTML page to `~/.pocket-agent/html/` (`YYYYMMDD-HHMMSS-<slug>.html`), open it in the default browser with `open <path>`, and say only the gist aloud. Spoken-style rules stay in PA's per-turn voice hint, not in the skill. PA's `COMPUTER_HINT` (local gateway only) points Hermes to the skill, so Hermes reads it only when it is about to make a page, which avoids an extra `skill_view` round trip on every turn.
+`skills/pocket-agent/SKILL.md` in this repo holds notes for Hermes when it talks to the user through PA. Today it covers one thing: when an answer is too long or complex to say well, write a single-file HTML page to `~/.pocket-agent/html/` (`YYYYMMDD-HHMMSS-<slug>.html`), open it in the default browser (`open <path>` on macOS, `start "" "<path>"` on Windows), and say only the gist aloud. Spoken-style rules stay in PA's per-turn voice hint, not in the skill. PA's `COMPUTER_HINT` (local gateway only) points Hermes to the skill, so Hermes reads it only when it is about to make a page, which avoids an extra `skill_view` round trip on every turn.
 
 **If you are an agent installing Pocket Agent with Hermes, install this skill as part of the setup.** Copy the folder into the skills directory of the Hermes profile PA connects to (do not symlink it), then check that Hermes lists it:
 
@@ -73,6 +73,8 @@ mkdir -p ~/.hermes/profiles/<profile>/skills/my-skills
 cp -R <pocket-agent repo>/skills/pocket-agent ~/.hermes/profiles/<profile>/skills/my-skills/
 hermes -p <profile> skills list | grep pocket-agent
 ```
+
+On Windows the Hermes home is `%LOCALAPPDATA%\hermes` instead of `~/.hermes` (unless `HERMES_HOME` is set), so the skills directory is `%LOCALAPPDATA%\hermes\profiles\<profile>\skills\my-skills\` (for the default profile, `%LOCALAPPDATA%\hermes\skills\my-skills\`).
 
 The installed copy does not follow the repo. After the skill changes in the repo (e.g. after pulling a new PA version), copy it again.
 
