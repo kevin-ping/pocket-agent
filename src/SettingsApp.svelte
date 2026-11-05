@@ -159,7 +159,7 @@
   let text = $derived(settingsText(local?.ui_lang ?? 'en'));
   let dirty = $derived((!!local && JSON.stringify(local) !== baseline) || pendingWakeDeletes.length > 0 || meshAvatarChanged);
   let sections = $derived([
-    { id: 'general' as Section, icon: '⌘', label: text.general },
+    { id: 'general' as Section, icon: '⚙', label: text.general },
     { id: 'avatar' as Section, icon: '◉', label: text.avatar },
     { id: 'voice' as Section, icon: '◖', label: text.voice },
     { id: 'conversation' as Section, icon: '◫', label: text.conversation },
@@ -660,7 +660,7 @@
   .wake-help { color: var(--muted, #64748b); font-size: 13px; line-height: 1.6; margin: 8px 16px 16px; }
   :global {
   :global(*){box-sizing:border-box} :global(html,body,#app){margin:0;width:100%;height:100%;overflow:hidden}
-  :global(body){font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f5f9;color:#1e2235;-webkit-font-smoothing:antialiased}
+  :global(body){font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei UI",sans-serif;background:#f4f5f9;color:#1e2235;-webkit-font-smoothing:antialiased}
   button,select,input{font:inherit}.shell{height:100%;min-height:0;display:grid;grid-template-columns:200px 1fr;background:radial-gradient(circle at 75% 0,#dde3ff 0,transparent 36%),#f4f5f9}
   aside{padding:20px 12px 16px;border-right:1px solid #e2e5ed;background:#ffffff;display:flex;flex-direction:column}.brand{display:flex;gap:10px;align-items:center;padding:0 8px 18px}
   .logo{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:linear-gradient(145deg,#859bff,#7465e7);font-size:12px;font-weight:800;box-shadow:0 6px 18px #6174ff35;color:#fff}

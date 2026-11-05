@@ -34,7 +34,9 @@ function createLayoutStore() {
       const monitor = await currentMonitor();
       if (!monitor) return 'left';
       const scale = monitor.scaleFactor;
-      const monitorW = monitor.workArea.size.width / scale;
+      // The work area's right edge in desktop coordinates: it does not start
+      // at 0 on a second monitor or with the Windows taskbar on the left.
+      const monitorW = (monitor.workArea.position.x + monitor.workArea.size.width) / scale;
       const logicalX = pos.x / scale;
       
       // Calculate if chat box would overflow on the right
@@ -64,10 +66,11 @@ function createLayoutStore() {
       const logicalX = pos.x / scale;
       const logicalY = pos.y / scale;
 
+      const workLeft = monitor ? monitor.workArea.position.x / scale : 0;
       let newX = logicalX;
       if (side === 'right') {
         newX = logicalX - (CHAT_W + GAP);
-        if (newX < 0) newX = 0;
+        if (newX < workLeft) newX = workLeft;
       }
 
       // Shift window up so the avatar stays visually at the same screen position

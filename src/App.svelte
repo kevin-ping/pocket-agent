@@ -1473,7 +1473,7 @@
     padding: 0;
     background: transparent;
     overflow: hidden;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
     -webkit-font-smoothing: antialiased;
   }
   :global(:root) {
