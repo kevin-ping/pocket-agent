@@ -6,7 +6,7 @@ Endpoints
 HTTP
     POST /transcribe       multipart "file"            → {"text", "language"}
     POST /vad              multipart "file"            → {"has_speech", "segments"}
-    GET  /health                                       → {"status", "model", "vad"}
+    GET  /health                                       → {"status", "model", "vad", "pid"}
 
 Wake word detection and speaker verification are handled natively by
 sherpa-onnx in the Rust layer (sherpa_wake.rs). This server only provides
@@ -49,6 +49,32 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+
+class _QuietStderr:
+    """A server left running after PA exits keeps a stderr pipe nobody reads;
+    a failed log write must not turn every request into a 500."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, data):
+        try:
+            return self._stream.write(data)
+        except OSError:
+            return len(data)
+
+    def flush(self):
+        try:
+            self._stream.flush()
+        except OSError:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+sys.stderr = _QuietStderr(sys.stderr)
 
 warnings.filterwarnings(
     "ignore",
@@ -384,6 +410,8 @@ async def health():
         "status": "ok",
         "model": state.whisper_name,
         "vad": "silero" if state.vad is not None else "none",
+        # Lets a later PA find and replace a server an earlier PA left running.
+        "pid": os.getpid(),
     }
 
 

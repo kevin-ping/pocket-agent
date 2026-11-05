@@ -392,10 +392,27 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
     };
 
     match port {
-        VoicePort::Ours => {
-            eprintln!("[stt] resident server already running on :8651");
-            mark_app_ready(|| show_main_window(app_handle.as_ref(), "existing server"));
-            return;
+        VoicePort::Ours(pid) => {
+            let spawned_here = STT_CHILD.lock().map(|g| g.is_some()).unwrap_or(false);
+            match pid.filter(|_| !spawned_here) {
+                // Our own child, or a server too old to report its pid: reuse it.
+                None => {
+                    eprintln!("[stt] resident server already running on :8651");
+                    mark_app_ready(|| show_main_window(app_handle.as_ref(), "existing server"));
+                    return;
+                }
+                Some(pid) => match stop_stale_server(pid) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        mark_app_ready(|| show_main_window(app_handle.as_ref(), "existing server"));
+                        return;
+                    }
+                    Err(e) => {
+                        report_service_failure(app_handle.as_ref(), &e);
+                        return;
+                    }
+                },
+            }
         }
         // Not PA's voice service: report it, never kill a process PA does not own.
         VoicePort::Foreign(detail) => {
@@ -527,8 +544,8 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
 enum VoicePort {
     /// Nothing listening: PA starts its own server.
     Free,
-    /// PA's stt-server (e.g. left running by a previous PA): reuse it.
-    Ours,
+    /// PA's stt-server, with the pid its `/health` reports (absent before 0.3.1).
+    Ours(Option<u32>),
     /// Something else holds the port; carries what it answered.
     Foreign(String),
 }
@@ -545,6 +562,50 @@ fn is_voice_health(status: u16, body: &str) -> bool {
     v["status"] == "ok" && v["model"].is_string() && v["vad"].is_string()
 }
 
+fn health_pid(body: &str) -> Option<u32> {
+    let v = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    v["pid"].as_u64().and_then(|p| u32::try_from(p).ok())
+}
+
+/// Pids listening on `port`; `None` when lsof cannot be run.
+fn listening_pids(port: u16) -> Option<Vec<u32>> {
+    let out = Command::new("lsof")
+        .args(["-nP", &format!("-tiTCP:{port}"), "-sTCP:LISTEN"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect())
+}
+
+/// A server left by an earlier PA runs old code with old settings, and its
+/// stderr may be a pipe nobody reads any more (every log line then fails).
+/// Stop it so PA can start a fresh one, but only when the reported pid is the
+/// process listening on 8651. Ok(true): port is free; Ok(false): keep reusing.
+fn stop_stale_server(pid: u32) -> Result<bool, String> {
+    let Some(listeners) = listening_pids(8651) else {
+        eprintln!("[stt] lsof unavailable; reusing the server on :8651 (pid={pid})");
+        return Ok(false);
+    };
+    if !listeners.contains(&pid) {
+        return Err(format!(
+            "语音服务端口 8651 上的程序报告 pid {pid}，但监听该端口的是 {listeners:?}。在终端运行 \
+             lsof -iTCP:8651 -sTCP:LISTEN 查看占用的进程，关闭它后重启 Pocket Agent。"
+        ));
+    }
+    eprintln!("[stt] replacing stale stt-server (pid={pid})");
+    let _ = Command::new("/bin/kill").args(["-TERM", &pid.to_string()]).stderr(Stdio::null()).status();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if listening_pids(8651).is_some_and(|l| l.is_empty()) {
+            return Ok(true);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    Err(format!(
+        "上次运行留下的语音服务（pid {pid}）5 秒内没有退出。在终端运行 kill {pid} 后重启 Pocket Agent。"
+    ))
+}
+
 fn probe_voice_port(client: &reqwest::blocking::Client, base: &str) -> VoicePort {
     match client.get(format!("{base}/health")).send() {
         Err(e) if e.is_connect() => VoicePort::Free,
@@ -553,7 +614,7 @@ fn probe_voice_port(client: &reqwest::blocking::Client, base: &str) -> VoicePort
             let status = resp.status().as_u16();
             let body = resp.text().unwrap_or_default();
             if is_voice_health(status, &body) {
-                VoicePort::Ours
+                VoicePort::Ours(health_pid(&body))
             } else {
                 VoicePort::Foreign(format!("/health 返回 HTTP {status}，不是 Pocket Agent 语音服务"))
             }
@@ -562,7 +623,7 @@ fn probe_voice_port(client: &reqwest::blocking::Client, base: &str) -> VoicePort
 }
 
 fn voice_service_healthy(client: &reqwest::blocking::Client) -> bool {
-    probe_voice_port(client, STT_SERVER_URL) == VoicePort::Ours
+    matches!(probe_voice_port(client, STT_SERVER_URL), VoicePort::Ours(_))
 }
 
 #[derive(Debug, PartialEq)]
@@ -730,7 +791,9 @@ mod tests {
         assert_eq!(probe_voice_port(&client, &format!("http://{addr}")), VoicePort::Free);
 
         let ours = serve_once("200 OK", r#"{"status":"ok","model":"base","vad":"silero"}"#);
-        assert_eq!(probe_voice_port(&client, &ours), VoicePort::Ours);
+        assert_eq!(probe_voice_port(&client, &ours), VoicePort::Ours(None));
+        let ours = serve_once("200 OK", r#"{"status":"ok","model":"base","vad":"silero","pid":4242}"#);
+        assert_eq!(probe_voice_port(&client, &ours), VoicePort::Ours(Some(4242)));
 
         for (status, body) in [("404 Not Found", ""), ("500 Internal Server Error", ""), ("200 OK", "{}"), ("200 OK", r#"{"name":"other"}"#)] {
             let base = serve_once(status, body);
@@ -739,6 +802,23 @@ mod tests {
                 "{status} {body} must not count as PA's voice service"
             );
         }
+    }
+
+    #[test]
+    fn health_pid_is_optional() {
+        assert_eq!(health_pid(r#"{"status":"ok","model":"base","vad":"silero","pid":4242}"#), Some(4242));
+        assert_eq!(health_pid(r#"{"status":"ok","model":"base","vad":"silero"}"#), None);
+        assert_eq!(health_pid(r#"{"pid":"4242"}"#), None);
+        assert_eq!(health_pid(r#"{"pid":-1}"#), None);
+    }
+
+    #[test]
+    fn listening_pids_finds_the_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert_eq!(listening_pids(port), Some(vec![std::process::id()]));
+        drop(listener);
+        assert_eq!(listening_pids(port), Some(vec![]));
     }
 
     fn sh(script: &str) -> Command {
