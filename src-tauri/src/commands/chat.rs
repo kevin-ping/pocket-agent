@@ -704,7 +704,7 @@ fn generate_tts_once(
         }
     };
     let Some(status) = status else {
-        let _ = child.kill();
+        crate::platform::kill_tree(&mut child);
         let _ = child.wait();
         let _ = std::fs::remove_file(path);
         return false;

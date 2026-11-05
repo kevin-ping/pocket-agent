@@ -66,6 +66,23 @@ pub fn no_window(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+/// Kill `child` and everything it started. On Windows a venv's `python.exe`
+/// and pip's console scripts (`edge-tts.exe`) are launchers that run the real
+/// interpreter as a child process, so `Child::kill` alone would orphan it.
+/// The caller still reaps `child` with `wait`.
+pub fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        let _ = no_window(&mut Command::new("taskkill"))
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+}
+
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 

@@ -265,7 +265,7 @@ fn run_bounded(
         }
     };
     if stopped.is_err() {
-        let _ = child.kill();
+        crate::platform::kill_tree(&mut child);
         let _ = child.wait();
     }
     let out = out_thread.join().unwrap_or_default();
@@ -775,7 +775,7 @@ pub fn shutdown_stt_server() {
     if let Ok(mut guard) = STT_CHILD.lock() {
         if let Some(ref mut child) = *guard {
             eprintln!("[stt] shutting down STT server (pid={})...", child.id());
-            let _ = child.kill();
+            crate::platform::kill_tree(child);
             let _ = child.wait(); // reap zombie
         }
         *guard = None;

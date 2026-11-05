@@ -7,15 +7,15 @@ use tauri::AppHandle;
 
 use super::setup_status;
 
-const VENV_DIR_RELATIVE: &str = ".pocket-agent/venv";
-const VENV_MARKER_RELATIVE: &str = ".pocket-agent/.venv-ready";
+const VENV_DIR_RELATIVE: [&str; 2] = [".pocket-agent", "venv"];
+const VENV_MARKER_RELATIVE: [&str; 2] = [".pocket-agent", ".venv-ready"];
 
 fn home_dir() -> PathBuf {
     crate::platform::home_dir()
 }
 
 pub fn venv_root() -> PathBuf {
-    home_dir().join(VENV_DIR_RELATIVE)
+    VENV_DIR_RELATIVE.iter().fold(home_dir(), |p, c| p.join(c))
 }
 
 /// A program in the venv at `root`: `bin/<name>` on macOS,
@@ -42,7 +42,7 @@ pub fn venv_python_path() -> PathBuf {
 }
 
 fn marker_path() -> PathBuf {
-    home_dir().join(VENV_MARKER_RELATIVE)
+    VENV_MARKER_RELATIVE.iter().fold(home_dir(), |p, c| p.join(c))
 }
 
 /// Ready to start stt-server without installing anything: the marker matches
