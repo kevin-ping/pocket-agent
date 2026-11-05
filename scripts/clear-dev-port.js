@@ -35,9 +35,13 @@ export function checkPort(port, platform = process.platform, run = runTool) {
   if (platform === "win32") {
     const r = run("netstat", ["-aon"]);
     if (r.error || r.status !== 0) return { state: "unknown", reason: `netstat failed: ${r.error?.message || r.stderr.trim() || `exit ${r.status}`}` };
-    const listeners = r.stdout.split("\n")
-      .filter((line) => new RegExp(`:${port}\\s`).test(line) && line.includes("LISTENING"))
-      .map((line) => ({ pid: line.trim().split(/\s+/).pop(), command: "" }));
+    // The state column is localized (LISTENING, 侦听, ABHÖREN, ...), so a TCP
+    // listener is told by its foreign address, always 0.0.0.0:0 or [::]:0.
+    const listeners = r.stdout.split(/\r?\n/)
+      .map((line) => line.trim().split(/\s+/))
+      .filter((cols) => cols.length === 5 && cols[0].startsWith("TCP") && cols[1].endsWith(`:${port}`)
+        && (cols[2] === "0.0.0.0:0" || cols[2] === "[::]:0"))
+      .map((cols) => ({ pid: cols[4], command: "" }));
     return listeners.length ? { state: "busy", listeners } : { state: "free" };
   }
 
