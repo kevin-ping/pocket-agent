@@ -8,7 +8,7 @@
 
 > A minimal desktop AI voice companion that lives on your screen — press a key, speak, get things done.
 >
-> **v0.3.1** — see [releases/0.3.1.md](releases/0.3.1.md) for changelog
+> **v0.3.2** — see [releases/0.3.2.md](releases/0.3.2.md) for changelog
 
 Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust**. It connects to a local [Hermes](https://github.com/nousresearch/hermes) agent gateway via SSE streaming for real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
 

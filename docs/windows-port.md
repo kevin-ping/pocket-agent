@@ -12,7 +12,7 @@
 
 已定:
 - 分阶段：本批 = 能编译 + 文字对话 + 热键录音转写 + TTS 播报 + 桌面操作提示词，在 `npm run tauri dev` 下跑通。第二批 = 唤醒词/声纹/连续对话/安装包(MSI/NSIS)/文档。
-- 开发方式：在 Windows 机上直接用 Claude Code 开发、编译、实测。所有改动都放在 `release/0.3.1`,Windows 支持随 0.3.1 发布，不另开分支。Windows 端 pull `release/0.3.1` 后运行 `auto-work`。
+- 开发方式：在 Windows 机上直接用 Claude Code 开发、编译、实测。第一批随 0.3.1 发布(tag `v0.3.1`);之后的改动放在当前 release 分支(现为 `release/0.3.2`),不另开分支。Windows 端 pull `release/0.3.2` 后运行 `auto-work`。
 
 ## 本批改动(按依赖顺序)
 
@@ -110,7 +110,7 @@
 `src-tauri/src/lib.rs`、`voice/hotkey.rs`、`voice/venv.rs`、`voice/stt.rs`、`voice/record.rs`、`voice/conversation.rs`、`commands/config.rs`、`commands/chat.rs`、`commands/computer.rs`、`commands/history.rs`、`resources/wake_kws.py`、`resources/stt-server.py`、`src/SettingsApp.svelte`、`src/lib/stores/layout.ts`、`scripts/clear-dev-port.js`、`skills/pocket-agent/SKILL.md`。
 
 ## 验证
-1. Windows 前置：装好 Hermes(网关 8642)、Rust(MSVC)、Node LTS、Python 3.12(python.org 或 winget)、VS Build Tools「使用 C++ 的桌面开发」、WebView2;clone 仓库并 checkout `release/0.3.1`。
+1. Windows 前置：装好 Hermes(网关 8642)、Rust(MSVC)、Node LTS、Python 3.12(python.org 或 winget)、VS Build Tools「使用 C++ 的桌面开发」、WebView2;clone 仓库并 checkout `release/0.3.2`。
 2. 回 Mac 验收不回退：每批推送前在 Mac 上跑 `cargo test`、`npm run check`、`npm run build`,并手测热键和语音一轮(cfg 分叉容易误伤 macOS)。
 3. Windows 上(Claude Code 直接执行 + 用户在机器前操作):
    - `cargo test`(Windows 上)通过。
@@ -119,7 +119,7 @@
    - 按住 RightShift 录音 → 松开出转写;Esc 取消;设置页按键捕获能记录新键;双击模式可用。
    - 「打开记事本写一句话」:Hermes 走 computer_use 完成，提示词里出现 Windows 措辞。
    - 结束 PA 后重开:8651 上的旧 stt-server 被识别并替换。
-4. 流程:Mac 已把本文件提交到 `release/0.3.1`。Windows 上按开头三步把条目写进 `.auto-work/` 后运行 `auto-work`。
+4. 流程:Mac 已把本文件提交到 `release/0.3.2`。Windows 上按开头三步把条目写进 `.auto-work/` 后运行 `auto-work`。
 
 ## auto-work 条目
 
