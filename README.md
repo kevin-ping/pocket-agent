@@ -1,4 +1,10 @@
+<p align="center">
+  <img src="assets/media/pocket_agent.png" alt="Pocket Agent logo" width="160">
+</p>
+
 # Pocket Agent
+
+**GitHub:** [https://github.com/kevin-ping/pocket-agent](https://github.com/kevin-ping/pocket-agent)
 
 > A minimal desktop AI voice companion that lives on your screen — press a key, speak, get things done.
 >
@@ -120,6 +126,9 @@ always-on mic → sherpa-onnx KWS (wake phrase)
 - **Animated mesh avatar** — the widget circle shows a 2D mesh avatar (xingyin) that blinks and idles, reacts to listening / thinking / speaking, and follows the reply emotion; falls back to the image or CSS avatar if it can't load (see [docs/mesh-avatar.md](docs/mesh-avatar.md))
 - **Compact widget** — 220x360px always-on-top window, dark sci-fi aesthetic
 - **Phone terminal (experimental)** — an Android phone on the same LAN can be PA's screen, microphone and speaker (`android/`); the desktop window hides while the phone drives. Hermes can open, flip and read the phone camera and move PA between the phone and the Mac by voice (`switch_device`), through PA's own MCP server. The APK is built and installed over `adb` with USB debugging on (see [android/README.md](android/README.md))
+  - **Several computers, paired by QR code** — on each computer open Settings → Devices → Add phone and scan the code with the phone app's Scan to add device. The phone serves one computer at a time and its device list shows which computers are online. Computers never broadcast themselves: the phone keeps a connection to each paired computer's saved address.
+  - **Scanner** — a viewfinder that only reads a code inside it, a vibration and a short pause when it reads one, then a pairing screen, or a failure screen that says what went wrong.
+  - **Follows the phone's language** — the app's own screens use English, Chinese, Japanese, Korean, French, German or Spanish, following the system language (English otherwise). It carries the Pocket Agent icon.
 - **macOS native** — global hotkey via CGEventTap, CoreAudio recording, menu bar tray
 - **Windows (experimental)** — runs from source on Windows 10/11 with a native Windows Hermes; same hotkey, voice and desktop-control features (see [docs/windows-install.md](docs/windows-install.md))
 
@@ -480,20 +489,6 @@ Settings persist in a local **SQLite** database under `~/.pocket-agent/` (see `s
 ## Hermes Performance Tuning
 
 Almost all of a turn's latency is spent inside Hermes, not Pocket Agent. See [HERMES.md](HERMES.md) for the Hermes settings we use (context compression, auxiliary vision/compression without thinking, accessibility-tree verification, the agent cursor), for installing PA's `pocket-agent` skill into the Hermes profile, and for `scripts/hermes-latency.py`, which measures where turns spend their time.
-
----
-
-## Airline Enquiry Demo
-
-Pocket Agent can display results from tool-using backends (e.g., a web-enabled Hermes setup):
-
-**Query:**
-
-![Airline Enquiry](assets/media/airline_enqiry.jpg)
-
-**Result:**
-
-![Airline Result](assets/media/airline_result.jpg)
 
 ---
 
