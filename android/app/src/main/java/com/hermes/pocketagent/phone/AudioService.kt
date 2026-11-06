@@ -57,7 +57,7 @@ import java.util.concurrent.TimeUnit
  *          `{"type":"wake"}` → the owner said the wake word: light the screen
  *          and bring the page forward (a hidden page is frozen, see [MainActivity.voiceActive]);
  *  - up:   [CameraHub.stateJson] whenever the camera opens, closes or switches lens.
- * Swiping the app away or the notification's 「断开」 frees the phone and stops
+ * Swiping the app away or the notification's Disconnect frees the phone and stops
  * the service, so PA's voice returns to its computer.
  */
 class AudioService : Service() {
@@ -155,7 +155,7 @@ class AudioService : Service() {
     private fun notification(): Notification {
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
-            NotificationChannel(CHANNEL, "Pocket Agent 语音", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(CHANNEL, getString(R.string.notification_channel), NotificationManager.IMPORTANCE_LOW)
         )
         val disconnect = PendingIntent.getService(
             this, 0,
@@ -165,10 +165,10 @@ class AudioService : Service() {
         val occupant = Config.pa(this, Config.occupant(this))
         return Notification.Builder(this, CHANNEL)
             .setContentTitle("Pocket Agent")
-            .setContentText(if (occupant != null) "正在使用 ${occupant.name}" else "未接入电脑")
+            .setContentText(if (occupant != null) getString(R.string.notification_using, occupant.name) else getString(R.string.notification_idle))
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
-            .addAction(Notification.Action.Builder(null, "断开", disconnect).build())
+            .addAction(Notification.Action.Builder(null, getString(R.string.notification_disconnect), disconnect).build())
             .build()
     }
 
@@ -534,7 +534,7 @@ class AudioService : Service() {
     }
 
     companion object {
-        /** Set by the visible MainActivity; run on 「断开」 before the service stops. */
+        /** Set by the visible MainActivity; run on Disconnect before the service stops. */
         @Volatile var onDisconnect: (() -> Unit)? = null
         /** Set by MainActivity: PA is talking with the user (`true` = the wake word was just heard). */
         @Volatile var onVoiceActive: ((Boolean) -> Unit)? = null

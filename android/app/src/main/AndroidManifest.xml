@@ -13,7 +13,9 @@
 
     <!-- Cleartext: PA serves http/ws on the LAN only (8650 is never exposed to the internet). -->
     <application
-        android:label="Pocket Agent"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
 

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="devices_empty">还没有配对的电脑。在电脑上打开 Pocket Agent 设置 → 设备 → 添加手机，再点下面的「扫描添加设备」。</string>
+    <string name="scan_add_device">扫描添加设备</string>
+    <string name="status_in_use">正在使用</string>
+    <string name="status_in_use_offline">正在使用 · 离线</string>
+    <string name="status_busy">先让「%1$s」回到电脑</string>
+    <string name="status_online">在线</string>
+    <string name="status_offline">离线</string>
+    <string name="action_open">打开</string>
+    <string name="action_connect">接入</string>
+    <string name="cannot_connect">现在不能接入「%1$s」</string>
+    <string name="remove_title">移除「%1$s」?</string>
+    <string name="remove_message">手机上不再保存这台电脑。电脑的设置 → 设备里也可以移除这台手机。</string>
+    <string name="cancel">取消</string>
+    <string name="remove">移除</string>
+
+    <string name="camera_needed_scan">需要相机权限才能扫描二维码</string>
+    <string name="camera_needed_see">需要相机权限才能让 Pocket Agent 看</string>
+    <string name="mic_needed">需要麦克风权限才能和 Pocket Agent 对话</string>
+
+    <string name="close">关闭</string>
+    <string name="scan_hint">在电脑上打开 Pocket Agent\n设置 → 设备 → 添加手机</string>
+    <string name="scan_hint_sub">二维码 2 分钟内有效</string>
+
+    <string name="pairing_title">正在配对…</string>
+    <string name="pairing_sub">请让手机和电脑连在同一个局域网</string>
+    <string name="paired">已添加「%1$s」</string>
+
+    <string name="scan_again">重新扫描</string>
+    <string name="back">返回</string>
+    <string name="error_invalid_title">不是配对二维码</string>
+    <string name="error_invalid_message">请扫描电脑设置 → 设备 → 添加手机里显示的二维码。</string>
+    <string name="error_expired_title">二维码已失效</string>
+    <string name="error_expired_message">请在电脑上重新点「添加手机」生成新的二维码。</string>
+    <string name="error_unreachable_title">连不上这台电脑</string>
+    <string name="error_unreachable_message">手机和电脑要连在同一个局域网。</string>
+    <string name="error_not_that_computer_title">无法确认这台电脑</string>
+    <string name="error_not_that_computer_message">对方没能证明自己是显示二维码的那台电脑，没有保存。</string>
+    <string name="error_failed_title">配对失败</string>
+    <string name="error_failed_message">电脑返回状态码 %1$d,请重试。</string>
+    <string name="error_camera_title">打不开相机</string>
+    <string name="error_camera_message">可能有其他应用正在使用相机，关掉它后再试。</string>
+
+    <string name="notification_channel">Pocket Agent 语音</string>
+    <string name="notification_using">正在使用 %1$s</string>
+    <string name="notification_idle">未接入电脑</string>
+    <string name="notification_disconnect">断开</string>
+</resources>

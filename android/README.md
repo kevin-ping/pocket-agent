@@ -28,25 +28,30 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ## Use
 
+The app's own screens (device list, scanner, notification) follow the phone's
+system language: English, 中文, 日本語, 한국어, Français, Deutsch, Español; other
+languages show English. Labels below are the English ones.
+
 1. **Pair a computer** (once per computer). On the computer open Pocket Agent
-   Settings → Devices → 「添加手机」: a QR code shows for 2 minutes. On the phone
-   tap 「扫码添加电脑」 and point the camera at it (the camera permission is asked
+   Settings → Devices → Add phone: a QR code shows for 2 minutes. On the phone
+   tap Scan to add device and point the camera at it (the camera permission is asked
    the first time). The phone checks that the computer really holds the code's
    secret, then stores a device token for that computer only. Pair as many
    computers as you like (e.g. a Mac and a Windows PC). Grant the microphone too.
-2. **Problems.** 「二维码已失效」: the code expired, was used, or a newer one
-   replaced it — click 「添加手机」 again. 「连不上这台电脑」: phone and computer
+2. **Problems.** A failed pairing stays on screen with the reason and Scan again.
+   "QR code expired": the code expired, was used, or a newer one
+   replaced it — click Add phone again. "Can't reach the computer": phone and computer
    must be on the same LAN (on Windows allow TCP 8650, see docs/windows-install.md).
    A computer that got a new LAN address: show its QR code again and scan; the
    phone updates the existing entry instead of adding a second one.
 3. **Switch.** The phone serves one computer at a time. Each row shows the
-   computer's name and 在线 / 离线 / 正在使用. 「接入」 hands the phone to that
+   computer's name and Online / Offline / In use. Connect hands the phone to that
    computer and opens its page. While one computer uses the phone, every other
-   one is greyed out with 「先让「X」回到电脑」 and its requests are refused —
+   one is greyed out with "Ask "X" to return to the computer first" and its requests are refused —
    from the computer ("切到手机") and from the phone alike. The phone is free again when:
    - the computer using it moves back to its desk: 「移到电脑」 on the page, or
      "切回电脑" said to that computer (the page closes, the device page returns);
-   - you tap 「断开」 on the notification or swipe the app away;
+   - you tap Disconnect on the notification or swipe the app away;
    - that computer has been offline for 90 seconds (a short Wi-Fi drop does not free it).
    Saying "切到手机" to a free computer works with the app on screen: the
    phone answers on its own and opens that computer's page.
@@ -58,11 +63,11 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
    key) become a hand-entered entry after updating and keep working; nothing to
    re-enter. New computers can only be added by scanning.
 6. Home and screen lock keep the voice on the phone (the service keeps running).
-   Swiping the app away from recents, or 「断开」 on its notification, stops the
-   service (and with 「断开」 also the camera and the page): PA goes back to the
+   Swiping the app away from recents, or Disconnect on its notification, stops the
+   service (and with Disconnect also the camera and the page): PA goes back to the
    computer's mic and speaker. Opening the app again reconnects. PA only uses the
    phone's mic and speaker while the phone page is driving. The notification
-   shows 「正在使用 <computer>」.
+   shows "Using <computer>".
    With the screen off, the wake word (owner's voice) turns the screen on and
    shows PA over the lock screen, without unlocking — the page is frozen while
    hidden, so it has to come forward. The wake word and every reply keep the

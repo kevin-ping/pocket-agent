@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="devices_empty">Aún no hay ordenadores vinculados. En el ordenador, abre Ajustes de Pocket Agent → Dispositivos → Añadir teléfono y toca «Escanear para añadir dispositivo» abajo.</string>
+    <string name="scan_add_device">Escanear para añadir dispositivo</string>
+    <string name="status_in_use">En uso</string>
+    <string name="status_in_use_offline">En uso · sin conexión</string>
+    <string name="status_busy">Primero devuelve «%1$s» al ordenador</string>
+    <string name="status_online">En línea</string>
+    <string name="status_offline">Sin conexión</string>
+    <string name="action_open">Abrir</string>
+    <string name="action_connect">Conectar</string>
+    <string name="cannot_connect">Ahora no se puede conectar con «%1$s»</string>
+    <string name="remove_title">¿Quitar «%1$s»?</string>
+    <string name="remove_message">Este teléfono olvidará el ordenador. También puedes quitar este teléfono en Ajustes → Dispositivos del ordenador.</string>
+    <string name="cancel">Cancelar</string>
+    <string name="remove">Quitar</string>
+
+    <string name="camera_needed_scan">Se necesita permiso de cámara para escanear el código QR</string>
+    <string name="camera_needed_see">Se necesita permiso de cámara para que Pocket Agent pueda ver</string>
+    <string name="mic_needed">Se necesita permiso de micrófono para hablar con Pocket Agent</string>
+
+    <string name="close">Cerrar</string>
+    <string name="scan_hint">En el ordenador, abre Pocket Agent\nAjustes → Dispositivos → Añadir teléfono</string>
+    <string name="scan_hint_sub">El código QR es válido durante 2 minutos</string>
+
+    <string name="pairing_title">Vinculando…</string>
+    <string name="pairing_sub">El teléfono y el ordenador deben estar en la misma red local</string>
+    <string name="paired">Se ha añadido «%1$s»</string>
+
+    <string name="scan_again">Volver a escanear</string>
+    <string name="back">Atrás</string>
+    <string name="error_invalid_title">No es un código QR de vinculación</string>
+    <string name="error_invalid_message">Escanea el código que aparece en Ajustes → Dispositivos → Añadir teléfono del ordenador.</string>
+    <string name="error_expired_title">El código QR ha caducado</string>
+    <string name="error_expired_message">En el ordenador, vuelve a hacer clic en Añadir teléfono para obtener un código nuevo.</string>
+    <string name="error_unreachable_title">No se puede conectar con el ordenador</string>
+    <string name="error_unreachable_message">El teléfono y el ordenador deben estar en la misma red local.</string>
+    <string name="error_not_that_computer_title">No se pudo verificar el ordenador</string>
+    <string name="error_not_that_computer_message">El otro extremo no pudo demostrar que es el ordenador que muestra el código. No se ha guardado nada.</string>
+    <string name="error_failed_title">Error de vinculación</string>
+    <string name="error_failed_message">El ordenador respondió con el estado %1$d. Inténtalo de nuevo.</string>
+    <string name="error_camera_title">No se puede abrir la cámara</string>
+    <string name="error_camera_message">Puede que otra aplicación la esté usando. Ciérrala y vuelve a intentarlo.</string>
+
+    <string name="notification_channel">Voz de Pocket Agent</string>
+    <string name="notification_using">En uso por %1$s</string>
+    <string name="notification_idle">Sin conectar a ningún ordenador</string>
+    <string name="notification_disconnect">Desconectar</string>
+</resources>
