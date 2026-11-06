@@ -365,9 +365,12 @@ def _rms_dbfs(samples: np.ndarray) -> float:
 
 
 def vad_segments(wav_path: str):
-    """Silero VAD wrapper — preserved from the prior server."""
-    wav = read_audio(wav_path, sampling_rate=16000)
-    segs = get_speech_timestamps(wav, state.vad, return_seconds=True)
+    """Silero VAD wrapper. The WAV is read with PA's own reader, not silero's
+    read_audio: since silero-vad 6 that needs torchaudio or torchcodec, which
+    it no longer installs, so every check failed on a fresh voice environment."""
+    import torch
+    samples, _ = _read_wav_bytes(Path(wav_path).read_bytes())
+    segs = get_speech_timestamps(torch.from_numpy(samples), state.vad, sampling_rate=16000, return_seconds=True)
     return [{"start": float(s["start"]), "end": float(s["end"])} for s in segs]
 
 # --- Existing endpoints (Phase A contracts preserved) ------------------------
