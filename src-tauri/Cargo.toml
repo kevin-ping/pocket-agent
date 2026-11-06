@@ -58,6 +58,10 @@ base64 = "0.22"
 sha2 = "0.10"
 flate2 = "1"
 tar = { version = "0.4", default-features = false }
+
+# Phone pairing: device tokens and codes; LAN discovery (_pocket-agent._tcp)
+getrandom = "0.3"
+mdns-sd = "0.13"
 [profile.release]
 opt-level = "s"     # 优化体积（旧机器存储也紧张）
 lto = true

@@ -242,6 +242,10 @@ pub async fn start_server(app: AppHandle, port: u16) {
         .merge(bearer)
         .route("/ui/ws", get(crate::api::remote::ui_ws))
         .route("/audio", get(crate::api::remote::audio_ws))
+        // Phone pairing (open: the phone has no token yet; api/pairing.rs) and presence.
+        .route("/pair/start", post(crate::api::pairing::pair_start))
+        .route("/pair/confirm", post(crate::api::pairing::pair_confirm))
+        .route("/phone", get(crate::api::phone::phone_ws))
         // Hermes MCP client: checks the bearer itself (no open mode).
         .route(
             "/mcp",
@@ -253,6 +257,9 @@ pub async fn start_server(app: AppHandle, port: u16) {
         .fallback(crate::api::remote::static_asset)
         .layer(CorsLayer::permissive())
         .with_state(state);
+
+    // Off the async runtime: the first call reads settings.db and the computer name.
+    tauri::async_runtime::spawn_blocking(move || crate::api::discovery::advertise(port));
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     eprintln!("[API] listening on http://{}", addr);

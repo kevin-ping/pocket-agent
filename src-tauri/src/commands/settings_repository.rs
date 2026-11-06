@@ -75,6 +75,13 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS metadata (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS paired_phones (
+            phone_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            token_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT
         );",
     )
     .map_err(|e| format!("initialize settings schema: {e}"))?;
@@ -353,6 +360,89 @@ fn bump_revision(conn: &Connection) -> Result<u64, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(revision)
+}
+
+// ── Phone pairing (api/pairing.rs) ──────────────────────────────────────────
+
+/// A phone paired with this PA. Only the SHA-256 of its token is stored (hex).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PairedPhoneRow {
+    pub phone_id: String,
+    pub name: String,
+    #[serde(skip)]
+    pub token_hash: String,
+    pub created_at: String,
+    pub last_seen_at: Option<String>,
+}
+
+/// This PA's identity: created once, never changes (renaming the computer or
+/// a new IP keeps the phones' pairings).
+pub fn pa_id(generate: impl FnOnce() -> String) -> Result<String, String> {
+    pa_id_in(&open()?, generate)
+}
+
+fn pa_id_in(conn: &Connection, generate: impl FnOnce() -> String) -> Result<String, String> {
+    conn.execute("INSERT OR IGNORE INTO metadata(key,value) VALUES('pa_id',?1)", [generate()])
+        .map_err(|e| e.to_string())?;
+    conn.query_row("SELECT value FROM metadata WHERE key='pa_id'", [], |row| row.get(0))
+        .map_err(|e| e.to_string())
+}
+
+pub fn paired_phones() -> Result<Vec<PairedPhoneRow>, String> {
+    paired_phones_in(&open()?)
+}
+
+fn paired_phones_in(conn: &Connection) -> Result<Vec<PairedPhoneRow>, String> {
+    let mut stmt = conn
+        .prepare("SELECT phone_id,name,token_hash,created_at,last_seen_at FROM paired_phones ORDER BY created_at")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(PairedPhoneRow {
+                phone_id: row.get(0)?,
+                name: row.get(1)?,
+                token_hash: row.get(2)?,
+                created_at: row.get(3)?,
+                last_seen_at: row.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+}
+
+/// Pairing the same phone again replaces its token.
+pub fn save_paired_phone(row: &PairedPhoneRow) -> Result<(), String> {
+    save_paired_phone_in(&open()?, row)
+}
+
+fn save_paired_phone_in(conn: &Connection, row: &PairedPhoneRow) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR REPLACE INTO paired_phones(phone_id,name,token_hash,created_at,last_seen_at) VALUES(?1,?2,?3,?4,?5)",
+        params![row.phone_id, row.name, row.token_hash, row.created_at, row.last_seen_at],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Returns whether the phone was paired.
+pub fn remove_paired_phone(phone_id: &str) -> Result<bool, String> {
+    remove_paired_phone_in(&open()?, phone_id)
+}
+
+fn remove_paired_phone_in(conn: &Connection, phone_id: &str) -> Result<bool, String> {
+    conn.execute("DELETE FROM paired_phones WHERE phone_id=?1", [phone_id])
+        .map(|n| n > 0)
+        .map_err(|e| e.to_string())
+}
+
+pub fn touch_paired_phone(phone_id: &str) -> Result<(), String> {
+    open()?
+        .execute(
+            "UPDATE paired_phones SET last_seen_at=?1 WHERE phone_id=?2",
+            params![Local::now().to_rfc3339(), phone_id],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 pub fn validate(config: &AppConfig) -> Result<(), String> {
@@ -651,6 +741,43 @@ mod tests {
         assert_eq!(loaded.ui_lang, "fr");
         assert!((loaded.volume - 0.55).abs() < f32::EPSILON);
         assert_eq!(loaded.avatar_image, config.avatar_image);
+    }
+
+    #[test]
+    fn pa_id_is_created_once_and_kept() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize_schema(&conn).unwrap();
+        let first = pa_id_in(&conn, || "id-1".into()).unwrap();
+        assert_eq!(first, "id-1");
+        assert_eq!(pa_id_in(&conn, || "id-2".into()).unwrap(), "id-1", "a restart keeps the identity");
+    }
+
+    #[test]
+    fn paired_phones_round_trip_replace_and_remove() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize_schema(&conn).unwrap();
+        let row = |hash: &str| PairedPhoneRow {
+            phone_id: "p1".into(),
+            name: "Pixel 2".into(),
+            token_hash: hash.into(),
+            created_at: "2026-11-06T00:00:00+08:00".into(),
+            last_seen_at: None,
+        };
+        save_paired_phone_in(&conn, &row("aa")).unwrap();
+        save_paired_phone_in(&conn, &row("bb")).unwrap(); // paired again: new token
+        assert_eq!(paired_phones_in(&conn).unwrap(), vec![row("bb")]);
+        assert!(remove_paired_phone_in(&conn, "p1").unwrap());
+        assert!(!remove_paired_phone_in(&conn, "p1").unwrap());
+        assert!(paired_phones_in(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn paired_phone_json_never_carries_the_token_hash() {
+        let row = PairedPhoneRow {
+            phone_id: "p1".into(), name: "n".into(), token_hash: "secret-hash".into(),
+            created_at: "t".into(), last_seen_at: None,
+        };
+        assert!(!serde_json::to_string(&row).unwrap().contains("secret-hash"));
     }
 
     #[test]

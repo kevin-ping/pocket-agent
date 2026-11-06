@@ -85,11 +85,13 @@ pub fn run() {
                     .ok();
             }
 
-            // Start local API server for push notifications (port 8650)
+            // Start local API server for push notifications (port 8650;
+            // POCKET_AGENT_PORT lets a test PA run beside the real one).
             {
                 let server_handle = handle.clone();
+                let port = std::env::var("POCKET_AGENT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8650);
                 tauri::async_runtime::spawn(async move {
-                    crate::api::server::start_server(server_handle, 8650).await;
+                    crate::api::server::start_server(server_handle, port).await;
                 });
             }
             // ── macOS top menu bar (app name next to Apple logo) ──
@@ -166,6 +168,10 @@ pub fn run() {
             api::runs::pending_computer_approvals,
             api::subagents::settle_background_subagents,
             api::remote::is_ui_remote_active,
+            api::pairing::pairing_status,
+            api::pairing::cancel_pairing,
+            api::pairing::list_paired_phones,
+            api::pairing::remove_paired_phone,
             commands::history::open_chat_history,
             commands::history::save_chat_message,
 

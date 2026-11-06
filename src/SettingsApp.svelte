@@ -24,12 +24,15 @@
     settingsText,
     wakeSettingsText,
     meshSettingsText,
+    phoneSettingsText,
     type SettingsLang,
   } from './lib/settingsI18n';
   import { convLabelsLang } from './lib/i18n';
   import { wakeErrorMessage, wakeSaveNotice } from './lib/wakeErrors';
 
-  type Section = 'general' | 'avatar' | 'voice' | 'conversation' | 'interruption' | 'wake';
+  type Section = 'general' | 'avatar' | 'voice' | 'conversation' | 'interruption' | 'wake' | 'phones';
+  type PairingStatus = { phone_name: string; code: string; expires_in: number };
+  type PairedPhone = { phone_id: string; name: string; created_at: string; last_seen_at: string | null; online: boolean };
   type SaveResponse = { config: AppSettings; revision: number; wake_error?: string };
   type WakeModelStatus = { ready: boolean; error?: { code: string; params: Record<string, string> } | null };
   type SettingsBootstrap = { config?: AppSettings; error?: string };
@@ -107,6 +110,53 @@
   let wakeTestResult = $state('');
   let wakeText = $derived(wakeSettingsText(local?.ui_lang ?? 'en'));
   let meshText = $derived(meshSettingsText(local?.ui_lang ?? 'en'));
+  let phoneText = $derived(phoneSettingsText(local?.ui_lang ?? 'en'));
+
+  // Devices (FEAT-MP2). A phone's /pair/start opens this window and emits
+  // pairing-changed; the code comes only through this desktop-only command.
+  let pairing = $state<PairingStatus | null>(null);
+  let pairedPhones = $state<PairedPhone[]>([]);
+  let pairingTicker: ReturnType<typeof setInterval> | null = null;
+  async function refreshPhones() {
+    if (!isTauri) return;
+    try {
+      const [status, phones] = await Promise.all([
+        invoke<PairingStatus | null>('pairing_status'),
+        invoke<PairedPhone[]>('list_paired_phones'),
+      ]);
+      if (status && !pairing) active = 'phones';
+      pairing = status;
+      pairedPhones = phones;
+      if (pairingTicker) clearInterval(pairingTicker);
+      pairingTicker = status ? setInterval(() => {
+        if (!pairing) return;
+        if (pairing.expires_in <= 1) void refreshPhones();
+        else pairing = { ...pairing, expires_in: pairing.expires_in - 1 };
+      }, 1000) : null;
+    } catch (e) {
+      console.warn('[settings] phones:', e);
+    }
+  }
+  async function cancelPairing() {
+    try { await invoke('cancel_pairing'); } catch (e) { error = String(e); }
+  }
+  // WKWebView has no window.confirm: the first click arms the button, the second removes.
+  let removing = $state<string | null>(null);
+  async function removePhone(phone: PairedPhone) {
+    if (removing !== phone.phone_id) {
+      removing = phone.phone_id;
+      setTimeout(() => { if (removing === phone.phone_id) removing = null; }, 4000);
+      return;
+    }
+    removing = null;
+    try { await invoke('remove_paired_phone', { phoneId: phone.phone_id }); }
+    catch (e) { error = String(e); }
+    void refreshPhones();
+  }
+  if (isTauri) {
+    void refreshPhones();
+    void listen('pairing-changed', () => void refreshPhones());
+  }
   function applyModelStatus(status: WakeModelStatus) {
     modelReady = status.ready;
     modelError = status.error
@@ -165,6 +215,7 @@
     { id: 'conversation' as Section, icon: '◫', label: text.conversation },
     { id: 'interruption' as Section, icon: '↯', label: text.interruption },
     { id: 'wake' as Section, icon: '◎', label: text.wake },
+    { id: 'phones' as Section, icon: '▯', label: phoneText.section },
   ]);
 
   async function loadSettings() {
@@ -623,6 +674,35 @@
               <div class="wake-tags">{#each wakeWords as word}<button type="button" class="wake-tag" onclick={() => local && (local.wake_phrase = word)}>{word}</button>{/each}</div>
             {/if}
           </section>
+        {:else if active === 'phones'}
+          <section class="card">
+            {#if pairing}
+              <div class="sample pairing" role="alert">
+                <div>
+                  <strong>{phoneText.pairingAsk(pairing.phone_name)}</strong>
+                  <p class="pair-code" aria-label={phoneText.pairingTitle}>{pairing.code}</p>
+                  <p>{phoneText.pairingHint} · {phoneText.expiresIn(pairing.expires_in)}</p>
+                </div>
+                <button class="ghost" onclick={cancelPairing}>{phoneText.cancelPairing}</button>
+              </div>
+            {:else}
+              <p class="wake-help">{phoneText.noPairing}</p>
+            {/if}
+          </section>
+          <section class="card">
+            <p class="mesh-heading">{phoneText.paired}</p>
+            {#each pairedPhones as phone (phone.phone_id)}
+              <div class="sample">
+                <div>
+                  <strong>{phone.name}</strong>
+                  <p>{phone.online ? phoneText.online : phoneText.offline}{phone.last_seen_at ? ` · ${phoneText.lastSeen} ${new Date(phone.last_seen_at).toLocaleString()}` : ''}</p>
+                </div>
+                <button class="ghost danger" title={phoneText.removeHint} onclick={() => removePhone(phone)}>{removing === phone.phone_id ? phoneText.removeConfirm : phoneText.remove}</button>
+              </div>
+            {:else}
+              <p class="wake-help">{phoneText.none}</p>
+            {/each}
+          </section>
         {/if}
       </div>
       <footer>
@@ -681,4 +761,5 @@
   .backdrop{position:fixed;inset:0;background:#00000033;display:grid;place-items:center;z-index:20}.modal{width:360px;background:#ffffff;border:1px solid #e2e5ed;border-radius:12px;padding:20px;box-shadow:0 20px 60px #00000030}.modal h3{font-size:15px;color:#1e2235}.modal p{color:#6a7185;font-size:11px;line-height:1.5;margin:6px 0 16px}.modal label{display:grid;gap:6px;font-size:11px;color:#2a2f42}.modal input{width:100%}.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
   @media(max-width:740px){.shell{grid-template-columns:170px 1fr}.content,header,footer{padding-left:18px;padding-right:18px}.field{gap:12px}.control,select,input[type=range]{min-width:0;width:190px}.asset-grid{grid-template-columns:1fr}.asset+.asset{border-left:0;border-top:1px solid #e2e5ed}}
   }
+  .pair-code{font-size:30px!important;letter-spacing:8px;font-weight:600;color:#1e2235!important;margin:8px 0 4px!important;font-variant-numeric:tabular-nums}
 </style>

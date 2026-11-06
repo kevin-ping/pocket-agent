@@ -91,5 +91,16 @@ Same layers as on macOS (README, *Check the install, step by step*):
 - **Port 1420 in use**: `npm run tauri dev` stops and prints the PID. Check with `netstat -ano | findstr :1420` and end it with `taskkill /PID <PID>` if it is safe.
 - **Port 8651 in use by another program**: `netstat -ano | findstr :8651` shows it. A voice service left by an earlier PA is replaced automatically.
 - **Avatar**: on 100%-scaled displays the avatar is rendered at twice the size and scaled down, so it stays as sharp as on a Retina Mac.
-- **Phone terminal**: not tried on Windows yet. The phone connects to port 8650, which Windows Firewall blocks by default. Allow inbound TCP 8650 for the *Private* profile and the local subnet only. Never port-forward it: the phone can approve desktop actions on this PC.
+- **Phone terminal**: not tried on a real phone with Windows yet. Windows Firewall blocks the phone by default; allow, for the *Private* profile and the local subnet only:
+  - inbound **TCP 8650** — the phone's connections (pairing, `/phone`, `/ui`, `/audio`);
+  - inbound **UDP 5353** — mDNS, so the phone's 「添加电脑」 scan finds this PC.
+
+  From an elevated PowerShell:
+
+  ```powershell
+  New-NetFirewallRule -DisplayName "Pocket Agent (phone)" -Direction Inbound -Protocol TCP -LocalPort 8650 -Profile Private -RemoteAddress LocalSubnet -Action Allow
+  New-NetFirewallRule -DisplayName "Pocket Agent (mDNS)"  -Direction Inbound -Protocol UDP -LocalPort 5353 -Profile Private -RemoteAddress LocalSubnet -Action Allow
+  ```
+
+  Windows' own mDNS service also uses UDP 5353; whether Pocket Agent's announcement shows up next to it has not been checked yet. If the phone's scan does not list this PC, use 「手动输入地址」 on the phone with this PC's LAN address (`ipconfig` → IPv4 Address) and leave the key empty to pair with a code. Never port-forward 8650: the phone can approve desktop actions on this PC.
 - **Not yet available**: an installer (MSI/NSIS), log files for a build without a terminal, and the colour tray icon. See `docs/windows-port.md`.

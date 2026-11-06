@@ -344,3 +344,40 @@ const MESH_TRANSLATIONS: Record<SettingsLang, MeshStrings> = {
 export function meshSettingsText(lang: string): MeshStrings {
   return MESH_TRANSLATIONS[(SETTINGS_LANGS as readonly string[]).includes(lang) ? lang as SettingsLang : 'en'];
 }
+
+// Settings → Devices (FEAT-MP2): pairing panel and paired list (phones today, maybe tablets later). zh / en, like the wake strings.
+const phonesEn = {
+  section: 'Devices',
+  pairingTitle: 'Pair a device',
+  pairingAsk: (name: string) => `${name} wants to pair with this computer`,
+  pairingHint: 'Type this code on the device. Only this screen shows it.',
+  expiresIn: (s: number) => `Expires in ${s} s`,
+  cancelPairing: 'Cancel',
+  noPairing: 'To pair, open Pocket Agent on the phone or tablet → back → Add computer.',
+  paired: 'Paired devices',
+  none: 'No devices paired yet.',
+  online: 'Online',
+  offline: 'Offline',
+  lastSeen: 'Last seen',
+  remove: 'Remove',
+  removeConfirm: 'Click again to remove',
+  removeHint: 'The device is disconnected at once and has to pair again.',
+};
+const phonesZh: typeof phonesEn = {
+  section: '设备',
+  pairingTitle: '配对设备',
+  pairingAsk: (name: string) => `「${name}」想要配对这台电脑`,
+  pairingHint: '在设备上输入这个配对码。配对码只显示在这台电脑上。',
+  expiresIn: (s: number) => `${s} 秒后失效`,
+  cancelPairing: '取消',
+  noPairing: '配对方法：在手机或平板上打开 Pocket Agent → 返回键 → 添加电脑。',
+  paired: '已配对的设备',
+  none: '还没有配对的设备。',
+  online: '在线',
+  offline: '离线',
+  lastSeen: '上次在线',
+  remove: '移除',
+  removeConfirm: '再点一次移除',
+  removeHint: '设备会立即断开，之后需要重新配对。',
+};
+export function phoneSettingsText(lang: string) { return lang === 'zh' ? phonesZh : phonesEn; }
