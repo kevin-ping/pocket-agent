@@ -79,7 +79,31 @@
 - **麦克风**:Windows 隐私设置挡住时可能是打开失败，也可能录到全零;两种情况都给出设置路径。
 - 提交按条目拆分，但 WIN1–WIN5 的 Rust 改动交织，合并为一个提交。
 
+实机运行后又发现并修复(均已提交):
+- **启动器进程**:venv 的 `python.exe` 和 pip 生成的 `edge-tts.exe` 在 Windows 上是启动器，真正的解释器是它的子进程。`Child::kill` 只杀启动器，stt-server 会变孤儿 → `platform::kill_tree`(`taskkill /T /F`)。
+- **8650 被子进程继承**:tokio 的监听 socket 在 Windows 上可继承,PA 被强杀后 stt-server 一直占着 8650,下次启动 API 绑不上 → 绑定后 `SetHandleInformation` 去掉继承标志。
+- **VAD 全部失效**(macOS 新装同样受影响):silero-vad 6 不再带 torchaudio,`read_audio` 报错 → 用服务自己的 WAV 读取器。
+- **唤醒词「仅本人」核对失败**:`_kws_verify` 的 `NamedTemporaryFile` 打开状态下被再次打开 → 先关闭、用完删除。
+- **静音录音**:默认输入设备是 Steam Streaming Microphone(纯零)。声纹录制报成通用的「唤醒服务出错」→ 新错误码 `wake_mic_silent`;麦克风提示按平台给设置路径。
+- **头像模糊**:DPR 1 的屏幕上画布只有 96 物理像素 → DPR < 2 时按 2/DPR 倍布局再缩回。
+- **dev 模式改 `resources/` 不生效**:运行的是构建时复制到 `target\debug\resources` 的脚本，改 Python 后需要触发一次 Rust 重新构建。
+
+实测结果(Windows 10 22H2,Hermes v0.22.7):`cargo test` 153 项通过;`npm run tauri dev` 启动、建 venv、语音服务 `/health`;文字对话经本机 Hermes 返回并播报;中文转写准确;热键录音与转写;唤醒词与声纹录制、测试;`computer_use` 启用后 doctor 全绿;强杀 PA 后重开，旧 stt-server 被替换、8650 正常绑定。未测：手机终端连 Windows、Mac 回归。
+
+安装文档：[docs/windows-install.md](windows-install.md)。
+
 ## 第二批(本批不做，写入 roadmap)
+
+新用户装机时的问题大多在配置和环境层面，用户身边没有大模型帮忙排查，所以第二批优先做:
+- **锁定语音环境依赖版本**(两个平台分别验证过的锁定清单)，避免 silero-vad 这类上游变化。
+- **CI**:Windows 和 macOS runner 上从零建 venv,实际调用 `/transcribe`、`/vad` 和唤醒词核对。
+- **自动准备 Python**(如 uv 下载固定版本),不依赖用户机器上已有的 Python。
+- **体检页**:检查 Hermes 是否可达、key 是否匹配、API 是否开启、`computer_use` 是否启用、技能是否安装、麦克风电平、语音服务、唤醒模型;能修的给一键修复。
+- **PA 内选麦克风**并显示实时电平;识别虚拟设备。
+- **日志落文件 +「导出诊断」按钮**。
+- 手机终端：防火墙只对专用网络放行 8650。
+
+原计划项:
 唤醒词与声纹实机验收、连续对话、`tauri.conf.json` 加 `bundle.windows`(WebView2 安装方式、NSIS)、托盘彩色图标、日志落文件(GUI 无控制台)、Windows 防火墙放行 8650(手机终端)、README/README_AGENTS/HERMES 的 Windows 安装章节、`silero-vad` 拉进 torch 导致安装体积大的问题、agent-desktop 与 computer_use 在 Windows 上的对照实测。
 
 ## 关键文件

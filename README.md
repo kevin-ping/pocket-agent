@@ -6,7 +6,7 @@
 
 Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust**. It connects to a local [Hermes](https://github.com/nousresearch/hermes) agent gateway via SSE streaming for real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
 
-> **Platform status:** PA runs on **macOS only**; Windows is not developed yet. The only supported backend is **Hermes** (OpenClaw is no longer supported). The **Android phone terminal is experimental**: there is no store release, so you build the APK yourself and install it over `adb`, which needs **Developer options → USB debugging** turned on on the phone (see [android/README.md](android/README.md)).
+> **Platform status:** PA runs on **macOS**, and on **Windows 10/11 from source (experimental, no installer yet)**: see [docs/windows-install.md](docs/windows-install.md). The only supported backend is **Hermes** (OpenClaw is no longer supported). The **Android phone terminal is experimental**: there is no store release, so you build the APK yourself and install it over `adb`, which needs **Developer options → USB debugging** turned on on the phone (see [android/README.md](android/README.md)).
 
 ---
 
@@ -55,7 +55,7 @@ Install Hermes and Pocket Agent on each Mac, then enable the Hermes API computer
 
 ### Voice Pipeline
 
-1. **Press hotkey** (default: `RightShift`) — macOS CGEventTap captures the global hotkey
+1. **Press hotkey** (default: `RightShift`) — macOS CGEventTap (Windows: a low-level keyboard hook via rdev) captures the global hotkey
 2. **Recording starts** — pre-warmed cpal Stream Daemon activates instantly (~11ms latency)
 3. **Press hotkey again** — recording stops, WAV saved to temp file
 4. **STT** — faster-whisper transcribes locally (auto language detection, configurable model via `STT_MODEL`)
@@ -120,7 +120,8 @@ always-on mic → sherpa-onnx KWS (wake phrase)
 - **Animated mesh avatar** — the widget circle shows a 2D mesh avatar (xingyin) that blinks and idles, reacts to listening / thinking / speaking, and follows the reply emotion; falls back to the image or CSS avatar if it can't load (see [docs/mesh-avatar.md](docs/mesh-avatar.md))
 - **Compact widget** — 220x360px always-on-top window, dark sci-fi aesthetic
 - **Phone terminal (experimental)** — an Android phone on the same LAN can be PA's screen, microphone and speaker (`android/`); the desktop window hides while the phone drives. Hermes can open, flip and read the phone camera and move PA between the phone and the Mac by voice (`switch_device`), through PA's own MCP server. The APK is built and installed over `adb` with USB debugging on (see [android/README.md](android/README.md))
-- **macOS native** (macOS only; no Windows build yet) — global hotkey via CGEventTap, CoreAudio recording, menu bar tray
+- **macOS native** — global hotkey via CGEventTap, CoreAudio recording, menu bar tray
+- **Windows (experimental)** — runs from source on Windows 10/11 with a native Windows Hermes; same hotkey, voice and desktop-control features (see [docs/windows-install.md](docs/windows-install.md))
 
 ---
 
@@ -174,7 +175,7 @@ Pocket Agent talks to Hermes over its OpenAI-compatible API (`/v1/runs`, falling
 Pocket Agent is a local desktop client. Please understand these boundaries:
 
 - **API key handling** — `API_SERVER_KEY` is stored in `.env` (plaintext on disk). Never commit `.env` to version control.
-- **Global input monitoring** — the hotkey listener uses macOS Accessibility APIs (CGEventTap). This grants system-level input monitoring capability. Only run builds you trust.
+- **Global input monitoring** — the hotkey listener uses macOS Accessibility APIs (CGEventTap), on Windows a low-level keyboard hook. This grants system-level input monitoring capability. Only run builds you trust.
 - **Microphone access** — audio is captured via CoreAudio and processed **entirely locally** by faster-whisper. No audio data leaves your machine for STT.
 - **Wake engine on macOS older than 13.4** — sherpa-onnx 1.12.26 cannot load there (its bundled onnxruntime needs macOS 13.4), so the voice environment installs sherpa-onnx 1.10.46 from PyPI instead, like every other dependency. Nothing is downloaded from outside PyPI.
 - **Avatar** — the mesh avatar is bundled with the app and loaded from the app's own origin; it makes no network requests. A custom `.mavatar` is picked from a local file and stored in the settings database (zip header and 10 MB limit checked).
@@ -205,7 +206,7 @@ The responsibility for safe operation is shared across three layers:
 >
 > **Agents: when installing, also read [HERMES.md](HERMES.md)** and carry out its setup steps, such as copying PA's skills into the backend profile. Its performance tuning and local Hermes patches are optional, not part of a basic install.
 
-Pocket Agent runs on **macOS 12+** only. The UI is built for the WebKit that ships with macOS 12.0 (Safari 15.0). Verified so far: Apple Silicon on macOS 26 only; macOS 12–15 and Intel Macs are supported by the build settings but not yet verified on real hardware (see [docs/fresh-install-verification.md](docs/fresh-install-verification.md)). Every install needs a running **Hermes** gateway (set it up first, below). Then pick one route:
+Pocket Agent runs on **macOS 12+**; on Windows, follow [docs/windows-install.md](docs/windows-install.md) instead of the routes below. The UI is built for the WebKit that ships with macOS 12.0 (Safari 15.0). Verified so far: Apple Silicon on macOS 26 only; macOS 12–15 and Intel Macs are supported by the build settings but not yet verified on real hardware (see [docs/fresh-install-verification.md](docs/fresh-install-verification.md)). Every install needs a running **Hermes** gateway (set it up first, below). Then pick one route:
 
 The **basic install** is text chat, dictation, spoken replies and interrupting them. Wake word / voiceprint, computer tools and the phone app are optional features, each checked separately.
 
