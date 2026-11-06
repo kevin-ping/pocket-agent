@@ -59,6 +59,32 @@ Install Hermes and Pocket Agent on each Mac, then enable the Hermes API computer
   +--------------+                            +------------------+
 ```
 
+### Computers and Phones (many-to-many)
+
+Every computer runs its own PA and Hermes. Phones and computers pair many-to-many, and each phone serves one computer at a time:
+
+```
+ +-------------------+      +-------------------+      +-------------------+
+ | Mac A             |      | Mac B             |      | Mac C             |
+ | PA :8650 + Hermes |      | PA :8650 + Hermes |      | PA :8650 + Hermes |
+ +---------+---------+      +----+---------+----+      +---------+---------+
+           |                     |         |                     |
+           |      /phone: always connected, one per pairing      |
+           |                     |         |                     |
+ +---------+---------------------+--+   +--+---------------------+---------+
+ | Phone 1   paired: A, B           |   | Phone 2   paired: B, C           |
+ | occupant: Mac B                  |   | occupant: Mac C                  |
+ | /ui/ws + /audio -> Mac B only    |   | /ui/ws + /audio -> Mac C only    |
+ +----------------------------------+   +----------------------------------+
+```
+
+- **Pairing** — on each computer open Settings → Devices → Add phone and scan the QR code with the phone app. A phone can pair with any number of computers, and a computer with any number of phones.
+- **Always connected** — the phone keeps a `/phone` control connection to every paired computer's saved address (computers never broadcast). Each PA always knows which phones are online, which computer is using each one, and whether the app is on screen.
+- **One computer at a time** — the phone decides which computer uses it (the occupant). Only that computer gets `/ui/ws` and `/audio`, which carry the screen, mic, speaker and camera. Any other computer that asks is told the phone is busy until the occupant's PA moves back to its own computer.
+- **Choosing a phone** — when Hermes calls `switch_device(phone)` on a computer with several phones, PA asks the online phone that used it most recently.
+- **Lease** — if the occupant's computer is unreachable for 90 s (asleep or off the network), the phone frees itself.
+- **Anywhere on the LAN** — the phone only needs to reach each computer's port 8650, so you can talk to Hermes from any room. Keep that port on the LAN (see [Privacy and Security](#privacy-and-security)).
+
 ### Voice Pipeline
 
 1. **Press hotkey** (default: `RightShift`) — macOS CGEventTap (Windows: a low-level keyboard hook via rdev) captures the global hotkey
