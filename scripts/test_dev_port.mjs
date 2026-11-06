@@ -76,3 +76,17 @@ test('windows: netstat failure is unknown; :14200 is not :1420', () => {
   const out = '  TCP    0.0.0.0:14200   0.0.0.0:0   LISTENING   11\n  TCP    0.0.0.0:1420    0.0.0.0:0   LISTENING   22\n';
   assert.deepEqual(checkPort(1420, 'win32', () => ok(out)), { state: 'busy', listeners: [{ pid: '22', command: '' }] });
 });
+
+test('windows: listeners are found whatever language the state column is in', () => {
+  const out = [
+    '  TCP    127.0.0.1:1420     0.0.0.0:0          侦听            33',
+    '  TCP    [::1]:1420         [::]:0             ABHÖREN         44',
+    '  TCP    127.0.0.1:1420     127.0.0.1:50000    ESTABLISHED     33',
+    '  TCP    127.0.0.1:50000    127.0.0.1:1420     ESTABLISHED     55',
+    '  UDP    0.0.0.0:1420       *:*                                66',
+  ].join('\r\n');
+  assert.deepEqual(checkPort(1420, 'win32', () => ok(out)), {
+    state: 'busy', listeners: [{ pid: '33', command: '' }, { pid: '44', command: '' }],
+  });
+  assert.equal(checkPort(50000, 'win32', () => ok(out)).state, 'free');
+});

@@ -4,12 +4,14 @@
 
 ## Overview
 
-Pocket Agent (PA) is a macOS desktop voice companion. It connects to a Hermes agent gateway (the only supported backend; OpenClaw is no longer supported) and provides push-to-talk voice interaction. macOS only — there is no Windows build yet.
+Pocket Agent (PA) is a desktop voice companion. It connects to a Hermes agent gateway (the only supported backend; OpenClaw is no longer supported) and provides push-to-talk voice interaction.
+
+> **Installing on Windows?** Do not follow the steps below (they are for macOS). Follow [docs/windows-install.md](docs/windows-install.md): it has the Windows prerequisites, the Hermes differences (`%LOCALAPPDATA%\hermes`), and how to check each step.
 
 - **GitHub**: https://github.com/kevin-ping/pocket-agent
 - **Stack**: Tauri 2 + Svelte 5 + Rust
-- **Platform**: macOS 12+ (UI built for the macOS 12.0 WebKit; verified only on Apple Silicon, macOS 26; macOS 12–15 and Intel not yet verified)
-- **Current version**: 0.3.0
+- **Platform**: macOS 12+ (UI built for the macOS 12.0 WebKit; verified only on Apple Silicon, macOS 26; macOS 12–15 and Intel not yet verified). Windows 10/11 x64 from source, experimental (verified on Windows 10 22H2)
+- **Current version**: 0.3.1
 
 ---
 
@@ -149,6 +151,14 @@ Check in this order; stop at the first failure.
 5. *(Optional)* **Wake word / voiceprint** — Settings → Voice
 6. *(Optional)* **Computer tools** — [docs/computer-interaction.md](docs/computer-interaction.md)
 
+### Updating an existing install
+
+```bash
+git pull && npm install && npm run tauri dev
+```
+
+The voice environment needs no manual step: when `requirements-stt.txt` changes, PA re-runs `pip install` on its next start and keeps the previous environment if that fails. On macOS older than 13.4 the wake engine is sherpa-onnx 1.10.46 (1.12.26 needs 13.4); an existing venv switches to it on the next start while online.
+
 ---
 
 ## Troubleshooting
@@ -161,6 +171,8 @@ Check in this order; stop at the first failure.
 - **Recording fails** — "找不到麦克风": connect one or pick an input in System Settings → Sound → Input, then press the hotkey again. "麦克风权限被拒绝": allow PA (dev mode: the terminal) in Privacy & Security → Microphone, then restart PA.
 - **No voice output** — spoken replies use Microsoft's online TTS service, so check the network first; transcription working offline says nothing about TTS. edge-tts in PATH? EDGE_TTS_BIN correct? A WebSocket **403** in the `[TTS]` log means the edge-tts that ran is outdated: `<that python> -m pip install -U edge-tts` for that copy.
 - **`npm run tauri dev` stops with "port 1420 is in use"** — another process holds the dev port. Nothing is stopped automatically, not even an old vite from this repo: the script reports PID + command and exits non-zero. Check with `lsof -iTCP:1420 -sTCP:LISTEN`, stop that process yourself (`kill <PID>`), then rerun. "could not check whether port 1420 is free" means the check itself failed (e.g. `lsof`); check by hand.
+- **`npm run dev` / `npm run build` stops with "run npm install first"** — `node_modules` does not match `package-lock.json` (common after `git pull`); the script lists the packages. Run `npm install` and rerun. Nothing is installed automatically.
+- **Wake word unavailable on macOS 12 / 13.0–13.3** — check `~/.pocket-agent/venv/bin/python -m pip show sherpa-onnx` reports 1.10.46. If it still shows 1.12.26, restart PA while online so the requirements update can run; read the `[venv]` lines if it fails.
 - **Cannot connect to backend** — the chat error names the gateway address and the config source. Gateway running? API_SERVER and API_SERVER_KEY match `~/.hermes/.env`? Check the `[config]` startup line for which file (or terminal variable) was used.
 - **Build fails** — cargo check and npm run build both pass? Rust and Node versions current?
 

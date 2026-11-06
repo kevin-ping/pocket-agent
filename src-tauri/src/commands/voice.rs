@@ -376,9 +376,6 @@ pub(crate) fn check_silero_vad_samples(samples: &[i16], sample_rate: u32) -> Opt
         wav.extend_from_slice(&s.to_le_bytes());
     }
 
-    // Never wait out a reload here: the barge-in gate cannot stall for it.
-    let _txn = crate::voice::stt::try_voice_txn()?;
-
     // 800ms: this call blocks the conversation worker thread during the
     // barge-in confirmation gate, so a slow stt-server must not stall the
     // interrupt. Past the deadline the caller applies its own failure policy.
@@ -560,7 +557,17 @@ pub async fn stop_enroll_recording(
 
     let wav_path = tokio::task::spawn_blocking(move || stop_recording_no_handle())
         .await
-        .map_err(|e| format!("停止录音失败: {}", e))??;
+        .map_err(|e| format!("停止录音失败: {}", e))?
+        // The wake settings page shows only coded errors; a silent mic is one
+        // the user can fix, so give it a code instead of "wake service error".
+        .map_err(|e| {
+            if e.starts_with(crate::voice::record::SILENT_RECORDING) {
+                eprintln!("[voice] enroll recording is pure silence");
+                crate::voice::sherpa_wake::wake_error("wake_mic_silent", serde_json::json!({}))
+            } else {
+                e
+            }
+        })?;
 
     let path_clone = wav_path.clone();
     let duration_secs = tokio::task::spawn_blocking(move || wav_duration_secs(&path_clone))
@@ -584,7 +591,7 @@ pub async fn enroll_speaker(
     name: String,
     audio_path: String,
 ) -> Result<crate::voice::sherpa_wake::EnrollResult, String> {
-    // Off the main thread: the request may wait out a voice-engine reload.
+    // Off the main thread: enrollment is a blocking HTTP request.
     tokio::task::spawn_blocking(move || crate::voice::sherpa_wake::enroll_speaker(&name, &audio_path))
         .await
         .map_err(|e| format!("enroll task failed: {e}"))?

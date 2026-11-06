@@ -62,6 +62,12 @@
   $: left = -12 + offsetX - (SIZE / 2) * (scale - 1);
   $: top = -10 + offsetY - (SIZE / 2) * (scale - 1);
 
+  // The element renders at min(devicePixelRatio, 2) backing pixels per CSS pixel. On a 100%-scaled
+  // display (most Windows PCs: DPR 1) the 1600px picture then drops to ~96 px through mipmaps and
+  // the face goes soft. Lay the element out `supersample` times larger and scale it back down, so
+  // it always renders at least 2 backing pixels per displayed CSS pixel, as on a Retina Mac.
+  const supersample = Math.max(1, 2 / Math.min(typeof window === 'undefined' ? 2 : window.devicePixelRatio || 1, 2));
+
   let boxW = 0;
   let boxH = 0;
   $: fill = variant === 'fill';
@@ -135,10 +141,11 @@
     src={MESH_SRC}
     fit="contain"
     expression={expressions[state] ?? 'neutral'}
-    style:width="{side}px"
-    style:height="{side}px"
+    style:width="{side * supersample}px"
+    style:height="{side * supersample}px"
     style:left="{elLeft}px"
     style:top="{elTop}px"
+    style:transform={supersample === 1 ? null : `scale(${1 / supersample})`}
     on:load={handleLoad}
     on:error={handleError}
   ></mesh-avatar>
@@ -167,5 +174,6 @@
   .mesh-face mesh-avatar {
     position: absolute;
     pointer-events: none;
+    transform-origin: 0 0;
   }
 </style>

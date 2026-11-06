@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="devices_empty">Aucun ordinateur appairé pour le moment. Sur l\'ordinateur, ouvrez Réglages de Pocket Agent → Appareils → Ajouter un téléphone, puis touchez « Scanner pour ajouter un appareil » ci-dessous.</string>
+    <string name="scan_add_device">Scanner pour ajouter un appareil</string>
+    <string name="status_in_use">En cours d\'utilisation</string>
+    <string name="status_in_use_offline">En cours d\'utilisation · hors ligne</string>
+    <string name="status_busy">Renvoyez d\'abord « %1$s » vers l\'ordinateur</string>
+    <string name="status_online">En ligne</string>
+    <string name="status_offline">Hors ligne</string>
+    <string name="action_open">Ouvrir</string>
+    <string name="action_connect">Connecter</string>
+    <string name="cannot_connect">Impossible de se connecter à « %1$s » pour le moment</string>
+    <string name="remove_title">Retirer « %1$s » ?</string>
+    <string name="remove_message">Ce téléphone oubliera cet ordinateur. Vous pouvez aussi retirer ce téléphone dans Réglages → Appareils sur l\'ordinateur.</string>
+    <string name="cancel">Annuler</string>
+    <string name="remove">Retirer</string>
+
+    <string name="camera_needed_scan">L\'autorisation d\'accès à la caméra est nécessaire pour scanner le QR code</string>
+    <string name="camera_needed_see">L\'autorisation d\'accès à la caméra est nécessaire pour que Pocket Agent puisse voir</string>
+    <string name="mic_needed">L\'autorisation d\'accès au micro est nécessaire pour parler à Pocket Agent</string>
+
+    <string name="close">Fermer</string>
+    <string name="scan_hint">Sur l\'ordinateur, ouvrez Pocket Agent\nRéglages → Appareils → Ajouter un téléphone</string>
+    <string name="scan_hint_sub">Le QR code est valable 2 minutes</string>
+
+    <string name="pairing_title">Appairage…</string>
+    <string name="pairing_sub">Le téléphone et l\'ordinateur doivent être sur le même réseau local</string>
+    <string name="paired">« %1$s » ajouté</string>
+
+    <string name="scan_again">Scanner à nouveau</string>
+    <string name="back">Retour</string>
+    <string name="error_invalid_title">Ce n\'est pas un QR code d\'appairage</string>
+    <string name="error_invalid_message">Scannez le code affiché dans Réglages → Appareils → Ajouter un téléphone sur l\'ordinateur.</string>
+    <string name="error_expired_title">QR code expiré</string>
+    <string name="error_expired_message">Sur l\'ordinateur, cliquez à nouveau sur Ajouter un téléphone pour obtenir un nouveau code.</string>
+    <string name="error_unreachable_title">Impossible de joindre l\'ordinateur</string>
+    <string name="error_unreachable_message">Le téléphone et l\'ordinateur doivent être sur le même réseau local.</string>
+    <string name="error_not_that_computer_title">Impossible de vérifier l\'ordinateur</string>
+    <string name="error_not_that_computer_message">L\'autre appareil n\'a pas pu prouver qu\'il est l\'ordinateur qui affiche le code. Rien n\'a été enregistré.</string>
+    <string name="error_failed_title">Échec de l\'appairage</string>
+    <string name="error_failed_message">L\'ordinateur a répondu avec le statut %1$d. Réessayez.</string>
+    <string name="error_camera_title">Impossible d\'ouvrir la caméra</string>
+    <string name="error_camera_message">Une autre application l\'utilise peut-être. Fermez-la et réessayez.</string>
+
+    <string name="notification_channel">Voix de Pocket Agent</string>
+    <string name="notification_using">Utilisé par %1$s</string>
+    <string name="notification_idle">Non connecté à un ordinateur</string>
+    <string name="notification_disconnect">Déconnecter</string>
+</resources>

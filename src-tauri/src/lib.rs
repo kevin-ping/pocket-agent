@@ -1,4 +1,5 @@
 mod api;
+mod platform;
 mod commands;
 mod voice;
 
@@ -72,16 +73,7 @@ pub fn run() {
                         match voice::venv::ensure_venv(&venv_handle) {
                             Ok(()) => {
                                 std::env::set_var("TTS_PRIMARY_VOICE", &voice_for_stt);
-                                #[cfg(target_os = "macos")]
-                                let repair = voice::sherpa_compat::ensure_compat;
-                                #[cfg(not(target_os = "macos"))]
-                                let repair = || Ok(false);
-                                let reload_handle = venv_handle.clone();
-                                start_voice_services(
-                                    || voice::stt::ensure_stt_server(Some(venv_handle.clone())),
-                                    repair,
-                                    || voice::stt::restart_when_idle(reload_handle),
-                                );
+                                voice::stt::ensure_stt_server(Some(venv_handle.clone()));
                             }
                             Err(e) => {
                                 eprintln!("[venv] bootstrap failed: {}", e);
@@ -93,29 +85,35 @@ pub fn run() {
                     .ok();
             }
 
-            // Start local API server for push notifications (port 8650)
+            // Start local API server for push notifications (port 8650;
+            // POCKET_AGENT_PORT lets a test PA run beside the real one).
             {
                 let server_handle = handle.clone();
+                let port = std::env::var("POCKET_AGENT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8650);
                 tauri::async_runtime::spawn(async move {
-                    crate::api::server::start_server(server_handle, 8650).await;
+                    crate::api::server::start_server(server_handle, port).await;
                 });
             }
             // ── macOS top menu bar (app name next to Apple logo) ──
-            use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
-            let about_item = PredefinedMenuItem::about(app, None, None)?;
-            let sep = PredefinedMenuItem::separator(app)?;
-            let app_settings = MenuItemBuilder::with_id("app-settings", "Settings…").build(app)?;
-            let sep2 = PredefinedMenuItem::separator(app)?;
-            let quit_item = PredefinedMenuItem::quit(app, None)?;
-            let app_submenu = Submenu::with_items(app, "Pocket Agent", true, &[&about_item, &sep, &app_settings, &sep2, &quit_item])?;
-            let menu = Menu::with_items(app, &[&app_submenu])?;
-            app.set_menu(menu)?;
+            // Windows/Linux would put this bar inside every window, so macOS only.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
+                let about_item = PredefinedMenuItem::about(app, None, None)?;
+                let sep = PredefinedMenuItem::separator(app)?;
+                let app_settings = MenuItemBuilder::with_id("app-settings", "Settings…").build(app)?;
+                let sep2 = PredefinedMenuItem::separator(app)?;
+                let quit_item = PredefinedMenuItem::quit(app, None)?;
+                let app_submenu = Submenu::with_items(app, "Pocket Agent", true, &[&about_item, &sep, &app_settings, &sep2, &quit_item])?;
+                let menu = Menu::with_items(app, &[&app_submenu])?;
+                app.set_menu(menu)?;
 
-            app.on_menu_event(move |app, event| {
-                if event.id().as_ref() == "app-settings" {
-                    let _ = commands::config::open_settings_window(app.clone());
-                }
-            });
+                app.on_menu_event(move |app, event| {
+                    if event.id().as_ref() == "app-settings" {
+                        let _ = commands::config::open_settings_window(app.clone());
+                    }
+                });
+            }
 
             // ── Tray icon (right side of menu bar) ──
             let tray_settings = MenuItemBuilder::with_id("tray-settings", "Settings…").build(app)?;
@@ -170,6 +168,10 @@ pub fn run() {
             api::runs::pending_computer_approvals,
             api::subagents::settle_background_subagents,
             api::remote::is_ui_remote_active,
+            api::pairing::start_pairing,
+            api::pairing::cancel_pairing,
+            api::pairing::list_paired_phones,
+            api::pairing::remove_paired_phone,
             commands::history::open_chat_history,
             commands::history::save_chat_message,
 
@@ -214,61 +216,4 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-/// STT comes first so the main window never waits on the optional sherpa
-/// compat repair (a download on old macOS). A failed repair only leaves wake
-/// word / voiceprint unavailable; a fresh install reloads the running server.
-fn start_voice_services(
-    start_stt: impl FnOnce(),
-    repair: impl FnOnce() -> Result<bool, String>,
-    reload: impl FnOnce(),
-) {
-    start_stt();
-    match repair() {
-        Ok(true) => reload(),
-        Ok(false) => {}
-        Err(e) => eprintln!("[sherpa-compat] {e}; wake word and voiceprint checks stay unavailable"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::start_voice_services;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{mpsc, Arc};
-    use std::time::Duration;
-
-    #[test]
-    fn stalled_compat_download_does_not_block_stt_start() {
-        let (stt_tx, stt_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel::<()>();
-        let reloaded = Arc::new(AtomicBool::new(false));
-        let reloaded_in = reloaded.clone();
-        let worker = std::thread::spawn(move || {
-            start_voice_services(
-                || stt_tx.send(()).unwrap(),
-                || {
-                    release_rx.recv().unwrap(); // the hung download
-                    Ok(true)
-                },
-                || reloaded_in.store(true, Ordering::SeqCst),
-            )
-        });
-        stt_rx.recv_timeout(Duration::from_secs(2)).expect("STT must start while the download hangs");
-        assert!(!reloaded.load(Ordering::SeqCst));
-        release_tx.send(()).unwrap();
-        worker.join().unwrap();
-        assert!(reloaded.load(Ordering::SeqCst), "a fresh install reloads the server");
-    }
-
-    #[test]
-    fn failed_or_unneeded_repair_does_not_reload() {
-        for result in [Ok(false), Err("download failed".to_string())] {
-            let mut stt = false;
-            let mut reloaded = false;
-            start_voice_services(|| stt = true, || result, || reloaded = true);
-            assert!(stt && !reloaded);
-        }
-    }
 }

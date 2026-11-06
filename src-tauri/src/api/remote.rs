@@ -5,9 +5,11 @@
 //   WS  /audio           phone mic PCM in, sentence audio + control out
 //
 // Approving a computer action from /ui controls this Mac, so both sockets
-// require API_SERVER_KEY: an unset key rejects (unlike /push, which is open
-// then). Browsers and WebViews cannot set headers on a WebSocket, so the token
-// rides in the `token` query parameter; the page reads it from its own URL.
+// require API_SERVER_KEY or a paired phone's device token (api/pairing.rs):
+// an unset key rejects (unlike /push, which is open then). Browsers and
+// WebViews cannot set headers on a WebSocket, so the token rides in the
+// `token` query parameter; the page reads it from its own URL. Removing a
+// paired phone closes the sockets it opened.
 //
 // One driver at a time: a new /ui (or /audio) connection replaces the old one
 // so a phone reconnecting after Wi-Fi loss never waits on a dead socket. While
@@ -38,6 +40,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Listener, Manager};
 use tokio::sync::{mpsc, oneshot};
 
+use super::pairing::Revoked;
 use super::server::ServerState;
 use crate::voice::remote::{is_parked, phone_attached, set_parked, Outbound};
 
@@ -55,7 +58,7 @@ pub const UI_EVENTS: &[&str] = &[
     "conversation-state", "fn-key-down", "fn-key-up", "settings-changed", "stt-error",
     "stt-result", "subagent-delivered", "venv-setup-done", "venv-setup-error",
     "venv-setup-progress", "venv-setup-ready", "venv-setup-started", "voice-cancel",
-    "voice-engine-reloaded", "voice-service-status", "wake-check-done", "wake-checking", "wake-listener-error",
+    "voice-service-status", "wake-check-done", "wake-checking", "wake-listener-error",
     "wake-listener-started", "wake-listener-stopped", "wake-word-detected",
 ];
 
@@ -104,6 +107,12 @@ pub(crate) fn token_ok(expected: &str, provided: Option<&str>) -> bool {
 #[derive(Deserialize)]
 pub struct TokenQuery {
     token: Option<String>,
+}
+
+impl TokenQuery {
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
 }
 
 // ── Static page ──────────────────────────────────────────────────────────────
@@ -228,15 +237,15 @@ pub async fn ui_ws(
     Query(query): Query<TokenQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if !token_ok(&state.api_key, query.token.as_deref()) {
+    let Some((_, revoked)) = super::pairing::authenticate(&state.api_key, query.token()) else {
         eprintln!("[remote] /ui rejected: bad or missing token");
         return StatusCode::UNAUTHORIZED.into_response();
-    }
+    };
     let app = state.app.clone();
-    ws.on_upgrade(move |socket| ui_session(app, socket))
+    ws.on_upgrade(move |socket| ui_session(app, socket, revoked))
 }
 
-async fn ui_session(app: AppHandle, socket: WebSocket) {
+async fn ui_session(app: AppHandle, socket: WebSocket, mut revoked: Revoked) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     let (kick, mut kicked) = oneshot::channel::<()>();
@@ -268,6 +277,10 @@ async fn ui_session(app: AppHandle, socket: WebSocket) {
                 let frame = CloseFrame { code: CLOSE_REPLACED, reason: "replaced".into() };
                 let _ = tx.send(Message::Close(Some(frame)));
                 let _ = tokio::time::timeout(Duration::from_secs(1), &mut writer).await;
+                break;
+            }
+            _ = revoked.wait() => {
+                eprintln!("[remote] /ui client {} closed: its phone was removed", id);
                 break;
             }
             _ = &mut writer => break,
@@ -532,13 +545,16 @@ struct PhoneState {
     /// …and on screen.
     foreground: bool,
     audio: bool,
+    /// A paired phone names this PA its occupant (FEAT-MP3), even with its
+    /// /ui and /phone down for now: it would come back to this PA.
+    occupied: bool,
 }
 
 /// Ok(booking reply) when the switch is possible, Err(the fact) when not.
 /// Taking over needs the phone page on screen and its audio online.
 fn switch_answer(target: Device, p: PhoneState) -> Result<&'static str, &'static str> {
     match target {
-        Device::Desktop if p.parked || !p.ui => Err(ALREADY_ON_DESKTOP),
+        Device::Desktop if p.parked || (!p.ui && !p.occupied) => Err(ALREADY_ON_DESKTOP),
         Device::Desktop => Ok(SWITCHING_TO_DESKTOP),
         Device::Phone if !p.parked && p.ui => Err(ALREADY_ON_PHONE),
         Device::Phone if !p.foreground || !p.audio => Err(PHONE_UI_ABSENT),
@@ -552,13 +568,33 @@ fn current_switch_answer(target: Device) -> Result<&'static str, &'static str> {
         ui: ui_attached(),
         foreground: ui_in_foreground(),
         audio: phone_attached(),
+        occupied: super::phone::occupied_by_me(),
     };
     switch_answer(target, state)
 }
 
+/// How a booked switch happens once the turn is over.
+#[derive(Clone, Debug, PartialEq)]
+enum Route {
+    /// Flip PARKED for the attached /ui page.
+    Park,
+    /// No /ui page: ask this paired phone over /phone to come (FEAT-MP3).
+    /// Its answer, and whether another PA occupies it, is the phone's call.
+    Enter(String),
+}
+
+fn switch_plan(target: Device) -> Result<(&'static str, Route), String> {
+    if target == Device::Phone && !ui_attached() {
+        return super::phone::pick_for_enter()
+            .map(|phone| (SWITCHING_TO_PHONE, Route::Enter(phone)))
+            .map_err(|refusal| refusal.answer());
+    }
+    current_switch_answer(target).map(|reply| (reply, Route::Park)).map_err(String::from)
+}
+
 /// switch_device: book the switch for after this turn, or say why not.
-pub fn request_switch(target: Device) -> &'static str {
-    let (reply, gen) = match book_switch(target) {
+pub fn request_switch(target: Device) -> String {
+    let (reply, gen, route) = match book_switch(target) {
         Ok(booking) => booking,
         Err(fact) => return fact,
     };
@@ -569,21 +605,70 @@ pub fn request_switch(target: Device) -> &'static str {
             SWITCH_POLL, SWITCH_SETTLE, SWITCH_DRAIN_MAX,
         )
         .await;
-        if commit_switch(gen, target, || current_switch_answer(target)) {
-            eprintln!("[remote] switching to {:?}", target);
-            announce_park(target == Device::Desktop);
+        match route {
+            Route::Park => {
+                if commit_switch(gen, target, || current_switch_answer(target)) {
+                    eprintln!("[remote] switching to {:?}", target);
+                    announce_park(target == Device::Desktop);
+                }
+            }
+            // The phone answers on /phone; on ok it takes this PA as its occupant (unpark_for_entered).
+            Route::Enter(phone) => {
+                commit_enter(gen, &phone);
+            }
         }
     });
-    reply
+    reply.into()
 }
 
 /// Every request cancels the booking before it, even one answered "already
 /// there" or refused: the latest answer Hermes heard is what happens.
-/// Ok((reply, generation)) when a switch is booked.
-fn book_switch(target: Device) -> Result<(&'static str, u64), &'static str> {
+/// Ok((reply, generation, route)) when a switch is booked.
+fn book_switch(target: Device) -> Result<(&'static str, u64, Route), String> {
     let mut gen = lock(&SWITCH);
     *gen += 1;
-    current_switch_answer(target).map(|reply| (reply, *gen))
+    switch_plan(target).map(|(reply, route)| (reply, *gen, route))
+}
+
+/// A booked enter, once the turn is over: ask the phone if no newer request
+/// came in and it is still online, free and on screen as far as we know.
+fn commit_enter(gen: u64, phone: &str) -> bool {
+    let current = lock(&SWITCH);
+    if *current != gen {
+        return false;
+    }
+    if ui_attached() {
+        eprintln!("[remote] enter dropped: a /ui page attached meanwhile");
+        return false;
+    }
+    match super::phone::pick_for_enter() {
+        Ok(id) if id == phone => super::phone::send_enter_request(phone),
+        Ok(_) => {
+            eprintln!("[remote] enter dropped: another phone is now the one to ask");
+            false
+        }
+        Err(refusal) => {
+            eprintln!("[remote] enter dropped: {}", refusal.answer());
+            false
+        }
+    }
+}
+
+/// Runs `f` under the switch boundary: api/phone.rs commits a phone's
+/// hello / state together with what it does to PARKED.
+pub(super) fn with_switch<R>(f: impl FnOnce(&mut u64) -> R) -> R {
+    f(&mut lock(&SWITCH))
+}
+
+/// A paired phone took this PA as its occupant (api/phone.rs, under SWITCH)
+/// and is opening /ui + /audio: it drives once they are up. Like take_over,
+/// the user's own hand (or their yes to enter_request): unpark now and cancel
+/// any booking. Returns whether it was parked; the caller announces it.
+pub(super) fn unpark_for_entered(gen: &mut u64) -> bool {
+    *gen += 1;
+    let was_parked = is_parked();
+    set_parked(false);
+    was_parked
 }
 
 /// A booked switch, once the turn is over: commits PARKED if no newer request
@@ -599,6 +684,9 @@ fn commit_switch(gen: u64, target: Device, possible: impl FnOnce() -> Result<&'s
         return false;
     }
     set_parked(target == Device::Desktop);
+    if target == Device::Desktop {
+        super::phone::release_occupant();
+    }
     true
 }
 
@@ -635,7 +723,9 @@ async fn wait_until_quiet(
 }
 
 /// After PARKED changed: tell the page and converge driver and audio source.
-fn announce_park(parked: bool) {
+/// (Parking released a paired phone in the same commit — it closes /ui +
+/// /audio and returns to its device list; one set up by hand keeps its parked page.)
+pub(super) fn announce_park(parked: bool) {
     // The page reloads into (or out of) its parked screen.
     send_to_ui("ui-parked", json!({ "parked": parked }));
     if let Some(app) = APP.get() {
@@ -690,6 +780,7 @@ fn commit_park(client: u64) -> bool {
     }
     *gen += 1;
     set_parked(true);
+    super::phone::release_occupant();
     true
 }
 
@@ -700,12 +791,12 @@ pub async fn audio_ws(
     Query(query): Query<TokenQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if !token_ok(&state.api_key, query.token.as_deref()) {
+    let Some((_, revoked)) = super::pairing::authenticate(&state.api_key, query.token()) else {
         eprintln!("[remote] /audio rejected: bad or missing token");
         return StatusCode::UNAUTHORIZED.into_response();
-    }
+    };
     let app = state.app.clone();
-    ws.on_upgrade(move |socket| audio_session(app, socket))
+    ws.on_upgrade(move |socket| audio_session(app, socket, revoked))
 }
 
 fn sync_source(app: &AppHandle) {
@@ -745,8 +836,9 @@ fn on_phone_message(conn: u64, message: PhoneMessage) -> bool {
 /// `jpeg` = camera unavailable).
 /// Downstream: `{"type":"play","seq":N}` then one binary frame (the sentence's
 /// mp3), `{"type":"clear"}` (drop everything queued and stop now), or
-/// `{"type":"snapshot","id":N}` (send the current camera frame).
-async fn audio_session(app: AppHandle, socket: WebSocket) {
+/// `{"type":"snapshot","id":N}` (send the current camera frame), or
+/// `{"type":"wake"}` (the wake word was heard: light the screen, show the page).
+async fn audio_session(app: AppHandle, socket: WebSocket, mut revoked: Revoked) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Outbound>();
     let conn = crate::voice::remote::attach_phone(tx);
@@ -770,6 +862,7 @@ async fn audio_session(app: AppHandle, socket: WebSocket) {
                     Some(Outbound::Snapshot { id }) => {
                         sink.send(Message::Text(json!({ "type": "snapshot", "id": id }).to_string().into())).await
                     }
+                    Some(Outbound::Wake) => sink.send(Message::Text(r#"{"type":"wake"}"#.into())).await,
                     None => break,
                 },
                 _ = ping.tick() => sink.send(Message::Ping(Default::default())).await,
@@ -783,6 +876,10 @@ async fn audio_session(app: AppHandle, socket: WebSocket) {
     loop {
         tokio::select! {
             _ = &mut writer => break,
+            _ = revoked.wait() => {
+                eprintln!("[remote] /audio phone {} closed: its phone was removed", conn);
+                break;
+            }
             frame = tokio::time::timeout(IDLE_TIMEOUT, stream.next()) => match frame {
                 // A replaced phone is cut off at its next frame, even if its
                 // writer is still stuck sending to a slow socket.
@@ -911,7 +1008,11 @@ mod tests {
     #[test]
     fn switch_answers_cover_every_device_state() {
         use Device::*;
-        let s = |parked, ui, foreground, audio| PhoneState { parked, ui, foreground, audio };
+        let s = |parked, ui, foreground, audio| PhoneState { parked, ui, foreground, audio, occupied: false };
+        let held = |ui| PhoneState { parked: false, ui, foreground: false, audio: false, occupied: true };
+        assert_eq!(switch_answer(Desktop, held(false)), Ok(SWITCHING_TO_DESKTOP), "a paired phone gone quiet still names this PA");
+        assert_eq!(switch_answer(Desktop, held(true)), Ok(SWITCHING_TO_DESKTOP));
+        assert_eq!(switch_answer(Desktop, PhoneState { parked: true, ..held(false) }), Err(ALREADY_ON_DESKTOP));
         assert_eq!(switch_answer(Desktop, s(false, true, true, true)), Ok(SWITCHING_TO_DESKTOP));
         assert_eq!(switch_answer(Desktop, s(false, false, false, true)), Err(ALREADY_ON_DESKTOP), "/audio alone: voice follows the desktop driver");
         assert_eq!(switch_answer(Desktop, s(true, true, true, true)), Err(ALREADY_ON_DESKTOP));
@@ -965,22 +1066,22 @@ mod tests {
         let _t = test_lock();
         let conn = phone_online(31);
         // The phone drives: book the desktop, then ask for the phone again.
-        let (reply, gen) = book_switch(Device::Desktop).unwrap();
+        let (reply, gen, _) = book_switch(Device::Desktop).unwrap();
         assert_eq!(reply, SWITCHING_TO_DESKTOP);
-        assert_eq!(book_switch(Device::Phone), Err(ALREADY_ON_PHONE));
+        assert_eq!(book_switch(Device::Phone).map(|b| b.0), Err(ALREADY_ON_PHONE.into()));
         assert!(!commit_switch(gen, Device::Desktop, || Ok("")), "the desktop booking is cancelled");
         assert!(!is_parked());
 
         // The desktop drives (phone parked, page on screen): book the phone, then ask for the desktop again.
         set_parked(true);
-        let (reply, gen) = book_switch(Device::Phone).unwrap();
+        let (reply, gen, _) = book_switch(Device::Phone).unwrap();
         assert_eq!(reply, SWITCHING_TO_PHONE);
-        assert_eq!(book_switch(Device::Desktop), Err(ALREADY_ON_DESKTOP));
+        assert_eq!(book_switch(Device::Desktop).map(|b| b.0), Err(ALREADY_ON_DESKTOP.into()));
         assert!(!commit_switch(gen, Device::Phone, || Ok("")), "the phone booking is cancelled");
         assert!(is_parked());
 
         // An untouched booking still runs.
-        let (_, gen) = book_switch(Device::Phone).unwrap();
+        let (_, gen, _) = book_switch(Device::Phone).unwrap();
         assert!(commit_switch(gen, Device::Phone, || current_switch_answer(Device::Phone)));
         assert!(!is_parked());
         phone_offline(conn);
@@ -990,7 +1091,7 @@ mod tests {
     fn a_take_over_during_a_late_booking_commit_still_wins() {
         let _t = test_lock();
         let conn = phone_online(41);
-        let (_, gen) = book_switch(Device::Desktop).unwrap();
+        let (_, gen, _) = book_switch(Device::Desktop).unwrap();
         // The old booking has passed its checks when the user presses "take over".
         let checked = Arc::new(std::sync::Barrier::new(2));
         let booking = {
@@ -1009,7 +1110,7 @@ mod tests {
         assert!(!is_parked(), "the user's take_over is the last word");
 
         // The other order: take_over first, then the late booking finds itself cancelled.
-        let (_, gen) = book_switch(Device::Desktop).unwrap();
+        let (_, gen, _) = book_switch(Device::Desktop).unwrap();
         assert!(commit_take_over(41));
         assert!(!commit_switch(gen, Device::Desktop, || Ok("")));
         assert!(!is_parked());
@@ -1023,7 +1124,7 @@ mod tests {
         set_parked(true);
         // Page 51 sends take_over; before it runs, page 52 replaces it (still parked).
         *lock(&UI_CLIENT) = Some(ui_client(52));
-        let (_, gen) = book_switch(Device::Phone).unwrap(); // 52's own booking, through Hermes
+        let (_, gen, _) = book_switch(Device::Phone).unwrap(); // 52's own booking, through Hermes
         assert!(!commit_take_over(51), "51 is no longer the /ui client");
         assert!(is_parked(), "a stale take_over leaves PARKED alone");
         assert!(commit_switch(gen, Device::Phone, || Ok("")), "…and does not cancel the new page's booking");
@@ -1039,12 +1140,12 @@ mod tests {
         let _t = test_lock();
         let conn = phone_online(71);
         // A switch_device(desktop) booked for after the turn; the user presses the button first.
-        let (_, gen) = book_switch(Device::Desktop).unwrap();
+        let (_, gen, _) = book_switch(Device::Desktop).unwrap();
         assert!(commit_park(71));
         assert!(is_parked(), "parked right away, not after the turn");
         assert!(!commit_switch(gen, Device::Desktop, || Ok("")), "the booking is cancelled");
         // Parked, Hermes books a switch back to the phone; pressing the button again cancels it.
-        let (_, gen) = book_switch(Device::Phone).unwrap();
+        let (_, gen, _) = book_switch(Device::Phone).unwrap();
         assert!(commit_park(71));
         assert!(!commit_switch(gen, Device::Phone, || Ok("")));
         assert!(is_parked());
@@ -1060,7 +1161,7 @@ mod tests {
         let conn = phone_online(81);
         // Page 81 sends park; before it runs, page 82 replaces it and books a switch through Hermes.
         *lock(&UI_CLIENT) = Some(ui_client(82));
-        let (_, gen) = book_switch(Device::Desktop).unwrap();
+        let (_, gen, _) = book_switch(Device::Desktop).unwrap();
         assert!(!commit_park(81), "81 is no longer the /ui client");
         assert!(!is_parked(), "a stale park leaves PARKED alone");
         assert!(commit_switch(gen, Device::Desktop, || Ok("")), "…and does not cancel the new page's booking");
@@ -1069,6 +1170,38 @@ mod tests {
         assert!(!commit_park(82), "no /ui client: refused");
         assert!(!is_parked());
         phone_offline(conn);
+    }
+
+    #[test]
+    fn a_desktop_request_releases_a_phone_that_dropped_off_while_using_this_pa() {
+        use super::super::phone::{self, commit_hello, commit_state, disconnect, occupied_by_me, pick_for_enter};
+        use super::super::phone::tests::{conn, me, released};
+        let _t = test_lock();
+        *lock(&UI_CLIENT) = None;
+        set_parked(false);
+        // The phone uses this PA; then Wi-Fi drops /ui and /phone. It keeps
+        // naming this PA for its 90 s lease.
+        let (c1, _rx1) = conn(901);
+        commit_hello("rv-phone", "Pixel", c1, me(), true);
+        disconnect("rv-phone", 901);
+        assert!(occupied_by_me() && !ui_attached());
+        // switch_device(desktop) is booked, not answered "already on the desktop".
+        let (reply, gen, route) = book_switch(Device::Desktop).unwrap();
+        assert_eq!((reply, route), (SWITCHING_TO_DESKTOP, Route::Park));
+        assert!(commit_switch(gen, Device::Desktop, || current_switch_answer(Device::Desktop)));
+        assert!(is_parked());
+        // Back within the lease, still naming this PA: it is told to let go instead of taking it back.
+        let (c2, mut rx2) = conn(902);
+        assert!(!commit_hello("rv-phone", "Pixel", c2, me(), true), "no unpark");
+        assert!(released(&mut rx2));
+        assert!(is_parked());
+        // It lets go: the phone is free for any PA (B's enter_request is no longer busy).
+        commit_state("rv-phone", 902, None, true);
+        assert!(!occupied_by_me());
+        assert_eq!(pick_for_enter(), Ok("rv-phone".into()));
+        assert_eq!(book_switch(Device::Desktop).map(|b| b.0), Err(ALREADY_ON_DESKTOP.into()));
+        phone::forget("rv-phone");
+        set_parked(false);
     }
 
     #[test]
@@ -1140,7 +1273,8 @@ mod tests {
     fn whitelist_keeps_desktop_only_commands_out() {
         for cmd in ["quit_app", "open_settings_window", "save_window_position", "save_config",
                     "open_chat_history", "save_settings_page_config", "install_wake_model",
-                    "remove_speaker", "start_enroll_recording", "update_hotkey"] {
+                    "remove_speaker", "start_enroll_recording", "update_hotkey",
+                    "start_pairing", "cancel_pairing", "list_paired_phones", "remove_paired_phone"] {
             assert!(!UI_COMMANDS.contains(&cmd), "{cmd} must not be reachable from /ui");
         }
     }

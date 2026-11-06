@@ -242,6 +242,10 @@ pub async fn start_server(app: AppHandle, port: u16) {
         .merge(bearer)
         .route("/ui/ws", get(crate::api::remote::ui_ws))
         .route("/audio", get(crate::api::remote::audio_ws))
+        // Phone pairing (open: the phone has no token yet; api/pairing.rs) and presence.
+        .route("/pair/hello", get(crate::api::pairing::pair_hello))
+        .route("/pair/confirm", post(crate::api::pairing::pair_confirm))
+        .route("/phone", get(crate::api::phone::phone_ws))
         // Hermes MCP client: checks the bearer itself (no open mode).
         .route(
             "/mcp",
@@ -258,7 +262,12 @@ pub async fn start_server(app: AppHandle, port: u16) {
     eprintln!("[API] listening on http://{}", addr);
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
+        Ok(l) => {
+            #[cfg(windows)]
+            crate::platform::not_inherited(&l);
+            crate::api::pairing::set_port(port);
+            l
+        }
         Err(e) => {
             eprintln!("[API] bind failed: {} (port {} in use?)", e, port);
             return;

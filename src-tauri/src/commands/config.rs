@@ -103,7 +103,15 @@ fn choose_env_file(packaged: bool, repo_env: &std::path::Path, user_env: Option<
         .map(std::path::Path::to_path_buf)
 }
 
+/// Windows: an installed build is any exe outside cargo's `target` directory
+/// (`tauri dev`, `cargo run` and `cargo test` all run from `target\<profile>`).
+#[cfg(windows)]
+fn is_app_bundle_exe(exe: &std::path::Path) -> bool {
+    !exe.ancestors().skip(1).any(|dir| dir.file_name().is_some_and(|n| n.eq_ignore_ascii_case("target")))
+}
+
 /// `…/X.app/Contents/MacOS/<exe>`: a packaged build, not `tauri dev` or a bare binary.
+#[cfg(not(windows))]
 fn is_app_bundle_exe(exe: &std::path::Path) -> bool {
     let macos = exe.parent();
     let contents = macos.and_then(|p| p.parent());
@@ -146,7 +154,7 @@ fn redact_url(url: &str) -> String {
 pub fn load_env() {
     let packaged = std::env::current_exe().map(|e| is_app_bundle_exe(&e)).unwrap_or(false);
     let repo_env = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".env");
-    let user_env = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".pocket-agent").join(".env"));
+    let user_env = dirs::home_dir().map(|h| h.join(".pocket-agent").join(".env"));
     let from_process = |name: &str| std::env::var_os(name).is_some();
     let (server_preset, key_preset) = (from_process("API_SERVER"), from_process("API_SERVER_KEY"));
 
@@ -675,6 +683,16 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
 
+        #[cfg(windows)]
+        #[test]
+        fn installed_exe_is_recognised_outside_cargo_target() {
+            assert!(is_app_bundle_exe(Path::new(r"C:\Program Files\Pocket Agent\pocket-agent.exe")));
+            assert!(!is_app_bundle_exe(Path::new(r"C:\repo\src-tauri\target\debug\pocket-agent.exe")));
+            assert!(!is_app_bundle_exe(Path::new(r"C:\repo\src-tauri\target\release\pocket-agent.exe")));
+            assert!(!is_app_bundle_exe(Path::new(r"C:\repo\src-tauri\target\debug\deps\pocket_agent_lib-1.exe")));
+        }
+
+        #[cfg(not(windows))]
         #[test]
         fn app_bundle_is_recognised_by_its_layout() {
             assert!(is_app_bundle_exe(Path::new("/Applications/Pocket Agent.app/Contents/MacOS/pocket-agent")));

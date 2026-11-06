@@ -3,18 +3,28 @@ package com.hermes.pocketagent.phone
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.Outline
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.text.InputType
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
+import android.view.View
+import android.view.ViewOutlineProvider
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
@@ -24,20 +34,32 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
-import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 
 /**
- * Full-screen WebView running PA's own frontend from the Mac (`/ui/`), plus a
- * one-time form for the Mac address and key. Back opens the form again.
- * Audio lives in [AudioService] so it keeps running with the screen off.
+ * Two screens. The device page (native) lists the paired computers: who uses
+ * the phone, who is online, Connect, and adding one by scanning the QR code
+ * the computer shows ([QrScanner], [Pairing]). While a PA uses the phone (the occupant, decided in
+ * [AudioService]) a full-screen WebView runs that PA's own frontend (`/ui/`);
+ * Back returns to the device page. Audio lives in [AudioService] so it keeps
+ * running with the screen off.
  */
 class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private var webView: WebView? = null
+    private var shownPa: String? = null // the PA whose page the WebView shows
+    private enum class Page { DEVICES, SCANNER, PAIRING, RESULT, WEB }
+    private var page = Page.DEVICES // what is on screen; background refreshes may only redraw DEVICES
+    private var scanner: QrScanner? = null // the "Scan to add device" page
+    private var scanOverlay: ScanOverlay? = null
+    private var pendingScan = false // the user asked to scan, waiting for the permission / onResume
     private var camera: PhoneCamera? = null
     private var pendingCamera: CameraRequest? = null // the open the user asked for, waiting for the permission / onResume
     // A CAMERA permission request is in flight. Kept apart from pendingCamera: closing drops
@@ -46,27 +68,48 @@ class MainActivity : Activity() {
     private var resumed = false
     // Bumped whenever the camera must not open from earlier requests (pause, navigation, close).
     @Volatile private var cameraGen = 0
-    // The notification's 「断开」: close the camera and the page too, so /ui goes and the Mac drives again.
+    // The notification's Disconnect: close the camera and the page too, so /ui goes and the Mac drives again.
     private val disconnect: () -> Unit = { runOnUiThread { stopCamera(); finishAndRemoveTask() } }
 
     private data class CameraRequest(val left: Int, val top: Int, val width: Int, val height: Int, val front: Boolean)
 
     // Plugged in → keep the screen on (it doubles as a desk display).
+    private var plugged = false
     private val powerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) = keepScreenOnWhenPlugged(intent)
     }
+    // A conversation is going on (the wake word or PA speaking within VOICE_WINDOW_MS):
+    // the screen stays on, since Chromium freezes the page once the activity stops.
+    private var voiceWindow = false
+    // From AudioService: a stopped activity has to be brought forward for the page to run.
+    private val voiceActive: (Boolean) -> Unit = { wake -> voiceActive(wake, bringForward = wake && !resumed) }
+    // From AudioService: the phone now belongs to a PA (show its page) or to none (the device page).
+    private val occupantChanged: (String?) -> Unit = { key -> route(key) }
+    // A PA going online / offline must not close the scanner, pairing or result page.
+    private val devicesChanged: () -> Unit = { if (page == Page.DEVICES) showDevices() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         registerReceiver(powerReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
             ?.let { keepScreenOnWhenPlugged(it) }
-        if (Config.load(this) == null) showSettings() else start()
         AudioService.onDisconnect = disconnect
+        AudioService.onVoiceActive = voiceActive
+        AudioService.onOccupant = occupantChanged
+        AudioService.onChanged = devicesChanged
+        start()
+        if (intent.getBooleanExtra(EXTRA_WAKE, false)) voiceActive(wake = true, bringForward = false)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_WAKE, false)) voiceActive(wake = true, bringForward = false)
     }
 
     override fun onResume() {
         super.onResume()
         resumed = true
+        AudioService.setForeground(true)
+        if (pendingScan && !awaitingCameraPermission) showScanner()
         // Back from the CAMERA permission dialog: open only if that request still stands.
         val request = pendingCamera
         if (request != null && !awaitingCameraPermission) {
@@ -80,16 +123,25 @@ class MainActivity : Activity() {
     override fun onPause() {
         super.onPause()
         resumed = false
+        AudioService.setForeground(false)
         if (!awaitingCameraPermission) stopCamera()
+        if (scanner != null) showDevices() // the camera runs only in the foreground
     }
 
     override fun onStop() {
         super.onStop()
         stopCamera()
+        // Power button / Home: next time the lock screen shows as usual.
+        setShowWhenLocked(false)
+        setTurnScreenOn(false)
     }
 
     override fun onDestroy() {
         if (AudioService.onDisconnect === disconnect) AudioService.onDisconnect = null
+        if (AudioService.onVoiceActive === voiceActive) AudioService.onVoiceActive = null
+        if (AudioService.onOccupant === occupantChanged) AudioService.onOccupant = null
+        if (AudioService.onChanged === devicesChanged) AudioService.onChanged = null
+        scanner?.close()
         camera?.close()
         unregisterReceiver(powerReceiver)
         handler.removeCallbacksAndMessages(null)
@@ -97,33 +149,76 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    @Deprecated("Back opens the connection form; predictive back is not opted in.")
+    @Deprecated("Back opens the device page; predictive back is not opted in.")
     override fun onBackPressed() {
-        if (webView != null) showSettings() else super.onBackPressed()
+        if (page == Page.WEB || page == Page.SCANNER || page == Page.RESULT) showDevices() else super.onBackPressed()
     }
 
     private fun keepScreenOnWhenPlugged(battery: Intent) {
-        val plugged = battery.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
-        if (plugged) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        plugged = battery.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
+        updateKeepScreenOn()
+    }
+
+    private fun updateKeepScreenOn() {
+        if (plugged || voiceWindow) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
+    /**
+     * PA heard the wake word (`wake`) or is speaking: keep the screen on for
+     * VOICE_WINDOW_MS more. The wake word also lights the screen and shows the
+     * page over the lock screen (user's choice, 2026-11-05) — only for this
+     * window, so the power button still leads to the lock screen.
+     */
+    private fun voiceActive(wake: Boolean, bringForward: Boolean) {
+        if (wake) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
+        if (bringForward) startActivity(wakeIntent(this))
+        voiceWindow = true
+        updateKeepScreenOn()
+        handler.removeCallbacksAndMessages(VOICE)
+        handler.postDelayed({
+            voiceWindow = false
+            updateKeepScreenOn()
+            setShowWhenLocked(false)
+            setTurnScreenOn(false)
+        }, VOICE, VOICE_WINDOW_MS)
+    }
+
     private fun start() {
-        val config = Config.load(this) ?: return showSettings()
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_MIC)
             return
         }
-        // Restart so a changed address / key takes effect.
-        stopService(Intent(this, AudioService::class.java))
-        startForegroundService(Intent(this, AudioService::class.java))
-        showWebView(config)
+        // Already running: it re-reads the paired list.
+        if (Config.pas(this).isNotEmpty()) AudioService.start(this)
+        route(Config.occupant(this))
+    }
+
+    /** The occupant's page, or the device page when the phone is free. */
+    private fun route(occupant: String?) {
+        val pa = Config.pa(this, occupant)
+        if (pa != null) {
+            if (webView == null || shownPa != pa.key) showWebView(pa)
+        } else if (page == Page.DEVICES || page == Page.WEB) showDevices() // scanning / pairing / result: keep it
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, results: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, results)
         if (requestCode == REQUEST_CAMERA) {
             awaitingCameraPermission = false
+            if (pendingScan) {
+                when {
+                    results.firstOrNull() == PackageManager.PERMISSION_GRANTED -> if (resumed) showScanner() // else onResume
+                    results.isEmpty() -> pendingScan = false // cancelled by the system, not refused
+                    else -> {
+                        pendingScan = false
+                        toast(getString(R.string.camera_needed_scan))
+                    }
+                }
+            }
             val request = pendingCamera ?: return // dropped meanwhile (navigation / left the app)
             when {
                 results.firstOrNull() == PackageManager.PERMISSION_GRANTED -> if (resumed) {
@@ -136,7 +231,7 @@ class MainActivity : Activity() {
                 }
                 else -> {
                     pendingCamera = null
-                    Toast.makeText(this, "需要相机权限才能让 Pocket Agent 看", Toast.LENGTH_LONG).show()
+                    toast(getString(R.string.camera_needed_see))
                     notifyCamera(false)
                 }
             }
@@ -146,13 +241,16 @@ class MainActivity : Activity() {
         if (results.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
             start()
         } else {
-            Toast.makeText(this, "需要麦克风权限才能和 Pocket Agent 对话", Toast.LENGTH_LONG).show()
-            Config.load(this)?.let { showWebView(it) }
+            toast(getString(R.string.mic_needed))
+            showDevices()
         }
     }
 
     @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
-    private fun showWebView(config: Config) {
+    private fun showWebView(config: Pa) {
+        closeScanner()
+        page = Page.WEB
+        shownPa = config.key
         camera?.close()
         webView?.destroy()
         val view = WebView(this).apply {
@@ -259,50 +357,297 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun showSettings() {
+    // ── Device page (FEAT-MP4) ──────────────────────────────────────────────
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun showDevices() {
+        closeScanner()
+        page = Page.DEVICES
         camera?.close()
         camera = null
         webView?.destroy()
         webView = null
+        shownPa = null
         handler.removeCallbacksAndMessages(RETRY)
-        val current = Config.load(this)
-        val pad = (16 * resources.displayMetrics.density).toInt()
-        val host = EditText(this).apply {
-            hint = "Mac 地址，例如 192.168.1.20"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-            setText(current?.host.orEmpty())
-        }
-        val key = EditText(this).apply {
-            hint = "API_SERVER_KEY"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setText(current?.key.orEmpty())
-        }
-        val save = Button(this).apply {
-            text = "连接"
-            setOnClickListener {
-                if (host.text.isBlank() || key.text.isBlank()) {
-                    Toast.makeText(this@MainActivity, "地址和 key 都要填", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-                Config.save(this@MainActivity, Config(host.text.toString(), key.text.toString()))
-                start()
-            }
-        }
-        setContentView(LinearLayout(this).apply {
+
+        val occupant = Config.occupant(this)
+        val list = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(pad, pad, pad, pad)
-            addView(TextView(this@MainActivity).apply { text = "连接到 Mac 上的 Pocket Agent"; textSize = 18f })
-            addView(host)
-            addView(key)
-            addView(save)
+            setPadding(dp(16), dp(24), dp(16), dp(16))
+            addView(header())
+        }
+        val pas = Config.pas(this)
+        if (pas.isEmpty()) {
+            list.addView(TextView(this).apply {
+                setText(R.string.devices_empty)
+                setPadding(0, dp(16), 0, dp(16))
+            })
+        }
+        for (pa in pas) list.addView(deviceRow(pa, occupant))
+        list.addView(Button(this).apply { setText(R.string.scan_add_device); setOnClickListener { showScanner() } })
+        setContentView(ScrollView(this).apply { addView(list) })
+    }
+
+    /** PA's icon (40dp, rounded) and name above the list (FEAT-SC4). */
+    private fun header() = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(paIcon(dp(10).toFloat()), LinearLayout.LayoutParams(dp(40), dp(40)))
+        addView(TextView(this@MainActivity).apply {
+            setText(R.string.app_name)
+            textSize = 20f
+            setPadding(dp(12), 0, 0, 0)
         })
     }
 
-    private companion object {
-        const val REQUEST_MIC = 1
-        const val REQUEST_CAMERA = 2
-        const val RETRY_MS = 3000L
-        val RETRY = Any()
+    /** PA's icon clipped to [radius] (half the size for a circle). */
+    private fun paIcon(radius: Float) = ImageView(this).apply {
+        setImageResource(R.mipmap.ic_launcher_foreground)
+        scaleType = ImageView.ScaleType.CENTER_CROP
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        outlineProvider = object : ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: Outline) =
+                outline.setRoundRect(0, 0, view.width, view.height, minOf(radius, view.width / 2f))
+        }
+        clipToOutline = true
+    }
+
+    private fun deviceRow(pa: Pa, occupant: String?): LinearLayout {
+        val online = AudioService.isOnline(pa.key)
+        val busyWith = occupant?.takeIf { it != pa.key }?.let { Config.pa(this, it)?.name }
+        val (status, action, enabled) = when {
+            occupant == pa.key -> Triple(getString(if (online) R.string.status_in_use else R.string.status_in_use_offline), R.string.action_open, true)
+            busyWith != null -> Triple(getString(R.string.status_busy, busyWith), R.string.action_connect, false)
+            !online -> Triple(getString(R.string.status_offline), R.string.action_connect, false)
+            else -> Triple(getString(R.string.status_online), R.string.action_connect, true)
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(12), 0, dp(12))
+            alpha = if (enabled) 1f else 0.5f
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(TextView(this@MainActivity).apply { text = pa.name; textSize = 17f })
+                addView(TextView(this@MainActivity).apply { text = status; textSize = 13f })
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(Button(this@MainActivity).apply {
+                setText(action)
+                isEnabled = enabled
+                setOnClickListener { enterPa(pa) }
+            })
+            setOnLongClickListener { confirmRemove(pa); true }
+        }
+    }
+
+    private fun enterPa(pa: Pa) {
+        if (Config.occupant(this) == pa.key) return route(pa.key)
+        if (!AudioService.enter(pa.key)) {
+            Toast.makeText(this, getString(R.string.cannot_connect, pa.name), Toast.LENGTH_SHORT).show()
+            showDevices()
+        } // else onOccupant opens its page
+    }
+
+    private fun confirmRemove(pa: Pa) {
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.remove_title, pa.name))
+            .setMessage(R.string.remove_message)
+            .setNegativeButton(R.string.cancel, null)
+            .setPositiveButton(R.string.remove) { _, _ ->
+                if (Config.occupant(this) == pa.key) AudioService.leave()
+                Config.remove(this, pa.key)
+                AudioService.refresh()
+                showDevices()
+            }
+            .show()
+    }
+
+    // ── Adding a device by QR code (FEAT-QR2 / SEC-QR2, look: FEAT-SC1) ─────
+
+    private fun showScanner() {
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            pendingScan = true
+            if (!awaitingCameraPermission) {
+                awaitingCameraPermission = true
+                requestPermissions(arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA)
+            }
+            return
+        }
+        pendingScan = false
+        if (!resumed || webView != null || scanner != null) return
+        val root = FrameLayout(this).apply { setBackgroundColor(ScanOverlay.BACKGROUND) }
+        val overlay = ScanOverlay(this)
+        root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
+        root.addView(FrameLayout(this).apply {
+            setPadding(dp(4), dp(8), dp(4), 0)
+            addView(ImageButton(this@MainActivity).apply {
+                setImageResource(R.drawable.ic_close)
+                imageTintList = ColorStateList.valueOf(TEXT)
+                background = ripple(null)
+                contentDescription = getString(R.string.close)
+                setOnClickListener { showDevices() }
+            }, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.START or Gravity.CENTER_VERTICAL))
+            addView(label(getString(R.string.scan_add_device), 18f, TEXT),
+                FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+        }, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+        val hints = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), 0, dp(24), 0)
+            addView(label(getString(R.string.scan_hint), 15f, TEXT))
+            addView(label(getString(R.string.scan_hint_sub), 13f, TEXT_DIM).apply { setPadding(0, dp(8), 0, 0) })
+        }
+        root.addView(hints, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+        scanOverlay = overlay
+        val qr = QrScanner(this, root, onFound = ::scanned, onFailed = {
+            closeScanner()
+            showResult(R.string.error_camera_title, getString(R.string.error_camera_message))
+        })
+        scanner = qr
+        overlay.onWindow = {
+            hints.translationY = it.bottom + dp(24)
+            qr.setViewfinder(it)
+        }
+        page = Page.SCANNER
+        setContentView(root)
+    }
+
+    private fun closeScanner() {
+        scanner?.close()
+        scanner = null
+        scanOverlay = null
+    }
+
+    /** A code was read: outline the viewfinder and buzz, hold a moment so the user sees it, then pair. */
+    private fun scanned(text: String) {
+        val current = scanner ?: return // left the page meanwhile
+        scanOverlay?.confirm()
+        window.decorView.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+        handler.postDelayed({ if (scanner === current) pair(text) }, SCAN_CONFIRM_MS)
+    }
+
+    private fun pair(text: String) {
+        closeScanner()
+        val qr = PairQr.parse(text)
+            ?: return showResult(R.string.error_invalid_title, getString(R.string.error_invalid_message))
+        showPairing()
+        val phoneId = Config.phoneId(this)
+        Thread {
+            val result = Pairing.pair(qr, phoneId, Config.phoneName())
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                if (result is PairResult.Paired) {
+                    return@runOnUiThread paired(
+                        Config.add(this, result.paId, result.name.ifEmpty { result.host }, result.host, result.token),
+                    )
+                }
+                if (page != Page.PAIRING) return@runOnUiThread // a PA took the phone meanwhile
+                when (result) {
+                    PairResult.Expired -> showResult(R.string.error_expired_title, getString(R.string.error_expired_message))
+                    PairResult.Unreachable -> showResult(R.string.error_unreachable_title, getString(R.string.error_unreachable_message))
+                    PairResult.NotThatComputer ->
+                        showResult(R.string.error_not_that_computer_title, getString(R.string.error_not_that_computer_message))
+                    is PairResult.Failed -> showResult(R.string.error_failed_title, getString(R.string.error_failed_message, result.status))
+                    is PairResult.Paired -> Unit
+                }
+            }
+        }.start()
+    }
+
+    /** PA's icon in an accent spinner, with a line about the network. No cancel: the request ends in seconds. */
+    private fun showPairing() {
+        page = Page.PAIRING
+        val ring = FrameLayout(this).apply {
+            addView(ProgressBar(this@MainActivity, null, 0, android.R.style.Widget_Material_ProgressBar).apply {
+                isIndeterminate = true
+                indeterminateTintList = ColorStateList.valueOf(ScanOverlay.ACCENT)
+            }, FrameLayout.LayoutParams(-1, -1))
+            addView(paIcon(dp(32).toFloat()), FrameLayout.LayoutParams(dp(64), dp(64), Gravity.CENTER))
+        }
+        setContentView(centered(
+            ring to LinearLayout.LayoutParams(dp(96), dp(96)),
+            label(getString(R.string.pairing_title), 18f, TEXT).apply { setPadding(0, dp(24), 0, 0) } to null,
+            label(getString(R.string.pairing_sub), 13f, TEXT_DIM).apply { setPadding(0, dp(8), 0, 0) } to null,
+        ))
+    }
+
+    /** Pairing failed or the camera would not open: say why, offer to scan again. The code itself is never shown. */
+    private fun showResult(title: Int, message: String) {
+        page = Page.RESULT
+        val again = Button(this).apply {
+            setText(R.string.scan_again)
+            isAllCaps = false
+            setTextColor(ScanOverlay.BACKGROUND)
+            background = ripple(GradientDrawable().apply { setColor(ScanOverlay.ACCENT); cornerRadius = dp(24).toFloat() })
+            setOnClickListener { showScanner() }
+        }
+        val back = Button(this).apply {
+            setText(R.string.back)
+            isAllCaps = false
+            setTextColor(ScanOverlay.ACCENT)
+            background = ripple(null)
+            setOnClickListener { showDevices() }
+        }
+        setContentView(centered(
+            ImageView(this).apply {
+                setImageResource(R.drawable.ic_error)
+                imageTintList = ColorStateList.valueOf(ERROR)
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            } to LinearLayout.LayoutParams(dp(64), dp(64)),
+            label(getString(title), 18f, TEXT).apply { setPadding(0, dp(24), 0, 0) } to null,
+            label(message, 13f, TEXT_DIM).apply { setPadding(0, dp(8), 0, dp(32)) } to null,
+            again to LinearLayout.LayoutParams(-1, dp(48)),
+            back to LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) },
+        ))
+    }
+
+    private fun paired(pa: Pa) {
+        toast(getString(R.string.paired, pa.name))
+        AudioService.start(this) // first pairing starts it; later ones make it re-read the list
+        if (page == Page.PAIRING) showDevices()
+    }
+
+    /** A dark page with [views] stacked in the middle (null params = wrap). */
+    private fun centered(vararg views: Pair<View, LinearLayout.LayoutParams?>) = FrameLayout(this).apply {
+        setBackgroundColor(ScanOverlay.BACKGROUND)
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(32), 0, dp(32), 0)
+            for ((view, params) in views) addView(view, params ?: LinearLayout.LayoutParams(-2, -2))
+        }, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER))
+    }
+
+    private fun label(text: String, size: Float, color: Int) = TextView(this).apply {
+        this.text = text
+        textSize = size
+        setTextColor(color)
+        gravity = Gravity.CENTER
+    }
+
+    private fun ripple(content: Drawable?) =
+        RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), content, content ?: ColorDrawable(Color.WHITE))
+
+    private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()
+
+    companion object {
+        private const val REQUEST_MIC = 1
+        private const val REQUEST_CAMERA = 2
+        private const val RETRY_MS = 3000L
+        private const val VOICE_WINDOW_MS = 3 * 60 * 1000L
+        private const val SCAN_CONFIRM_MS = 1500L
+        private const val TEXT = 0xFFE8E8F0.toInt()
+        private const val TEXT_DIM = 0xBFE8E8F0.toInt() // 75%
+        private const val ERROR = 0xFFFF8A80.toInt()
+        private const val EXTRA_WAKE = "com.hermes.pocketagent.phone.WAKE"
+        private val RETRY = Any()
+        private val VOICE = Any()
+
+        private fun wakeIntent(context: Context) = Intent(context, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            .putExtra(EXTRA_WAKE, true)
+
+        /** The wake word with no activity alive: start one, it lights the screen itself. */
+        fun wake(context: Context) = context.startActivity(wakeIntent(context))
     }
 }

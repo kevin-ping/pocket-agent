@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="devices_empty">Noch keine Computer gekoppelt. Öffne auf dem Computer Pocket Agent Einstellungen → Geräte → Telefon hinzufügen und tippe dann unten auf „Scannen, um Gerät hinzuzufügen“.</string>
+    <string name="scan_add_device">Scannen, um Gerät hinzuzufügen</string>
+    <string name="status_in_use">In Verwendung</string>
+    <string name="status_in_use_offline">In Verwendung · offline</string>
+    <string name="status_busy">Gib „%1$s“ zuerst an den Computer zurück</string>
+    <string name="status_online">Online</string>
+    <string name="status_offline">Offline</string>
+    <string name="action_open">Öffnen</string>
+    <string name="action_connect">Verbinden</string>
+    <string name="cannot_connect">Verbindung mit „%1$s“ ist gerade nicht möglich</string>
+    <string name="remove_title">„%1$s“ entfernen?</string>
+    <string name="remove_message">Dieses Telefon vergisst den Computer. Du kannst dieses Telefon auch in den Einstellungen → Geräte des Computers entfernen.</string>
+    <string name="cancel">Abbrechen</string>
+    <string name="remove">Entfernen</string>
+
+    <string name="camera_needed_scan">Zum Scannen des QR-Codes wird die Kameraberechtigung benötigt</string>
+    <string name="camera_needed_see">Damit Pocket Agent sehen kann, wird die Kameraberechtigung benötigt</string>
+    <string name="mic_needed">Um mit Pocket Agent zu sprechen, wird die Mikrofonberechtigung benötigt</string>
+
+    <string name="close">Schließen</string>
+    <string name="scan_hint">Öffne auf dem Computer Pocket Agent\nEinstellungen → Geräte → Telefon hinzufügen</string>
+    <string name="scan_hint_sub">Der QR-Code ist 2 Minuten gültig</string>
+
+    <string name="pairing_title">Wird gekoppelt…</string>
+    <string name="pairing_sub">Telefon und Computer müssen im selben lokalen Netzwerk sein</string>
+    <string name="paired">„%1$s“ hinzugefügt</string>
+
+    <string name="scan_again">Erneut scannen</string>
+    <string name="back">Zurück</string>
+    <string name="error_invalid_title">Kein Kopplungs-QR-Code</string>
+    <string name="error_invalid_message">Scanne den Code unter Einstellungen → Geräte → Telefon hinzufügen auf dem Computer.</string>
+    <string name="error_expired_title">QR-Code abgelaufen</string>
+    <string name="error_expired_message">Klicke auf dem Computer erneut auf Telefon hinzufügen, um einen neuen Code zu erhalten.</string>
+    <string name="error_unreachable_title">Computer nicht erreichbar</string>
+    <string name="error_unreachable_message">Telefon und Computer müssen im selben lokalen Netzwerk sein.</string>
+    <string name="error_not_that_computer_title">Computer konnte nicht bestätigt werden</string>
+    <string name="error_not_that_computer_message">Die Gegenseite konnte nicht nachweisen, dass sie der Computer mit dem Code ist. Es wurde nichts gespeichert.</string>
+    <string name="error_failed_title">Kopplung fehlgeschlagen</string>
+    <string name="error_failed_message">Der Computer hat mit Status %1$d geantwortet. Versuche es erneut.</string>
+    <string name="error_camera_title">Kamera lässt sich nicht öffnen</string>
+    <string name="error_camera_message">Möglicherweise verwendet eine andere App die Kamera. Schließe sie und versuche es erneut.</string>
+
+    <string name="notification_channel">Pocket Agent Sprache</string>
+    <string name="notification_using">Wird von %1$s verwendet</string>
+    <string name="notification_idle">Mit keinem Computer verbunden</string>
+    <string name="notification_disconnect">Trennen</string>
+</resources>

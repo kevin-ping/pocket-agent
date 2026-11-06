@@ -6,7 +6,7 @@ Endpoints
 HTTP
     POST /transcribe       multipart "file"            → {"text", "language"}
     POST /vad              multipart "file"            → {"has_speech", "segments"}
-    GET  /health                                       → {"status", "model", "vad"}
+    GET  /health                                       → {"status", "model", "vad", "pid"}
 
 Wake word detection and speaker verification are handled natively by
 sherpa-onnx in the Rust layer (sherpa_wake.rs). This server only provides
@@ -49,6 +49,32 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+
+class _QuietStderr:
+    """A server left running after PA exits keeps a stderr pipe nobody reads;
+    a failed log write must not turn every request into a 500."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, data):
+        try:
+            return self._stream.write(data)
+        except OSError:
+            return len(data)
+
+    def flush(self):
+        try:
+            self._stream.flush()
+        except OSError:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+sys.stderr = _QuietStderr(sys.stderr)
 
 warnings.filterwarnings(
     "ignore",
@@ -339,9 +365,12 @@ def _rms_dbfs(samples: np.ndarray) -> float:
 
 
 def vad_segments(wav_path: str):
-    """Silero VAD wrapper — preserved from the prior server."""
-    wav = read_audio(wav_path, sampling_rate=16000)
-    segs = get_speech_timestamps(wav, state.vad, return_seconds=True)
+    """Silero VAD wrapper. The WAV is read with PA's own reader, not silero's
+    read_audio: since silero-vad 6 that needs torchaudio or torchcodec, which
+    it no longer installs, so every check failed on a fresh voice environment."""
+    import torch
+    samples, _ = _read_wav_bytes(Path(wav_path).read_bytes())
+    segs = get_speech_timestamps(torch.from_numpy(samples), state.vad, sampling_rate=16000, return_seconds=True)
     return [{"start": float(s["start"]), "end": float(s["end"])} for s in segs]
 
 # --- Existing endpoints (Phase A contracts preserved) ------------------------
@@ -384,6 +413,8 @@ async def health():
         "status": "ok",
         "model": state.whisper_name,
         "vad": "silero" if state.vad is not None else "none",
+        # Lets a later PA find and replace a server an earlier PA left running.
+        "pid": os.getpid(),
     }
 
 
@@ -489,7 +520,7 @@ def _download_speaker_model(dest: Path) -> None:
         print(f"[stt-server] downloading speaker model to {dest} ...", file=sys.stderr, flush=True)
         with urllib.request.urlopen(_SPEAKER_MODEL_HF_URL, timeout=30) as resp, open(tmp, "wb") as out:
             shutil.copyfileobj(resp, out)
-        tmp.rename(dest)
+        os.replace(tmp, dest)  # Path.rename fails on Windows when dest exists
         print(f"[stt-server] speaker model downloaded ({dest.stat().st_size // 1024 // 1024} MB)",
               file=sys.stderr, flush=True)
     except Exception as e:
@@ -714,11 +745,17 @@ def _kws_verify(samples, speaker):
     if not NAME_RE.fullmatch(speaker) or not ref_path.is_file() or len(samples) < 8000:
         return 0.0
     ref = np.frombuffer(ref_path.read_bytes(), dtype=np.float32)
-    with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+    # Closed before wave and the embedder reopen it: Windows refuses a second
+    # open of a NamedTemporaryFile that is still open.
+    f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    f.close()
+    try:
         with wave.open(f.name, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
             w.writeframes((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
         embedding = _extract_embedding_from_wav(f.name)
+    finally:
+        os.unlink(f.name)
     if ref.shape != embedding.shape:
         return 0.0
     norm = float(np.linalg.norm(ref) * np.linalg.norm(embedding))
@@ -858,7 +895,9 @@ def _startup_selfcheck() -> list[str]:
     try:
         importlib.import_module("av")
     except ImportError:
-        fatal.append("MISSING: av>=12.0.0,<13 (PyAV). If install fails on x86_64 macOS: brew install pkg-config ffmpeg")
+        hint = ("If install fails on x86_64 macOS: brew install pkg-config ffmpeg" if sys.platform == "darwin"
+                else "If install fails, use a 64-bit Python 3.10-3.12, which has prebuilt PyAV wheels")
+        fatal.append(f"MISSING: av>=12.0.0,<13 (PyAV). {hint}")
 
     # 5. sherpa-onnx native libs only fail at load time (e.g. on macOS < 13.4),
     # so import it for real. Wake word and owner voice checks depend on it;

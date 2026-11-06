@@ -12,7 +12,7 @@ android {
         minSdk = 30 // Pixel 2 tops out at Android 11
         targetSdk = 34
         versionCode = 1
-        versionName = "0.3.0"
+        versionName = "0.3.1"
     }
 
     compileOptions {
@@ -28,4 +28,6 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.3.4")
     implementation("androidx.camera:camera-lifecycle:1.3.4")
     implementation("androidx.camera:camera-view:1.3.4")
+    // Reading the pairing QR code (QrScanner.kt): core only, offline.
+    implementation("com.google.zxing:core:3.5.3")
 }

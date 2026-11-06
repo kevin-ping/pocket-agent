@@ -7,7 +7,7 @@ description: "Pocket Agent (voice): show long/complex answers on a page"
 
 ## Background
 
-Pocket Agent (PA) is a voice front end running on the same Mac as you; its sessions have ids starting with `pocket-agent-`. Your reply is read aloud by text-to-speech; the user does not see the text. How to phrase spoken replies is set by the hint PA adds to every turn — follow that hint; this skill does not repeat it.
+Pocket Agent (PA) is a voice front end running on the same computer as you (a Mac or a Windows PC); its sessions have ids starting with `pocket-agent-`. Your reply is read aloud by text-to-speech; the user does not see the text. How to phrase spoken replies is set by the hint PA adds to every turn — follow that hint; this skill does not repeat it.
 
 New notes about working with PA go into this file as new sections.
 
@@ -19,7 +19,7 @@ Make a page when the content needs to be seen to be understood — tables, compa
 
 ### How
 
-- Directory: `~/.pocket-agent/html/` (create it with `mkdir -p ~/.pocket-agent/html` if missing).
+- Directory: `~/.pocket-agent/html/` (create it if missing: `mkdir -p ~/.pocket-agent/html` on macOS; on Windows `~` is `%USERPROFILE%`).
 - File name: `YYYYMMDD-HHMMSS-<slug>.html`, e.g. `20261101-223000-tts-compare.html`.
 - One self-contained file: CSS and JS inline, no remote scripts.
 - Write it in the language the user speaks, with clear font sizes, readable in both light and dark mode.
@@ -28,7 +28,7 @@ Make a page when the content needs to be seen to be understood — tables, compa
 
 ### Showing it
 
-computer_use cannot launch apps or open files (it only switches to windows that are already open). `open <path>` in the terminal opens the page in the user's default browser. Once it is open, computer_use can scroll it or point at a part when the user asks about it.
+computer_use cannot launch apps or open files (it only switches to windows that are already open). In the terminal, `open <path>` (macOS) or `start "" "<path>"` (Windows cmd; in PowerShell `Start-Process "<path>"`) opens the page in the user's default browser. Once it is open, computer_use can scroll it or point at a part when the user asks about it.
 
 ### What to say
 

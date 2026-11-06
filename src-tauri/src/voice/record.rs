@@ -267,8 +267,51 @@ static MIC_INIT_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
 const WORKER_STOPPED: &str = "录音线程已停止，请重启 Pocket Agent。";
 
+/// Where the input device is chosen.
+#[cfg(not(windows))]
+const SOUND_INPUT_SETTINGS: &str = "系统设置 → 声音 → 输入";
+#[cfg(windows)]
+const SOUND_INPUT_SETTINGS: &str = "设置 → 系统 → 声音 → 输入";
+
+/// Windows has no API to ask whether the microphone is allowed: a blocked
+/// desktop app either fails to open the stream or records pure silence. So
+/// failures there carry this hint instead of a permission check up front.
+#[cfg(windows)]
+const WINDOWS_MIC_PRIVACY_HINT: &str = "如果是 Windows 隐私设置挡住了麦克风：打开「设置 → 隐私(Windows 11 为「隐私和安全性」)→ 麦克风」，打开「允许桌面应用访问你的麦克风」，然后再按一次录音键。";
+
+/// Start of the error for a recording of pure zeros (wrong input device,
+/// muted, or blocked by Windows privacy settings).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const SILENT_RECORDING: &str = "录到的是完全无声的音频：可能选错了输入设备、麦克风被静音，或被系统挡住。请在「设置 → 系统 → 声音 → 输入」中选择正在使用的麦克风。";
+
+/// `message` plus, on Windows, the privacy-settings hint.
+fn with_privacy_hint(message: String) -> String {
+    #[cfg(windows)]
+    return format!("{message} {WINDOWS_MIC_PRIVACY_HINT}");
+    #[cfg(not(windows))]
+    message
+}
+
 fn no_input_device() -> String {
-    "找不到麦克风：请连接麦克风，或在「系统设置 → 声音 → 输入」中选择输入设备，然后再按一次录音键。".to_string()
+    format!("找不到麦克风：请连接麦克风，或在「{SOUND_INPUT_SETTINGS}」中选择输入设备，然后再按一次录音键。")
+}
+
+/// Whether the WAV at `path` holds samples and every one is exactly zero. A
+/// live microphone always has some noise; Windows feeds a desktop app that
+/// the privacy settings block pure zeros.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_digital_silence(path: &Path) -> bool {
+    let Ok(mut reader) = hound::WavReader::open(path) else {
+        return false;
+    };
+    let mut any = false;
+    for sample in reader.samples::<i16>() {
+        match sample {
+            Ok(0) => any = true,
+            _ => return false,
+        }
+    }
+    any
 }
 
 /// `Some(reason)` when macOS has denied or restricted microphone access. Denied
@@ -396,7 +439,7 @@ fn try_prewarm() -> Result<(), String> {
     let device = host.default_input_device().ok_or_else(no_input_device)?;
     let supported = device
         .default_input_config()
-        .map_err(|e| format!("无法读取麦克风配置({e}):请在「系统设置 → 声音 → 输入」中检查输入设备，然后再按一次录音键。"))?;
+        .map_err(|e| with_privacy_hint(format!("无法读取麦克风配置({e}):请在「{SOUND_INPUT_SETTINGS}」中检查输入设备，然后再按一次录音键。")))?;
 
     let input_channels = supported.channels();
     // Always write mono — stt-server requires `channels == 1` (see _read_wav_bytes).
@@ -490,10 +533,17 @@ fn stop_recording_internal() -> Result<String, String> {
         .map_err(|_| WORKER_STOPPED.to_string())?;
     // Daemon may still be in Phase 1 (build_stream ~200ms) when Stop arrives —
     // give it enough headroom to walk through Phase 1 → Phase 2 → Phase 3 → finalize.
-    match resp_rx.recv_timeout(std::time::Duration::from_secs(8)) {
+    let result = match resp_rx.recv_timeout(std::time::Duration::from_secs(8)) {
         Ok(result) => result,
         Err(_) => Err("stop timeout".into()),
+    };
+    #[cfg(windows)]
+    if let Ok(path) = &result {
+        if is_digital_silence(Path::new(path)) {
+            return Err(format!("{SILENT_RECORDING}{WINDOWS_MIC_PRIVACY_HINT}"));
+        }
     }
+    result
 }
 
 // -- Daemon implementation --
@@ -564,7 +614,7 @@ fn daemon_loop(
                 if let Err(e) = stream.play() {
                     eprintln!("[record] play failed: {}", e);
                     if let Some(r) = resp {
-                        let _ = r.send(Err(format!("play: {}", e)));
+                        let _ = r.send(Err(with_privacy_hint(format!("无法开始录音(play: {})。", e))));
                     }
                     continue;
                 }
@@ -915,6 +965,29 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_all_zero_audio_counts_as_digital_silence() {
+        let dir = std::env::temp_dir().join(format!("pa-record-silence-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let spec = WavSpec { channels: 1, sample_rate: 16000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let write = |name: &str, samples: &[i16]| {
+            let path = dir.join(name);
+            let mut w = WavWriter::create(&path, spec).unwrap();
+            for &s in samples {
+                w.write_sample(s).unwrap();
+            }
+            w.finalize().unwrap();
+            path
+        };
+        assert!(is_digital_silence(&write("zeros.wav", &[0; 1600])));
+        let mut quiet = vec![0i16; 1600];
+        quiet[800] = 1;
+        assert!(!is_digital_silence(&write("noise.wav", &quiet)));
+        assert!(!is_digital_silence(&write("empty.wav", &[])));
+        assert!(!is_digital_silence(&dir.join("missing.wav")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The old order spawned first and published after; a worker scheduled
     /// first found nothing, returned, and left a daemon with a dead receiver.

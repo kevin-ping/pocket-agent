@@ -31,6 +31,12 @@ pypinyin>=0.51
 # Speaker embedding: fbank feature extraction for 3D-Speaker model.
 kaldi-native-fbank>=1.0
 
-# Offline Chinese/English keyword spotting and pronunciation conversion.
-sherpa-onnx==1.12.26
+# Offline Chinese/English keyword spotting. The 1.12.26 wheel is tagged for old
+# macOS, but its bundled onnxruntime 1.23.2 needs macOS 13.4 (std::to_chars):
+# it installs on macOS 12 and fails at import. Older Macs get 1.10.46, which
+# runs the same KWS model. platform_release is the Darwin version: 22.5 = macOS
+# 13.4. Before bumping, check the minos of the dylibs in the wheel
+# (otool -l | grep -A3 LC_BUILD_VERSION), not just the wheel tag.
+sherpa-onnx==1.12.26; platform_system != "Darwin" or platform_release >= "22.5"
+sherpa-onnx==1.10.46; platform_system == "Darwin" and platform_release < "22.5"
 sentencepiece>=0.2,<0.3

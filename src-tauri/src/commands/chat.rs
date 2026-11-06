@@ -407,7 +407,7 @@ fn maybe_emit_audio_idle(app: &AppHandle, generation: u64) {
 fn edge_tts_bin() -> String {
     pick_edge_tts_bin(
         std::env::var("EDGE_TTS_BIN").ok(),
-        &crate::voice::venv::venv_root().join("bin").join("edge-tts"),
+        &crate::voice::venv::venv_bin("edge-tts"),
     )
 }
 
@@ -610,9 +610,11 @@ fn tts_path(format: &str) -> String {
         .unwrap_or_default()
         .as_millis();
     match format {
-        "mp3" => format!("/tmp/pocket-agent-tts-{}.mp3", id),
-        _ => format!("/tmp/pocket-agent-tts-{}.wav", id),
+        "mp3" => std::env::temp_dir().join(format!("pocket-agent-tts-{}.mp3", id)),
+        _ => std::env::temp_dir().join(format!("pocket-agent-tts-{}.wav", id)),
     }
+    .to_string_lossy()
+    .into_owned()
 }
 
 fn emotion_to_prosody(emotion: &str) -> (&'static str, &'static str) {
@@ -665,7 +667,7 @@ fn generate_tts_once(
     eprintln!("[TTS] generating for {} chars voice={} rate={} vol={}...", text.len(), voice, rate, volume);
     let rate_arg = format!("--rate={}", rate);
     let volume_arg = format!("--volume={}", volume);
-    let spawned = Command::new(edge_tts_bin())
+    let spawned = crate::platform::no_window(&mut Command::new(edge_tts_bin()))
         .arg("--voice").arg(voice)
         .arg("--text").arg(text)
         .arg(&rate_arg)
@@ -702,7 +704,7 @@ fn generate_tts_once(
         }
     };
     let Some(status) = status else {
-        let _ = child.kill();
+        crate::platform::kill_tree(&mut child);
         let _ = child.wait();
         let _ = std::fs::remove_file(path);
         return false;
@@ -1213,7 +1215,10 @@ pub async fn send_message(
     if get_api_agent().is_none() && super::computer::is_local_gateway(&get_api_url()) {
         hint.push_str(super::computer::COMPUTER_HINT);
     } else {
-        hint.push_str("\nPocket Agent has no local desktop integration with this gateway. Gateway computer tools operate on the gateway/driver host, not automatically on this Mac. Do not claim to see or control this Mac.");
+        hint.push_str(&format!(
+            "\nPocket Agent has no local desktop integration with this gateway. Gateway computer tools operate on the gateway/driver host, not automatically on this {m}. Do not claim to see or control this {m}.",
+            m = crate::platform::MACHINE
+        ));
     }
     hint.push_str(phone_camera_hint(crate::voice::remote::is_camera_on()));
     hint.push_str(&phone_device_hint(
@@ -1239,11 +1244,10 @@ IMPORTANT: You MUST respond in the SAME language the user writes in. If the user
     let session_id = format!("{}-{}", base_id, today);
 
     let yesterday = (chrono::Local::now() - chrono::TimeDelta::days(1)).format("%Y-%m-%d").to_string();
-    let summary_path = format!("{}/.hermes/pa-summaries/{}.md",
-        std::env::var("HOME").unwrap_or_default(), yesterday);
+    let summary_path = crate::platform::hermes_home().join("pa-summaries").join(format!("{}.md", yesterday));
     let daily_summary = std::fs::read_to_string(&summary_path).ok();
     if daily_summary.is_some() {
-        eprintln!("[SSE] loaded daily summary from {}", summary_path);
+        eprintln!("[SSE] loaded daily summary from {}", summary_path.display());
     }
 
     // Streaming TTS: sentence-level callback

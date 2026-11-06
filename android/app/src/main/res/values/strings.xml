@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- English (default). The same keys in values-zh / ja / ko / fr / de / es.
+     scan_add_device must match the button named in PA's Settings → Devices qrHint (src/lib/settingsI18n.ts). -->
+<resources>
+    <string name="app_name" translatable="false">Pocket Agent</string>
+
+    <!-- Device list -->
+    <string name="devices_empty">No computers paired yet. On the computer, open Pocket Agent Settings → Devices → Add phone, then tap “Scan to add device” below.</string>
+    <string name="scan_add_device">Scan to add device</string>
+    <string name="status_in_use">In use</string>
+    <string name="status_in_use_offline">In use · offline</string>
+    <string name="status_busy">Ask “%1$s” to return to the computer first</string>
+    <string name="status_online">Online</string>
+    <string name="status_offline">Offline</string>
+    <string name="action_open">Open</string>
+    <string name="action_connect">Connect</string>
+    <string name="cannot_connect">Can\'t connect to “%1$s” right now</string>
+    <string name="remove_title">Remove “%1$s”?</string>
+    <string name="remove_message">This phone will forget the computer. You can also remove this phone in the computer\'s Settings → Devices.</string>
+    <string name="cancel">Cancel</string>
+    <string name="remove">Remove</string>
+
+    <!-- Permissions -->
+    <string name="camera_needed_scan">Camera permission is needed to scan the QR code</string>
+    <string name="camera_needed_see">Camera permission is needed for Pocket Agent to see</string>
+    <string name="mic_needed">Microphone permission is needed to talk to Pocket Agent</string>
+
+    <!-- Scanner -->
+    <string name="close">Close</string>
+    <string name="scan_hint">On the computer, open Pocket Agent\nSettings → Devices → Add phone</string>
+    <string name="scan_hint_sub">The QR code is valid for 2 minutes</string>
+
+    <!-- Pairing -->
+    <string name="pairing_title">Pairing…</string>
+    <string name="pairing_sub">Keep the phone and the computer on the same local network</string>
+    <string name="paired">Added “%1$s”</string>
+
+    <!-- Pairing failed / camera unavailable -->
+    <string name="scan_again">Scan again</string>
+    <string name="back">Back</string>
+    <string name="error_invalid_title">Not a pairing QR code</string>
+    <string name="error_invalid_message">Scan the code shown in the computer\'s Settings → Devices → Add phone.</string>
+    <string name="error_expired_title">QR code expired</string>
+    <string name="error_expired_message">On the computer, click Add phone again for a new code.</string>
+    <string name="error_unreachable_title">Can\'t reach the computer</string>
+    <string name="error_unreachable_message">The phone and the computer need to be on the same local network.</string>
+    <string name="error_not_that_computer_title">Couldn\'t verify the computer</string>
+    <string name="error_not_that_computer_message">The other side couldn\'t prove it is the computer showing the code. Nothing was saved.</string>
+    <string name="error_failed_title">Pairing failed</string>
+    <string name="error_failed_message">The computer answered with status %1$d. Try again.</string>
+    <string name="error_camera_title">Can\'t open the camera</string>
+    <string name="error_camera_message">Another app may be using it. Close that app and try again.</string>
+
+    <!-- Notification -->
+    <string name="notification_channel">Pocket Agent voice</string>
+    <string name="notification_using">Using %1$s</string>
+    <string name="notification_idle">Not connected to a computer</string>
+    <string name="notification_disconnect">Disconnect</string>
+</resources>

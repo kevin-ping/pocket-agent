@@ -1314,9 +1314,6 @@
         armWakeListenerIfEnabled();
       }).catch(console.error);
     }
-    // Old macOS: the sherpa compat build installs after startup, then stt-server
-    // reloads it. Wake could not start before — try again now.
-    listen('voice-engine-reloaded', () => armWakeListenerIfEnabled()).catch(console.error);
     // Phone attached or left: Rust stopped wake on the old source; listen on the new one.
     listen('audio-source-changed', () => armWakeListenerIfEnabled()).catch(console.error);
 
@@ -1476,7 +1473,7 @@
     padding: 0;
     background: transparent;
     overflow: hidden;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
     -webkit-font-smoothing: antialiased;
   }
   :global(:root) {

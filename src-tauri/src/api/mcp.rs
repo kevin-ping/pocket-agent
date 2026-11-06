@@ -72,7 +72,7 @@ async fn respond(body: &[u8]) -> Option<Value> {
                 Some(SNAPSHOT) => result(id, snapshot_result(crate::voice::remote::snapshot().await)),
                 Some(CAMERA_OPEN) => result(id, text(&camera_open(&args).await)),
                 Some(CAMERA_CLOSE) => result(id, text(camera_close())),
-                Some(SWITCH_DEVICE) => result(id, text(switch_device(&args))),
+                Some(SWITCH_DEVICE) => result(id, text(&switch_device(&args))),
                 _ => error(id, -32602, "unknown tool"),
             }
         }
@@ -220,12 +220,12 @@ fn camera_close() -> &'static str {
     CAMERA_CLOSING
 }
 
-fn switch_device(args: &Value) -> &'static str {
+fn switch_device(args: &Value) -> String {
     use super::remote::{request_switch, Device};
     match string_arg(args, "target") {
         Some(Some("desktop")) => request_switch(Device::Desktop),
         Some(Some("phone")) => request_switch(Device::Phone),
-        _ => TARGET_INVALID,
+        _ => TARGET_INVALID.into(),
     }
 }
 
@@ -310,8 +310,9 @@ mod tests {
         assert_eq!(call_text(&reply), super::super::remote::PHONE_UI_ABSENT);
         let reply = call(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"phone_camera_close"}}"#).await.unwrap();
         assert_eq!(call_text(&reply), CAMERA_ALREADY_OFF);
+        // No /ui page and no paired phone online on /phone.
         let reply = call(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"switch_device","arguments":{"target":"phone"}}}"#).await.unwrap();
-        assert_eq!(call_text(&reply), super::super::remote::PHONE_UI_ABSENT);
+        assert_eq!(call_text(&reply), super::super::phone::NO_ONLINE_PHONE);
         let reply = call(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"switch_device","arguments":{"target":"desktop"}}}"#).await.unwrap();
         assert_eq!(call_text(&reply), super::super::remote::ALREADY_ON_DESKTOP);
         let reply = call(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"switch_device","arguments":{"target":"tv"}}}"#).await.unwrap();

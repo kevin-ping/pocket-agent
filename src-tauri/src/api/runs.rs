@@ -60,8 +60,9 @@ pub(super) fn http() -> reqwest::Client {
 /// 401 / 403 from the gateway: the key PA sends is not the gateway's.
 pub(super) fn auth_failed(status: reqwest::StatusCode) -> String {
     format!(
-        "Hermes 拒绝了密钥（HTTP {}）：PA 的 API_SERVER_KEY 必须与网关 ~/.hermes/.env 中的 API_SERVER_KEY 一致（{}）。",
+        "Hermes 拒绝了密钥（HTTP {}）：PA 的 API_SERVER_KEY 必须与网关 {} 中的 API_SERVER_KEY 一致（{}）。",
         status.as_u16(),
+        crate::platform::hermes_env_display(),
         crate::commands::config::gateway_hint()
     )
 }

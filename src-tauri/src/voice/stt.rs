@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio, Child};
 use std::io::BufRead;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 
 /// Store the STT server child process so we can kill it when PA exits.
@@ -82,70 +82,6 @@ fn child_state() -> Option<Probe> {
     }
 }
 
-/// Requests in flight against the resident server, and whether a reload is
-/// swapping the server (and its token) out from under them.
-struct VoiceGate {
-    active: u32,
-    reloading: bool,
-}
-
-static VOICE_GATE: Mutex<VoiceGate> = Mutex::new(VoiceGate { active: 0, reloading: false });
-static VOICE_GATE_CV: Condvar = Condvar::new();
-
-fn voice_gate() -> std::sync::MutexGuard<'static, VoiceGate> {
-    VOICE_GATE.lock().unwrap_or_else(|p| p.into_inner())
-}
-
-/// Lease on the resident server for one request. A reload waits until no
-/// lease is held; a new lease waits until the reloaded server is healthy.
-pub struct VoiceTxn(());
-
-pub fn voice_txn() -> VoiceTxn {
-    let mut gate = VOICE_GATE_CV
-        .wait_while(voice_gate(), |g| g.reloading)
-        .unwrap_or_else(|p| p.into_inner());
-    gate.active += 1;
-    VoiceTxn(())
-}
-
-/// Like `voice_txn`, but `None` instead of waiting while a reload is running.
-pub fn try_voice_txn() -> Option<VoiceTxn> {
-    let mut gate = voice_gate();
-    if gate.reloading {
-        return None;
-    }
-    gate.active += 1;
-    Some(VoiceTxn(()))
-}
-
-impl Drop for VoiceTxn {
-    fn drop(&mut self) {
-        voice_gate().active -= 1;
-        VOICE_GATE_CV.notify_all();
-    }
-}
-
-/// Held for the whole reload; dropping it lets waiting requests through.
-struct ReloadLease(());
-
-impl Drop for ReloadLease {
-    fn drop(&mut self) {
-        voice_gate().reloading = false;
-        VOICE_GATE_CV.notify_all();
-    }
-}
-
-/// Claim the server for a reload only if no request is in flight and `idle`
-/// still holds, checked under the same lock new requests take.
-fn try_begin_reload(idle: impl Fn() -> bool) -> Option<ReloadLease> {
-    let mut gate = voice_gate();
-    if gate.active > 0 || gate.reloading || !idle() {
-        return None;
-    }
-    gate.reloading = true;
-    Some(ReloadLease(()))
-}
-
 const STT_SERVER_URL: &str = "http://127.0.0.1:8651";
 
 fn helper_path() -> PathBuf {
@@ -168,6 +104,16 @@ fn resolve_python() -> Option<String> {
         return Some(venv_python.to_string_lossy().to_string());
     }
     None
+}
+
+/// A Python child (stt-server, stt-helper): no console window, and UTF-8
+/// stdio. Windows otherwise encodes a pipe in the ANSI code page, so the
+/// Chinese PA reads back (transcripts, error lines) fails or comes back garbled.
+fn python_command(python: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut cmd = Command::new(python);
+    crate::platform::no_window(&mut cmd);
+    cmd.env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8");
+    cmd
 }
 
 pub struct SttResult {
@@ -319,7 +265,7 @@ fn run_bounded(
         }
     };
     if stopped.is_err() {
-        let _ = child.kill();
+        crate::platform::kill_tree(&mut child);
         let _ = child.wait();
     }
     let out = out_thread.join().unwrap_or_default();
@@ -339,12 +285,20 @@ fn transcribe_subprocess(wav_path: &str, cancelled: &dyn Fn() -> bool) -> Result
 
     let mut cmd = match resolve_python() {
         Some(python) => {
-            let mut c = Command::new(python);
+            let mut c = python_command(python);
             c.arg(&helper);
             c
         }
+        // Windows does not run scripts by their shebang line.
+        None if cfg!(windows) => {
+            return Err(format!(
+                "语音环境未就绪({} 不存在),无法运行 stt-helper",
+                crate::voice::venv::venv_python_path().display()
+            ))
+        }
         None => Command::new(&helper),
     };
+    crate::platform::no_window(&mut cmd);
     let model = stt_model();
     cmd.arg(wav_path).arg("--model").arg(&model).arg("--lang-prompt").arg(lang_prompt());
     eprintln!("[stt] fallback stt-helper with cached model '{}'", model);
@@ -385,7 +339,6 @@ pub fn transcribe(wav_path: &str) -> Result<SttResult, String> {
 
 /// `transcribe`, ended by any `cancel_fallback` after `token` was taken.
 pub fn transcribe_until(wav_path: &str, token: CancelToken) -> Result<SttResult, String> {
-    let _txn = voice_txn();
     transcribe_staged(
         &|| token.cancelled(),
         std::time::Duration::from_secs(1),
@@ -457,18 +410,36 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
     };
 
     match port {
-        VoicePort::Ours => {
-            eprintln!("[stt] resident server already running on :8651");
-            mark_app_ready(|| show_main_window(app_handle.as_ref(), "existing server"));
-            return;
+        VoicePort::Ours(pid) => {
+            let spawned_here = STT_CHILD.lock().map(|g| g.is_some()).unwrap_or(false);
+            match pid.filter(|_| !spawned_here) {
+                // Our own child, or a server too old to report its pid: reuse it.
+                None => {
+                    eprintln!("[stt] resident server already running on :8651");
+                    mark_app_ready(|| show_main_window(app_handle.as_ref(), "existing server"));
+                    return;
+                }
+                Some(pid) => match stop_stale_server(pid) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        mark_app_ready(|| show_main_window(app_handle.as_ref(), "existing server"));
+                        return;
+                    }
+                    Err(e) => {
+                        report_service_failure(app_handle.as_ref(), &e);
+                        return;
+                    }
+                },
+            }
         }
         // Not PA's voice service: report it, never kill a process PA does not own.
         VoicePort::Foreign(detail) => {
             report_service_failure(
                 app_handle.as_ref(),
                 &format!(
-                    "语音服务端口 8651 已被其他程序占用（{detail}）。在终端运行 lsof -iTCP:8651 -sTCP:LISTEN \
-                     查看占用的进程，关闭它后重启 Pocket Agent。"
+                    "语音服务端口 8651 已被其他程序占用（{detail}）。在终端运行 {find} \
+                     查看占用的进程，关闭它后重启 Pocket Agent。",
+                    find = FIND_LISTENER_HINT,
                 ),
             );
             return;
@@ -506,7 +477,7 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
     eprintln!("[stt] using Whisper model: {}", stt_model);
     let lang_prompt = lang_prompt();
 
-    match Command::new(&python)
+    match python_command(&python)
         .arg(&server_script)
         .arg("--port")
         .arg("8651")
@@ -592,8 +563,8 @@ pub fn ensure_stt_server(app_handle: Option<tauri::AppHandle>) {
 enum VoicePort {
     /// Nothing listening: PA starts its own server.
     Free,
-    /// PA's stt-server (e.g. left running by a previous PA): reuse it.
-    Ours,
+    /// PA's stt-server, with the pid its `/health` reports (absent before 0.3.1).
+    Ours(Option<u32>),
     /// Something else holds the port; carries what it answered.
     Foreign(String),
 }
@@ -610,15 +581,146 @@ fn is_voice_health(status: u16, body: &str) -> bool {
     v["status"] == "ok" && v["model"].is_string() && v["vad"].is_string()
 }
 
+fn health_pid(body: &str) -> Option<u32> {
+    let v = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    v["pid"].as_u64().and_then(|p| u32::try_from(p).ok())
+}
+
+/// How to find the process listening on 8651, for error messages.
+#[cfg(not(windows))]
+const FIND_LISTENER_HINT: &str = "lsof -iTCP:8651 -sTCP:LISTEN";
+#[cfg(windows)]
+const FIND_LISTENER_HINT: &str = "netstat -ano | findstr :8651";
+
+/// Pids listening on `port`; `None` when lsof cannot be run.
+#[cfg(not(windows))]
+fn listening_pids(port: u16) -> Option<Vec<u32>> {
+    let out = Command::new("lsof")
+        .args(["-nP", &format!("-tiTCP:{port}"), "-sTCP:LISTEN"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect())
+}
+
+/// Pids listening on `port`; `None` when netstat cannot be run.
+#[cfg(windows)]
+fn listening_pids(port: u16) -> Option<Vec<u32>> {
+    let out = crate::platform::no_window(&mut Command::new("netstat"))
+        .args(["-ano", "-p", "TCP"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let mut pids = netstat_listeners(&String::from_utf8_lossy(&out.stdout), port);
+    // `-p TCP` lists IPv4 only; IPv6 listeners come from `-p TCPv6`.
+    if let Ok(v6) = crate::platform::no_window(&mut Command::new("netstat"))
+        .args(["-ano", "-p", "TCPv6"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    {
+        pids.extend(netstat_listeners(&String::from_utf8_lossy(&v6.stdout), port));
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    Some(pids)
+}
+
+/// Listening pids for `port` in `netstat -ano` output. The state column is
+/// localized ("LISTENING", "侦听", ...), so a listener is recognised by its
+/// foreign address instead, which is always `0.0.0.0:0` or `[::]:0`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn netstat_listeners(text: &str, port: u16) -> Vec<u32> {
+    let suffix = format!(":{port}");
+    text.lines()
+        .filter_map(|line| {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            match cols.as_slice() {
+                [proto, local, foreign, _state, pid]
+                    if proto.starts_with("TCP")
+                        && local.ends_with(&suffix)
+                        && (*foreign == "0.0.0.0:0" || *foreign == "[::]:0") =>
+                {
+                    pid.parse().ok()
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Ask `pid` to exit (SIGTERM; on Windows `taskkill /F`, since a console
+/// python ignores a polite close).
+fn terminate(pid: u32) {
+    #[cfg(not(windows))]
+    let _ = Command::new("/bin/kill").args(["-TERM", &pid.to_string()]).stderr(Stdio::null()).status();
+    #[cfg(windows)]
+    let _ = crate::platform::no_window(&mut Command::new("taskkill"))
+        .args(["/PID", &pid.to_string(), "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// A server left by an earlier PA runs old code with old settings, and its
+/// stderr may be a pipe nobody reads any more (every log line then fails).
+/// Stop it so PA can start a fresh one, but only when the reported pid is the
+/// process listening on 8651. Ok(true): port is free; Ok(false): keep reusing.
+fn stop_stale_server(pid: u32) -> Result<bool, String> {
+    let Some(listeners) = listening_pids(8651) else {
+        eprintln!("[stt] cannot list listeners on :8651; reusing the server there (pid={pid})");
+        return Ok(false);
+    };
+    if !listeners.contains(&pid) {
+        return Err(format!(
+            "语音服务端口 8651 上的程序报告 pid {pid}，但监听该端口的是 {listeners:?}。在终端运行 \
+             {find} 查看占用的进程，关闭它后重启 Pocket Agent。",
+            find = FIND_LISTENER_HINT,
+        ));
+    }
+    eprintln!("[stt] replacing stale stt-server (pid={pid})");
+    terminate(pid);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if listening_pids(8651).is_some_and(|l| l.is_empty()) {
+            return Ok(true);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let kill = if cfg!(windows) { format!("taskkill /PID {pid} /F") } else { format!("kill {pid}") };
+    Err(format!(
+        "上次运行留下的语音服务（pid {pid}）5 秒内没有退出。在终端运行 {kill} 后重启 Pocket Agent。"
+    ))
+}
+
+/// Whether nothing listens at `base` (`http://host:port`). Windows answers a
+/// connect to a closed local port only after ~2 s of retries, so a short HTTP
+/// timeout cannot tell "free" from "busy"; a plain connect with room to wait can.
+fn connection_refused(base: &str) -> bool {
+    let Some(addr) = base
+        .strip_prefix("http://")
+        .and_then(|a| a.parse::<std::net::SocketAddr>().ok())
+    else {
+        return false;
+    };
+    matches!(
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5)),
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused
+    )
+}
+
 fn probe_voice_port(client: &reqwest::blocking::Client, base: &str) -> VoicePort {
     match client.get(format!("{base}/health")).send() {
         Err(e) if e.is_connect() => VoicePort::Free,
+        Err(e) if e.is_timeout() && connection_refused(base) => VoicePort::Free,
         Err(e) => VoicePort::Foreign(format!("/health 无响应：{e}")),
         Ok(resp) => {
             let status = resp.status().as_u16();
             let body = resp.text().unwrap_or_default();
             if is_voice_health(status, &body) {
-                VoicePort::Ours
+                VoicePort::Ours(health_pid(&body))
             } else {
                 VoicePort::Foreign(format!("/health 返回 HTTP {status}，不是 Pocket Agent 语音服务"))
             }
@@ -627,7 +729,7 @@ fn probe_voice_port(client: &reqwest::blocking::Client, base: &str) -> VoicePort
 }
 
 fn voice_service_healthy(client: &reqwest::blocking::Client) -> bool {
-    probe_voice_port(client, STT_SERVER_URL) == VoicePort::Ours
+    matches!(probe_voice_port(client, STT_SERVER_URL), VoicePort::Ours(_))
 }
 
 #[derive(Debug, PartialEq)]
@@ -668,87 +770,23 @@ fn probe_health(
     }
 }
 
-/// No microphone owner, conversation or wake listener — nothing is waiting on
-/// the resident server. In-flight requests are tracked by `VoiceTxn`.
-fn voice_idle() -> bool {
-    crate::voice::record::current_owner() == crate::voice::record::OWNER_NONE
-        && !crate::voice::conversation::is_active()
-        && !crate::voice::sherpa_wake::is_wake_active()
-}
-
-fn server_idle() -> bool {
-    voice_idle() && voice_gate().active == 0
-}
-
-/// Restart the resident server once voice has been idle for a while, so it
-/// re-imports native modules replaced on disk. Requests started meanwhile wait
-/// for the new server; `voice-engine-reloaded` follows once it is healthy. A
-/// server PA did not spawn is left alone: starting a second one would
-/// overwrite its token (see stt-server token file).
-pub fn restart_when_idle(app: tauri::AppHandle) {
-    const QUIET_SECS: u32 = 10;
-    if !STT_CHILD.lock().map(|g| g.is_some()).unwrap_or(false) {
-        eprintln!("[stt] server not owned by this PA; restart PA to load the new voice engine");
-        return;
-    }
-    let mut quiet = 0;
-    let _lease = loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        quiet = if server_idle() { quiet + 1 } else { 0 };
-        if quiet >= QUIET_SECS {
-            match try_begin_reload(voice_idle) {
-                Some(lease) => break lease,
-                None => quiet = 0,
-            }
-        }
-    };
-    eprintln!("[stt] voice idle; restarting STT server to load the new voice engine");
-    shutdown_stt_server();
-    // Keep the handle: if the first server never got healthy, this one shows
-    // the main window instead of the superseded probe.
-    ensure_stt_server(Some(app.clone()));
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_millis(500))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while std::time::Instant::now() < deadline {
-        if voice_service_healthy(&client) {
-            eprintln!("[stt] STT server reloaded");
-            let _ = app.emit("voice-engine-reloaded", ());
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
-    eprintln!("[stt] WARNING: STT server did not come back within 30s after reload");
-}
-
 /// Kill the resident STT server. Called when PA exits.
 pub fn shutdown_stt_server() {
     if let Ok(mut guard) = STT_CHILD.lock() {
         if let Some(ref mut child) = *guard {
             eprintln!("[stt] shutting down STT server (pid={})...", child.id());
-            let _ = child.kill();
+            crate::platform::kill_tree(child);
             let _ = child.wait(); // reap zombie
         }
         *guard = None;
     }
 }
 
-/// Serializes tests that touch the process-wide voice gate.
+/// Serializes tests that touch process-wide server state.
 #[cfg(test)]
 pub(crate) fn test_serial() -> std::sync::MutexGuard<'static, ()> {
     static SERIAL: Mutex<()> = Mutex::new(());
     SERIAL.lock().unwrap_or_else(|p| p.into_inner())
-}
-
-/// Puts the gate in the reloading state until the returned lease drops.
-#[cfg(test)]
-pub(crate) fn hold_reload_for_test() -> impl Drop {
-    try_begin_reload(|| true).expect("gate idle")
 }
 
 #[cfg(test)]
@@ -756,40 +794,6 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
-
-    #[test]
-    fn reload_waits_for_requests_in_flight() {
-        let _serial = test_serial();
-        let txn = voice_txn();
-        assert!(try_begin_reload(|| true).is_none(), "a /transcribe in flight blocks the reload");
-        drop(txn);
-        assert!(try_begin_reload(|| true).is_some());
-    }
-
-    #[test]
-    fn reload_rechecks_idle_under_the_gate() {
-        let _serial = test_serial();
-        // A conversation started after the last quiet sample.
-        assert!(try_begin_reload(|| false).is_none());
-        assert!(!voice_gate().reloading);
-    }
-
-    #[test]
-    fn requests_started_during_reload_wait_for_the_new_server() {
-        let _serial = test_serial();
-        let lease = try_begin_reload(|| true).expect("idle");
-        assert!(try_voice_txn().is_none(), "VAD does not wait out a reload");
-        let (tx, rx) = mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            let _txn = voice_txn();
-            tx.send(()).unwrap();
-        });
-        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "no request reaches the old server");
-        drop(lease);
-        rx.recv_timeout(Duration::from_secs(2)).expect("released once the server is back");
-        worker.join().unwrap();
-        assert_eq!(voice_gate().active, 0);
-    }
 
     #[test]
     fn probe_keeps_waiting_past_the_first_deadline_until_healthy() {
@@ -825,7 +829,7 @@ mod tests {
     fn reload_before_first_health_still_shows_the_window_once() {
         let _serial = test_serial();
         APP_READY.store(false, Ordering::Release);
-        // First server spawned; compat install finishes before it is healthy.
+        // First server spawned; a second one replaces it before it is healthy.
         let first = SERVER_GEN.fetch_add(1, Ordering::AcqRel) + 1;
         let (gen_tx, gen_rx) = mpsc::channel();
         let old_probe = std::thread::spawn(move || {
@@ -893,7 +897,9 @@ mod tests {
         assert_eq!(probe_voice_port(&client, &format!("http://{addr}")), VoicePort::Free);
 
         let ours = serve_once("200 OK", r#"{"status":"ok","model":"base","vad":"silero"}"#);
-        assert_eq!(probe_voice_port(&client, &ours), VoicePort::Ours);
+        assert_eq!(probe_voice_port(&client, &ours), VoicePort::Ours(None));
+        let ours = serve_once("200 OK", r#"{"status":"ok","model":"base","vad":"silero","pid":4242}"#);
+        assert_eq!(probe_voice_port(&client, &ours), VoicePort::Ours(Some(4242)));
 
         for (status, body) in [("404 Not Found", ""), ("500 Internal Server Error", ""), ("200 OK", "{}"), ("200 OK", r#"{"name":"other"}"#)] {
             let base = serve_once(status, body);
@@ -904,6 +910,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn health_pid_is_optional() {
+        assert_eq!(health_pid(r#"{"status":"ok","model":"base","vad":"silero","pid":4242}"#), Some(4242));
+        assert_eq!(health_pid(r#"{"status":"ok","model":"base","vad":"silero"}"#), None);
+        assert_eq!(health_pid(r#"{"pid":"4242"}"#), None);
+        assert_eq!(health_pid(r#"{"pid":-1}"#), None);
+    }
+
+    #[test]
+    fn listening_pids_finds_the_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert_eq!(listening_pids(port), Some(vec![std::process::id()]));
+        drop(listener);
+        assert_eq!(listening_pids(port), Some(vec![]));
+    }
+
+    #[test]
+    fn netstat_listeners_ignore_the_localized_state_column() {
+        let text = "
+Active Connections
+
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1100
+  TCP    127.0.0.1:8651         0.0.0.0:0              侦听            4242
+  TCP    127.0.0.1:8651         127.0.0.1:50000        ESTABLISHED     4242
+  TCP    127.0.0.1:50000        127.0.0.1:8651         ESTABLISHED     9999
+  TCP    127.0.0.1:18651        0.0.0.0:0              LISTENING       7777
+  TCP    [::]:8651              [::]:0                 ABHÖREN         5151
+";
+        assert_eq!(netstat_listeners(text, 8651), vec![4242, 5151]);
+        assert_eq!(netstat_listeners(text, 135), vec![1100]);
+        assert!(netstat_listeners(text, 50000).is_empty());
+    }
+
+    #[cfg(unix)]
     fn sh(script: &str) -> Command {
         let mut c = Command::new("/bin/sh");
         c.arg("-c").arg(script);
@@ -917,10 +959,12 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     fn process_alive(pid: &str) -> bool {
         Command::new("/bin/kill").args(["-0", pid.trim()]).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
     }
 
+    #[cfg(unix)]
     #[test]
     fn stuck_helper_is_killed_at_the_limit() {
         let dir = scratch("stuck");
@@ -933,6 +977,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn cancelled_helper_is_killed_promptly() {
         let dir = scratch("cancel");
@@ -951,6 +996,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn finished_helper_returns_its_output_and_last_error_line() {
         let (out, last, status) = run_bounded(sh("echo '{\"text\":\"hi\"}'; echo progress >&2; echo 'final reason' >&2; exit 3"), Duration::from_secs(10), &|| false).unwrap();
@@ -968,6 +1014,7 @@ mod tests {
     /// One transcription through the real stages, token and `run_bounded`:
     /// HTTP is `http`, stt-helper a script that records its pid and start, then
     /// answers "helper" (or hangs while `dir/hang` exists).
+    #[cfg(unix)]
     fn staged(token: CancelToken, dir: &std::path::Path, http: &dyn Fn() -> Result<SttResult, String>) -> Result<String, String> {
         let script = format!(
             "echo $$ > {d}/pid; touch {d}/started; [ -e {d}/hang ] && exec sleep 30; echo helper",
@@ -980,17 +1027,20 @@ mod tests {
         .map(|r| r.text)
     }
 
+    #[cfg(unix)]
     fn http_down() -> Result<SttResult, String> {
         Err("connection refused".into())
     }
 
     /// After a cancelled request: the next one runs normally, through the helper.
+    #[cfg(unix)]
     fn next_round_works(dir: &std::path::Path) {
         let _ = std::fs::remove_file(dir.join("hang"));
         let _ = std::fs::remove_file(dir.join("started"));
         assert_eq!(staged(CancelToken::new(), dir, &http_down).unwrap(), "helper");
     }
 
+    #[cfg(unix)]
     #[test]
     fn cancel_during_http_never_starts_the_helper() {
         let _serial = test_serial();
@@ -1025,6 +1075,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn cancel_during_retry_wait_never_starts_the_helper() {
         let _serial = test_serial();
@@ -1053,6 +1104,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn cancel_just_before_the_helper_never_starts_it() {
         let _serial = test_serial();
@@ -1073,6 +1125,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn cancel_while_the_helper_runs_kills_and_reaps_it() {
         let _serial = test_serial();
@@ -1115,9 +1168,9 @@ class WhisperModel:
         json.dump(self.call, open({log:?}, "w"), ensure_ascii=False)
         return [_Seg()], _Info()
 "#, cached = if cached { "True" } else { "False" }, log = log.to_str().unwrap())).unwrap();
-        let out = Command::new("/usr/bin/python3")
+        let out = python_command(if cfg!(windows) { "python" } else { "/usr/bin/python3" })
             .arg(helper_path())
-            .arg("/tmp/x.wav")
+            .arg(std::env::temp_dir().join("x.wav"))
             .args(extra)
             .env("PYTHONPATH", &fake)
             .output()

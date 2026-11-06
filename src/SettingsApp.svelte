@@ -24,12 +24,15 @@
     settingsText,
     wakeSettingsText,
     meshSettingsText,
+    phoneSettingsText,
     type SettingsLang,
   } from './lib/settingsI18n';
   import { convLabelsLang } from './lib/i18n';
   import { wakeErrorMessage, wakeSaveNotice } from './lib/wakeErrors';
 
-  type Section = 'general' | 'avatar' | 'voice' | 'conversation' | 'interruption' | 'wake';
+  type Section = 'general' | 'avatar' | 'voice' | 'conversation' | 'interruption' | 'wake' | 'phones';
+  type PairingQr = { svg: string; expires_in: number; generation: number };
+  type PairedPhone = { phone_id: string; name: string; created_at: string; last_seen_at: string | null; online: boolean };
   type SaveResponse = { config: AppSettings; revision: number; wake_error?: string };
   type WakeModelStatus = { ready: boolean; error?: { code: string; params: Record<string, string> } | null };
   type SettingsBootstrap = { config?: AppSettings; error?: string };
@@ -107,6 +110,69 @@
   let wakeTestResult = $state('');
   let wakeText = $derived(wakeSettingsText(local?.ui_lang ?? 'en'));
   let meshText = $derived(meshSettingsText(local?.ui_lang ?? 'en'));
+  let phoneText = $derived(phoneSettingsText(local?.ui_lang ?? 'en'));
+
+  // Devices (FEAT-MP2 / FEAT-QR1). 「添加手机」 shows a QR code (desktop-only
+  // command); pairing-ended (paired, voided, cancelled) takes it down if it
+  // is for the code on screen (a late one for an older code is ignored),
+  // pairing-changed (list / online) only refreshes the list.
+  let pairing = $state<PairingQr | null>(null);
+  let pairedPhones = $state<PairedPhone[]>([]);
+  let pairingTicker: ReturnType<typeof setInterval> | null = null;
+  async function refreshPhones() {
+    if (!isTauri) return;
+    try {
+      pairedPhones = await invoke<PairedPhone[]>('list_paired_phones');
+    } catch (e) {
+      console.warn('[settings] phones:', e);
+    }
+  }
+  function closeQr() {
+    if (pairingTicker) clearInterval(pairingTicker);
+    pairingTicker = null;
+    pairing = null;
+  }
+  async function startPairing() {
+    try {
+      const qr = await invoke<PairingQr>('start_pairing');
+      closeQr();
+      pairing = qr;
+      pairingTicker = setInterval(() => {
+        if (!pairing) return;
+        if (pairing.expires_in <= 1) closeQr(); // PA voids it at the same moment
+        else pairing = { ...pairing, expires_in: pairing.expires_in - 1 };
+      }, 1000);
+    } catch (e) {
+      error = String(e) === 'no LAN address' ? phoneText.noLan : String(e);
+    }
+  }
+  async function cancelPairing() {
+    const generation = pairing?.generation;
+    closeQr();
+    if (generation === undefined) return;
+    try { await invoke('cancel_pairing', { generation }); } catch (e) { error = String(e); }
+  }
+  // WKWebView has no window.confirm: the first click arms the button, the second removes.
+  let removing = $state<string | null>(null);
+  async function removePhone(phone: PairedPhone) {
+    if (removing !== phone.phone_id) {
+      removing = phone.phone_id;
+      setTimeout(() => { if (removing === phone.phone_id) removing = null; }, 4000);
+      return;
+    }
+    removing = null;
+    try { await invoke('remove_paired_phone', { phoneId: phone.phone_id }); }
+    catch (e) { error = String(e); }
+    void refreshPhones();
+  }
+  if (isTauri) {
+    void refreshPhones();
+    void listen('pairing-changed', () => void refreshPhones());
+    void listen<{ generation: number }>('pairing-ended', (e) => {
+      if (pairing?.generation === e.payload.generation) closeQr();
+      void refreshPhones();
+    });
+  }
   function applyModelStatus(status: WakeModelStatus) {
     modelReady = status.ready;
     modelError = status.error
@@ -155,18 +221,17 @@
     } catch (e) { if (!error) error = wakeErrorMessage(lang(), e); }
   }
   void refreshWakeModel();
-  // The sherpa compat build can finish installing while this page is open.
-  if (isTauri) void listen('voice-engine-reloaded', () => void refreshWakeModel());
 
   let text = $derived(settingsText(local?.ui_lang ?? 'en'));
   let dirty = $derived((!!local && JSON.stringify(local) !== baseline) || pendingWakeDeletes.length > 0 || meshAvatarChanged);
   let sections = $derived([
-    { id: 'general' as Section, icon: '⌘', label: text.general },
+    { id: 'general' as Section, icon: '⚙', label: text.general },
     { id: 'avatar' as Section, icon: '◉', label: text.avatar },
     { id: 'voice' as Section, icon: '◖', label: text.voice },
     { id: 'conversation' as Section, icon: '◫', label: text.conversation },
     { id: 'interruption' as Section, icon: '↯', label: text.interruption },
     { id: 'wake' as Section, icon: '◎', label: text.wake },
+    { id: 'phones' as Section, icon: '▯', label: phoneText.section },
   ]);
 
   async function loadSettings() {
@@ -625,6 +690,39 @@
               <div class="wake-tags">{#each wakeWords as word}<button type="button" class="wake-tag" onclick={() => local && (local.wake_phrase = word)}>{word}</button>{/each}</div>
             {/if}
           </section>
+        {:else if active === 'phones'}
+          <section class="card">
+            {#if pairing}
+              <div class="pairing">
+                <!-- Backend-made SVG: only module coordinates, no text from outside. -->
+                <div class="pair-qr" role="img" aria-label={phoneText.pairingTitle}>{@html pairing.svg}</div>
+                <div>
+                  <p>{phoneText.qrHint}</p>
+                  <p>{phoneText.expiresIn(pairing.expires_in)}</p>
+                  <button class="ghost" onclick={cancelPairing}>{phoneText.cancelPairing}</button>
+                </div>
+              </div>
+            {:else}
+              <div class="pairing">
+                <p class="wake-help pair-intro">{phoneText.noPairing}</p>
+                <button class="ghost" onclick={startPairing}>{phoneText.addPhone}</button>
+              </div>
+            {/if}
+          </section>
+          <section class="card">
+            <p class="mesh-heading">{phoneText.paired}</p>
+            {#each pairedPhones as phone (phone.phone_id)}
+              <div class="sample">
+                <div>
+                  <strong>{phone.name}</strong>
+                  <p>{phone.online ? phoneText.online : phoneText.offline}{phone.last_seen_at ? ` · ${phoneText.lastSeen} ${new Date(phone.last_seen_at).toLocaleString()}` : ''}</p>
+                </div>
+                <button class="ghost danger" title={phoneText.removeHint} onclick={() => removePhone(phone)}>{removing === phone.phone_id ? phoneText.removeConfirm : phoneText.remove}</button>
+              </div>
+            {:else}
+              <p class="wake-help">{phoneText.none}</p>
+            {/each}
+          </section>
         {/if}
       </div>
       <footer>
@@ -662,7 +760,7 @@
   .wake-help { color: var(--muted, #64748b); font-size: 13px; line-height: 1.6; margin: 8px 16px 16px; }
   :global {
   :global(*){box-sizing:border-box} :global(html,body,#app){margin:0;width:100%;height:100%;overflow:hidden}
-  :global(body){font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f5f9;color:#1e2235;-webkit-font-smoothing:antialiased}
+  :global(body){font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei UI",sans-serif;background:#f4f5f9;color:#1e2235;-webkit-font-smoothing:antialiased}
   button,select,input{font:inherit}.shell{height:100%;min-height:0;display:grid;grid-template-columns:200px 1fr;background:radial-gradient(circle at 75% 0,#dde3ff 0,transparent 36%),#f4f5f9}
   aside{padding:20px 12px 16px;border-right:1px solid #e2e5ed;background:#ffffff;display:flex;flex-direction:column}.brand{display:flex;gap:10px;align-items:center;padding:0 8px 18px}
   .logo{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:linear-gradient(145deg,#859bff,#7465e7);font-size:12px;font-weight:800;box-shadow:0 6px 18px #6174ff35;color:#fff}
@@ -683,4 +781,7 @@
   .backdrop{position:fixed;inset:0;background:#00000033;display:grid;place-items:center;z-index:20}.modal{width:360px;background:#ffffff;border:1px solid #e2e5ed;border-radius:12px;padding:20px;box-shadow:0 20px 60px #00000030}.modal h3{font-size:15px;color:#1e2235}.modal p{color:#6a7185;font-size:11px;line-height:1.5;margin:6px 0 16px}.modal label{display:grid;gap:6px;font-size:11px;color:#2a2f42}.modal input{width:100%}.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
   @media(max-width:740px){.shell{grid-template-columns:170px 1fr}.content,header,footer{padding-left:18px;padding-right:18px}.field{gap:12px}.control,select,input[type=range]{min-width:0;width:190px}.asset-grid{grid-template-columns:1fr}.asset+.asset{border-left:0;border-top:1px solid #e2e5ed}}
   }
+  .pairing{padding:16px;display:flex;align-items:center;gap:20px}.pairing p{font-size:11px;color:#7a8298;margin:0 0 8px}
+  .pairing .pair-intro{margin:0;flex:1;font-size:13px}
+  .pair-qr{flex:none;width:200px;height:200px}.pair-qr :global(svg){display:block;width:100%;height:100%}
 </style>

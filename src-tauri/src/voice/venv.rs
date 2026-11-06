@@ -7,23 +7,42 @@ use tauri::AppHandle;
 
 use super::setup_status;
 
-const VENV_DIR_RELATIVE: &str = ".pocket-agent/venv";
-const VENV_MARKER_RELATIVE: &str = ".pocket-agent/.venv-ready";
+const VENV_DIR_RELATIVE: [&str; 2] = [".pocket-agent", "venv"];
+const VENV_MARKER_RELATIVE: [&str; 2] = [".pocket-agent", ".venv-ready"];
 
 fn home_dir() -> PathBuf {
-    std::env::var("HOME").map(PathBuf::from).unwrap_or_default()
+    crate::platform::home_dir()
 }
 
 pub fn venv_root() -> PathBuf {
-    home_dir().join(VENV_DIR_RELATIVE)
+    VENV_DIR_RELATIVE.iter().fold(home_dir(), |p, c| p.join(c))
+}
+
+/// A program in the venv at `root`: `bin/<name>` on macOS,
+/// `Scripts\<name>.exe` on Windows.
+pub fn venv_bin_in(root: &Path, name: &str) -> PathBuf {
+    if cfg!(windows) {
+        root.join("Scripts").join(format!("{name}.exe"))
+    } else {
+        root.join("bin").join(name)
+    }
+}
+
+/// A program in PA's own venv (e.g. `edge-tts`).
+pub fn venv_bin(name: &str) -> PathBuf {
+    venv_bin_in(&venv_root(), name)
+}
+
+fn venv_python_in(root: &Path) -> PathBuf {
+    venv_bin_in(root, if cfg!(windows) { "python" } else { "python3" })
 }
 
 pub fn venv_python_path() -> PathBuf {
-    venv_root().join("bin").join("python3")
+    venv_python_in(&venv_root())
 }
 
 fn marker_path() -> PathBuf {
-    home_dir().join(VENV_MARKER_RELATIVE)
+    VENV_MARKER_RELATIVE.iter().fold(home_dir(), |p, c| p.join(c))
 }
 
 /// Ready to start stt-server without installing anything: the marker matches
@@ -37,7 +56,7 @@ fn venv_ready(root: &Path, marker: &Path, expected: &str) -> bool {
     // Tolerate trailing whitespace differences (e.g. some editors strip the final newline).
     actual.trim_end() == expected.trim_end()
         && venv_health(root) == VenvHealth::Usable
-        && core_deps_importable(&root.join("bin").join("python3"))
+        && core_deps_importable(&venv_python_in(root))
 }
 
 /// Whether a pip failure may fall back to an earlier full install: a marker
@@ -61,7 +80,7 @@ const CORE_IMPORTS: &str =
     "import numpy, faster_whisper, onnxruntime, fastapi, uvicorn, scipy, kaldi_native_fbank";
 
 fn core_deps_importable(python: &Path) -> bool {
-    Command::new(python)
+    crate::platform::no_window(&mut Command::new(python))
         .arg("-c")
         .arg(CORE_IMPORTS)
         .stdout(Stdio::null())
@@ -72,7 +91,7 @@ fn core_deps_importable(python: &Path) -> bool {
 }
 
 fn runs(program: &Path, args: &[&str]) -> bool {
-    Command::new(program)
+    crate::platform::no_window(&mut Command::new(program))
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -92,7 +111,7 @@ enum VenvHealth {
 }
 
 fn venv_health(root: &Path) -> VenvHealth {
-    let python = root.join("bin").join("python3");
+    let python = venv_python_in(root);
     if !runs(&python, &["-c", ""]) {
         VenvHealth::NoInterpreter
     } else if !runs(&python, &["-m", "pip", "--version"]) {
@@ -117,7 +136,7 @@ fn prepare_venv(
     match venv_health(root) {
         VenvHealth::Usable => return Ok(false),
         VenvHealth::NoPip => {
-            let mut cmd = Command::new(root.join("bin").join("python3"));
+            let mut cmd = Command::new(venv_python_in(root));
             cmd.args(["-m", "ensurepip", "--upgrade", "--default-pip"]);
             if let Err(e) = run("creating-venv", cmd) {
                 eprintln!("[venv] ensurepip failed ({e}); rebuilding the venv");
@@ -147,8 +166,9 @@ fn prepare_venv(
         _ => Err((
             "creating-venv",
             format!(
-                "语音环境不完整：用 {system_python} 新建的 {} 没有可用的 pip。请运行 xcode-select --install 重新安装 Command Line Tools(或安装 Python 3.9–3.12),然后重启 Pocket Agent。",
-                root.display()
+                "语音环境不完整：用 {system_python} 新建的 {} 没有可用的 pip。{}",
+                root.display(),
+                REINSTALL_PYTHON_HINT,
             ),
         )),
     }
@@ -188,6 +208,7 @@ pub fn resource_path(filename: &str) -> PathBuf {
 /// Bundled copy next to `exe` inside a .app. tauri.conf.json maps
 /// `resources/<file>` to `Contents/Resources/resources/<file>`; the flat
 /// `Contents/Resources/<file>` is kept for older bundles.
+#[cfg(not(windows))]
 fn resource_path_from(exe: &Path, filename: &str) -> Option<PathBuf> {
     let resources = exe.parent()?.parent()?.join("Resources");
     [resources.join("resources").join(filename), resources.join(filename)]
@@ -195,9 +216,18 @@ fn resource_path_from(exe: &Path, filename: &str) -> Option<PathBuf> {
         .find(|p| p.exists())
 }
 
+/// On Windows Tauri's resource directory is the exe's own directory, so
+/// `resources/<file>` sits at `<exe dir>\resources\<file>` (also in dev,
+/// where the build copies it next to `target\debug\pocket-agent.exe`).
+#[cfg(windows)]
+fn resource_path_from(exe: &Path, filename: &str) -> Option<PathBuf> {
+    Some(exe.parent()?.join("resources").join(filename)).filter(|p| p.exists())
+}
+
 /// Interpreters tried for the venv, in order. The CLT python3 (3.9) comes
 /// first: it is what Finder-launched PA finds, and the sherpa compat build
 /// for macOS < 13.4 only ships cp39 wheels.
+#[cfg(not(windows))]
 const PYTHON_CANDIDATES: &[&str] = &[
     "/usr/bin/python3",
     "python3",
@@ -211,6 +241,62 @@ const PYTHON_CANDIDATES: &[&str] = &[
     "/usr/local/bin/python3",
 ];
 
+#[cfg(not(windows))]
+fn python_candidates() -> Vec<String> {
+    PYTHON_CANDIDATES.iter().map(|s| s.to_string()).collect()
+}
+
+/// Windows: what the `py` launcher finds for 3.12/3.11/3.10 (64-bit), the
+/// python.org per-user installs, then `python.exe` on PATH. The Microsoft
+/// Store stub in `WindowsApps` is skipped: running it opens the Store.
+#[cfg(windows)]
+fn python_candidates() -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for minor in [12, 11, 10] {
+        let out = crate::platform::no_window(&mut Command::new("py"))
+            .args([&format!("-3.{minor}-64"), "-c", "import sys; print(sys.executable)"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output();
+        if let Some(out) = out.ok().filter(|o| o.status.success()) {
+            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !path.is_empty() {
+                found.push(path);
+            }
+        }
+    }
+    if let Some(local) = dirs::data_local_dir() {
+        for minor in [12, 11, 10] {
+            let p = local.join(format!(r"Programs\Python\Python3{minor}\python.exe"));
+            if p.is_file() {
+                found.push(p.display().to_string());
+            }
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        if let Some(p) = std::env::split_paths(&path)
+            .filter(|d| !d.to_string_lossy().to_ascii_lowercase().contains("windowsapps"))
+            .map(|d| d.join("python.exe"))
+            .find(|p| p.is_file())
+        {
+            found.push(p.display().to_string());
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    found.retain(|p| seen.insert(p.to_ascii_lowercase()));
+    found
+}
+
+#[cfg(not(windows))]
+const INSTALL_PYTHON_HINT: &str = "请运行 xcode-select --install 安装 Xcode Command Line Tools(自带 Python 3.9);如果已安装但版本不在此范围，请安装 Python 3.12(例如 brew install python@3.12),然后重启 Pocket Agent。";
+#[cfg(windows)]
+const INSTALL_PYTHON_HINT: &str = "请安装 64 位 Python 3.12(winget install Python.Python.3.12,或从 python.org 下载),然后重启 Pocket Agent。";
+
+#[cfg(not(windows))]
+const REINSTALL_PYTHON_HINT: &str = "请运行 xcode-select --install 重新安装 Command Line Tools(或安装 Python 3.9–3.12),然后重启 Pocket Agent。";
+#[cfg(windows)]
+const REINSTALL_PYTHON_HINT: &str = "请重新安装 64 位 Python 3.12(winget install Python.Python.3.12,或从 python.org 下载，安装时保留 pip),然后重启 Pocket Agent。";
+
 /// requirements-stt.txt pins numpy<2, whose last release (1.26) stops at 3.12.
 const PYTHON_MIN: (u32, u32) = (3, 9);
 const PYTHON_MAX: (u32, u32) = (3, 12);
@@ -218,9 +304,9 @@ const PYTHON_MAX: (u32, u32) = (3, 12);
 /// `Ok(version)` when `candidate` runs and can `import venv`; otherwise a
 /// short reason for the error message.
 fn probe_python(candidate: &str) -> Result<(u32, u32), String> {
-    let out = Command::new(candidate)
+    let out = crate::platform::no_window(&mut Command::new(candidate))
         .arg("-c")
-        .arg("import sys, venv; print('%d.%d' % sys.version_info[:2])")
+        .arg("import sys, venv, struct; print('%d.%d%s' % (sys.version_info[0], sys.version_info[1], '' if struct.calcsize('P') == 8 else '-32'))")
         .stdin(Stdio::null())
         .output()
         .map_err(|_| "不存在".to_string())?;
@@ -228,7 +314,12 @@ fn probe_python(candidate: &str) -> Result<(u32, u32), String> {
         return Err("无法运行或缺少 venv 模块".to_string());
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let (major, minor) = text.trim().split_once('.').ok_or("无法读取版本")?;
+    let text = text.trim();
+    // onnxruntime and faster-whisper ship 64-bit wheels only.
+    if text.ends_with("-32") {
+        return Err(format!("{} 32 位(不支持)", text.trim_end_matches("-32")));
+    }
+    let (major, minor) = text.split_once('.').ok_or("无法读取版本")?;
     match (major.parse(), minor.parse()) {
         (Ok(major), Ok(minor)) => Ok((major, minor)),
         _ => Err("无法读取版本".to_string()),
@@ -245,16 +336,19 @@ fn pick_python<'a>(candidates: &[&'a str]) -> Result<&'a str, String> {
         }
     }
     Err(format!(
-        "找不到可用的 Python {}.{}–{}.{}。已检查:{}。请运行 xcode-select --install 安装 Xcode Command Line Tools(自带 Python 3.9);如果已安装但版本不在此范围，请安装 Python 3.12(例如 brew install python@3.12),然后重启 Pocket Agent。",
+        "找不到可用的 Python {}.{}–{}.{}。已检查:{}。{}",
         PYTHON_MIN.0, PYTHON_MIN.1, PYTHON_MAX.0, PYTHON_MAX.1,
-        report.join("；"),
+        if report.is_empty() { "无".to_string() } else { report.join("；") },
+        INSTALL_PYTHON_HINT,
     ))
 }
 
 /// Locate a system python3 (3.9–3.12, with venv) to bootstrap the venv.
 /// Returns the path that can be passed to `Command::new`.
 pub fn find_system_python3() -> Result<String, String> {
-    pick_python(PYTHON_CANDIDATES).map(str::to_string)
+    let candidates = python_candidates();
+    let refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    pick_python(&refs).map(str::to_string)
 }
 
 /// `setup_status::publish` without the AppHandle: (event, payload, state, phase, detail).
@@ -279,6 +373,7 @@ fn run_streaming(
     phase: &str,
     mut cmd: Command,
 ) -> Result<(), String> {
+    crate::platform::no_window(&mut cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
@@ -379,7 +474,7 @@ fn ensure_venv_in(
     run: &mut dyn FnMut(&str, Command) -> Result<(), String>,
     publish: &Publish,
 ) -> Result<(), String> {
-    let python = layout.root.join("bin").join("python3");
+    let python = venv_python_in(&layout.root);
     let requirements = &layout.requirements;
     // The marker holds the full requirements text (not a hash), so a maintainer
     // can `cat` it to see what was installed.
@@ -475,14 +570,33 @@ fn ensure_venv_in(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
-    fn fake_python(path: &Path, exit_code: i32) {
+    /// A runnable stand-in script at `path` (`path.cmd` on Windows, where a
+    /// script needs that extension to run). Returns the path to run.
+    fn script(path: &Path, unix_body: &str, windows_body: &str) -> PathBuf {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, format!("#!/bin/sh\nexit {exit_code}\n")).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = windows_body;
+            std::fs::write(path, format!("#!/bin/sh\n{unix_body}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_path_buf()
+        }
+        #[cfg(windows)]
+        {
+            let _ = unix_body;
+            let path = path.with_extension("cmd");
+            std::fs::write(&path, format!("@echo off\r\n{windows_body}\r\n")).unwrap();
+            path
+        }
     }
 
+    fn fake_python(path: &Path, exit_code: i32) -> PathBuf {
+        script(path, &format!("exit {exit_code}"), &format!("exit /b {exit_code}"))
+    }
+
+    #[cfg(not(windows))]
     #[test]
     fn bundled_resources_are_found_in_the_app() {
         let dir = std::env::temp_dir().join(format!("pa-venv-res-{}", std::process::id()));
@@ -507,40 +621,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn bundled_resources_are_found_next_to_the_exe() {
+        let dir = std::env::temp_dir().join(format!("pa-venv-res-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let exe = dir.join("pocket-agent.exe");
+        std::fs::create_dir_all(dir.join("resources")).unwrap();
+        std::fs::write(dir.join("resources").join("requirements-stt.txt"), "x").unwrap();
+        assert_eq!(resource_path_from(&exe, "requirements-stt.txt"), Some(dir.join("resources").join("requirements-stt.txt")));
+        assert_eq!(resource_path_from(&exe, "missing.py"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn venv_programs_use_the_platform_layout() {
+        let root = Path::new("venv");
+        if cfg!(windows) {
+            assert_eq!(venv_python_in(root), root.join("Scripts").join("python.exe"));
+            assert_eq!(venv_bin_in(root, "edge-tts"), root.join("Scripts").join("edge-tts.exe"));
+        } else {
+            assert_eq!(venv_python_in(root), root.join("bin").join("python3"));
+            assert_eq!(venv_bin_in(root, "edge-tts"), root.join("bin").join("edge-tts"));
+        }
+    }
+
     /// A python3 stand-in that reports `version` (or fails `import venv`).
-    fn fake_versioned_python(path: &Path, version: &str, has_venv: bool) {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let body = if has_venv { format!("echo {version}") } else { "echo 'No module named venv' >&2; exit 1".to_string() };
-        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fn fake_versioned_python(path: &Path, version: &str, has_venv: bool) -> PathBuf {
+        if has_venv {
+            script(path, &format!("echo {version}"), &format!("echo {version}"))
+        } else {
+            script(path, "echo 'No module named venv' >&2; exit 1", "echo No module named venv 1>&2\r\nexit /b 1")
+        }
     }
 
     #[test]
     fn python_pick_skips_unsupported_versions() {
         let dir = std::env::temp_dir().join(format!("pa-venv-python-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let old = dir.join("old/python3");
-        let new = dir.join("new/python3");
-        let no_venv = dir.join("novenv/python3");
-        let ok = dir.join("ok/python3");
-        fake_versioned_python(&old, "3.8", true);
-        fake_versioned_python(&new, "3.13", true);
-        fake_versioned_python(&no_venv, "3.11", false);
-        fake_versioned_python(&ok, "3.9", true);
+        let old = fake_versioned_python(&dir.join("old/python3"), "3.8", true);
+        let new = fake_versioned_python(&dir.join("new/python3"), "3.13", true);
+        let no_venv = fake_versioned_python(&dir.join("novenv/python3"), "3.11", false);
+        let ok = fake_versioned_python(&dir.join("ok/python3"), "3.9", true);
+        let x86 = fake_versioned_python(&dir.join("x86/python3"), "3.11-32", true);
         let p = |path: &PathBuf| path.to_str().unwrap().to_string();
-        let (old, new, no_venv, ok) = (p(&old), p(&new), p(&no_venv), p(&ok));
+        let (old, new, no_venv, ok, x86) = (p(&old), p(&new), p(&no_venv), p(&ok), p(&x86));
         let missing = p(&dir.join("missing/python3"));
 
         // An old interpreter first, a supported one later.
         assert_eq!(pick_python(&[&old, &no_venv, &ok]).unwrap(), ok);
 
         // None usable: every candidate is listed with its version or reason.
-        let err = pick_python(&[&old, &new, &no_venv, &missing]).unwrap_err();
+        let err = pick_python(&[&old, &new, &no_venv, &x86, &missing]).unwrap_err();
+        assert!(err.contains(&format!("{x86}: 3.11 32 位")), "{err}");
         assert!(err.contains(&format!("{old}: 3.8")), "{err}");
         assert!(err.contains(&format!("{new}: 3.13")), "{err}");
         assert!(err.contains(&format!("{no_venv}: 无法运行或缺少 venv 模块")), "{err}");
         assert!(err.contains(&format!("{missing}: 不存在")), "{err}");
-        assert!(err.contains("xcode-select --install"), "{err}");
+        assert!(err.contains(INSTALL_PYTHON_HINT), "{err}");
         assert!(!err.contains('\n'), "the status panel collapses newlines: {err}");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -550,7 +688,7 @@ mod tests {
     fn leftover_marker_does_not_survive_a_failed_rebuild() {
         let dir = std::env::temp_dir().join(format!("pa-venv-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let python = dir.join("venv/bin/python3");
+        let python = venv_python_in(&dir.join("venv"));
         let marker = dir.join(".venv-ready");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&marker, "old requirements").unwrap();
@@ -570,10 +708,8 @@ mod tests {
     fn fallback_requires_core_imports() {
         let dir = std::env::temp_dir().join(format!("pa-venv-imports-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let broken = dir.join("broken/python3");
-        let working = dir.join("working/python3");
-        fake_python(&broken, 1);
-        fake_python(&working, 0);
+        let broken = fake_python(&dir.join("broken/python3"), 1);
+        let working = fake_python(&dir.join("working/python3"), 0);
 
         assert!(!core_deps_importable(&broken));
         assert!(core_deps_importable(&working));
@@ -629,7 +765,9 @@ mod tests {
         let Some(python) = system_python() else { return };
         let dir = scratch("broken");
         let root = dir.join("venv");
-        fake_python(&root.join("bin/python3"), 1); // present, but does not run
+        // Present, but does not run (on Windows: not a real exe).
+        std::fs::create_dir_all(venv_python_in(&root).parent().unwrap()).unwrap();
+        std::fs::write(venv_python_in(&root), "not a program").unwrap();
         std::fs::write(root.join("leftover"), "x").unwrap();
         std::fs::write(dir.join(".env"), "API_SERVER_KEY=keep").unwrap();
         std::fs::write(dir.join("settings.db"), "keep").unwrap();
@@ -649,9 +787,11 @@ mod tests {
         let dir = scratch("stillnopip");
         let root = dir.join("venv");
         // A system Python whose venv module never installs pip.
-        let creator = dir.join("python3");
-        std::fs::write(&creator, format!("#!/bin/sh\nexec {python} \"$@\" --without-pip\n")).unwrap();
-        std::fs::set_permissions(&creator, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let creator = script(
+            &dir.join("python3"),
+            &format!("exec {python} \"$@\" --without-pip"),
+            &format!("\"{python}\" %* --without-pip"),
+        );
         let creator = creator.to_str().unwrap().to_string();
 
         let (phase, msg) = prepare_venv(&root, &dir.join(".venv-ready"), || Ok(creator.clone()), &mut |phase, cmd| {
@@ -661,7 +801,7 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(phase, "creating-venv");
-        assert!(msg.contains("没有可用的 pip") && msg.contains("xcode-select --install"), "{msg}");
+        assert!(msg.contains("没有可用的 pip") && msg.contains(REINSTALL_PYTHON_HINT), "{msg}");
         assert!(!msg.contains("网络"), "a local problem is not reported as a network one: {msg}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -796,7 +936,7 @@ mod tests {
         let (result, events) = home.ensure(&python, true);
         result.unwrap();
         assert_eq!(events.last().map(String::as_str), Some("venv-setup-done"));
-        assert!(core_deps_importable(&home.layout.root.join("bin/python3")));
+        assert!(core_deps_importable(&venv_python_in(&home.layout.root)));
         home.assert_user_files_kept();
     }
 

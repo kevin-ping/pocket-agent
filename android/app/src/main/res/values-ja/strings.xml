@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="devices_empty">ペアリング済みのコンピューターはまだありません。コンピューターで Pocket Agent の設定 → デバイス → スマートフォンを追加 を開き、下の「スキャンしてデバイスを追加」をタップしてください。</string>
+    <string name="scan_add_device">スキャンしてデバイスを追加</string>
+    <string name="status_in_use">使用中</string>
+    <string name="status_in_use_offline">使用中 · オフライン</string>
+    <string name="status_busy">先に「%1$s」をコンピューターに戻してください</string>
+    <string name="status_online">オンライン</string>
+    <string name="status_offline">オフライン</string>
+    <string name="action_open">開く</string>
+    <string name="action_connect">接続</string>
+    <string name="cannot_connect">今は「%1$s」に接続できません</string>
+    <string name="remove_title">「%1$s」を削除しますか?</string>
+    <string name="remove_message">このスマートフォンからコンピューターの情報を削除します。コンピューターの設定 → デバイス からもこのスマートフォンを削除できます。</string>
+    <string name="cancel">キャンセル</string>
+    <string name="remove">削除</string>
+
+    <string name="camera_needed_scan">QR コードをスキャンするにはカメラの許可が必要です</string>
+    <string name="camera_needed_see">Pocket Agent が見るにはカメラの許可が必要です</string>
+    <string name="mic_needed">Pocket Agent と話すにはマイクの許可が必要です</string>
+
+    <string name="close">閉じる</string>
+    <string name="scan_hint">コンピューターで Pocket Agent を開き\n設定 → デバイス → スマートフォンを追加</string>
+    <string name="scan_hint_sub">QR コードの有効期限は 2 分です</string>
+
+    <string name="pairing_title">ペアリング中…</string>
+    <string name="pairing_sub">スマートフォンとコンピューターを同じローカルネットワークに接続してください</string>
+    <string name="paired">「%1$s」を追加しました</string>
+
+    <string name="scan_again">もう一度スキャン</string>
+    <string name="back">戻る</string>
+    <string name="error_invalid_title">ペアリング用の QR コードではありません</string>
+    <string name="error_invalid_message">コンピューターの設定 → デバイス → スマートフォンを追加 に表示されるコードをスキャンしてください。</string>
+    <string name="error_expired_title">QR コードの有効期限が切れました</string>
+    <string name="error_expired_message">コンピューターでもう一度「スマートフォンを追加」をクリックして新しいコードを表示してください。</string>
+    <string name="error_unreachable_title">コンピューターに接続できません</string>
+    <string name="error_unreachable_message">スマートフォンとコンピューターを同じローカルネットワークに接続する必要があります。</string>
+    <string name="error_not_that_computer_title">コンピューターを確認できません</string>
+    <string name="error_not_that_computer_message">相手がコードを表示しているコンピューターであることを証明できませんでした。何も保存されていません。</string>
+    <string name="error_failed_title">ペアリングに失敗しました</string>
+    <string name="error_failed_message">コンピューターがステータス %1$d を返しました。もう一度お試しください。</string>
+    <string name="error_camera_title">カメラを開けません</string>
+    <string name="error_camera_message">別のアプリがカメラを使用している可能性があります。そのアプリを閉じてからもう一度お試しください。</string>
+
+    <string name="notification_channel">Pocket Agent 音声</string>
+    <string name="notification_using">%1$s を使用中</string>
+    <string name="notification_idle">コンピューターに接続していません</string>
+    <string name="notification_disconnect">切断</string>
+</resources>

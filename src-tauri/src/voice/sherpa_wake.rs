@@ -210,7 +210,8 @@ pub fn start_wake_listener(app: AppHandle, _threshold: f32, _speaker_name: Optio
             return Err(wake_error("wake_phrase_empty", serde_json::json!({})));
         }
         let config = kws_config(&config);
-        let (client, session) = open_kws_session(|| kws_client(5), |c| kws_open(c, &config))?;
+        let client = kws_client(5)?;
+        let session = kws_open(&client, &config)?;
         Ok::<_, String>((config, client, session))
     })();
     let (config, client, session) = match setup {
@@ -376,6 +377,7 @@ fn wake_http_worker_loop(
                     WAKE_PAUSED.store(true, Ordering::Release);
                     crate::voice::hotkey::set_active_state(true);
                     let _ = app.emit("fn-key-down", ());
+                    crate::voice::remote::wake_phone();
                     pcm.clear();
                     break;
                 }
@@ -414,27 +416,12 @@ pub fn kws_config(config: &crate::commands::config::AppConfig) -> serde_json::Va
         "speaker_threshold": config.wake_word_threshold})
 }
 
-/// Read the token and build the client only once the lease is held: a reload
-/// rotates server.token, and a client built before it waited would carry the
-/// old token to the new server (401).
-fn open_kws_session<C>(
-    build: impl FnOnce() -> Result<C, String>,
-    open: impl FnOnce(&C) -> Result<String, String>,
-) -> Result<(C, String), String> {
-    let _txn = crate::voice::stt::voice_txn();
-    let client = build()?;
-    let session = open(&client)?;
-    Ok((client, session))
-}
-
 fn kws_open(client: &reqwest::blocking::Client, config: &serde_json::Value) -> Result<String, String> {
-    let _txn = crate::voice::stt::voice_txn();
     let v = kws_response(client.post(format!("{}/kws/session", STT_SERVER_URL)).json(config).send())?;
     v["session"].as_str().map(String::from).ok_or_else(|| "Missing wake session".into())
 }
 
 pub fn kws_model_action(install: bool) -> Result<serde_json::Value, String> {
-    let _txn = crate::voice::stt::voice_txn();
     let client = kws_client(if install { 180 } else { 5 })?;
     if install {
         kws_response(client.post(format!("{}/kws/install", STT_SERVER_URL)).body("").send())
@@ -467,7 +454,6 @@ fn log_speaker_score(v: &serde_json::Value, config: &serde_json::Value, device_s
 }
 
 fn kws_check_samples(samples: &[i16], config: &serde_json::Value) -> Result<serde_json::Value, String> {
-    let _txn = crate::voice::stt::voice_txn();
     let part = reqwest::blocking::multipart::Part::bytes(i16_to_wav(samples, TARGET_SR))
         .file_name("wake.wav").mime_str("audio/wav").map_err(|e| e.to_string())?;
     let form = reqwest::blocking::multipart::Form::new().part("file", part).text("config", config.to_string());
@@ -504,9 +490,6 @@ fn wake_http_check(
     device_ch: u16,
     threshold: f32,
 ) -> Result<WakeCheckResult, String> {
-    // Runs on the conversation worker: fail closed instead of waiting out a reload.
-    let _txn = crate::voice::stt::try_voice_txn()
-        .ok_or_else(|| wake_error("wake_service_unavailable", serde_json::json!({})))?;
     let config = crate::commands::settings_repository::load()?;
     let mono = downmix_to_mono(raw_samples, device_ch);
     let samples = Resampler16k::new(device_sr).process(&mono);
@@ -597,7 +580,6 @@ fn wav_duration_from_header(path: &str) -> f32 {
 /// Extract speaker embedding via HTTP to the Python STT server.
 /// Bypasses the native sherpa-onnx C API which has an ORT version mismatch on macOS 12.
 fn extract_embedding_http(wav_path: &str) -> Result<Vec<f32>, String> {
-    let _txn = crate::voice::stt::voice_txn();
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -650,7 +632,6 @@ fn extract_embedding_http(wav_path: &str) -> Result<Vec<f32>, String> {
 /// Enroll voice identity; explicit KWS settings define the wake phrase.
 pub fn enroll_speaker(name: &str, wav_path: &str) -> Result<EnrollResult, String> {
     validate_speaker_name(name)?;
-    let _txn = crate::voice::stt::voice_txn();
     let duration_s = wav_duration_from_header(wav_path);
 
     let client = reqwest::blocking::Client::builder()
@@ -713,7 +694,6 @@ pub fn enroll_speaker(name: &str, wav_path: &str) -> Result<EnrollResult, String
 /// Unlike enroll (which resets variants), this only appends a new variant.
 pub fn train_speaker(name: &str, wav_path: &str) -> Result<EnrollResult, String> {
     validate_speaker_name(name)?;
-    let _txn = crate::voice::stt::voice_txn();
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -952,29 +932,6 @@ mod tests {
     fn rms(samples: &[i16]) -> f64 {
         let mid = &samples[samples.len() / 4..samples.len() * 3 / 4];
         (mid.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / mid.len() as f64).sqrt()
-    }
-
-    #[test]
-    fn wake_session_waiting_out_a_reload_uses_the_new_token() {
-        let _serial = crate::voice::stt::test_serial();
-        let token = std::sync::Arc::new(std::sync::Mutex::new("A".to_string()));
-        let reload = crate::voice::stt::hold_reload_for_test();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let token_in = token.clone();
-        let start = std::thread::spawn(move || {
-            let result = open_kws_session(
-                || Ok(token_in.lock().unwrap().clone()),
-                |client: &String| Ok(format!("session-{client}")),
-            );
-            tx.send(()).unwrap();
-            result
-        });
-        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "start waits for the reload");
-        *token.lock().unwrap() = "B".to_string(); // new server writes its token
-        drop(reload);
-        rx.recv_timeout(Duration::from_secs(2)).expect("released after reload");
-        let (client, session) = start.join().unwrap().unwrap();
-        assert_eq!((client.as_str(), session.as_str()), ("B", "session-B"));
     }
 
     #[test]

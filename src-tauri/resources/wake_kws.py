@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 import hashlib
 import math
+import os
 import platform
 import re
 import shutil
@@ -23,7 +24,7 @@ ARCHIVE_SHA256 = '68447f4fbc67e70eee3a93961f36e81e98f47aef73ce7e7ca00885c6cd3616
 SUFFIX = 'epoch-13-avg-2-chunk-16-left-64'
 FILES = [f'encoder-{SUFFIX}.int8.onnx', f'decoder-{SUFFIX}.onnx',
          f'joiner-{SUFFIX}.int8.onnx', 'tokens.txt', 'en.phone']
-# The PyPI sherpa-onnx wheel needs this; PA installs a compat build below it.
+# sherpa-onnx 1.12.26 needs this; requirements-stt.txt picks 1.10.46 below it.
 NATIVE_MIN_MACOS = '13.4'
 
 
@@ -65,6 +66,34 @@ def _version(text):
 def _lexicon_words(path):
     with open(path, encoding='utf-8') as f:
         return frozenset(line.split(' ', 1)[0] for line in f if line.strip())
+
+
+@lru_cache(maxsize=2)
+def _table(path, values):
+    """First column -> second column (tokens.txt) or remaining columns (lexicon)."""
+    with open(path, encoding='utf-8') as f:
+        rows = (line.split() for line in f)
+        return {r[0]: (r[1:] if values else r[1]) for r in rows if len(r) >= 2}
+
+
+def text2token(text, tokens, lexicon):
+    """phone+ppinyin tokens for `text`, or [] when a word or token is unknown.
+    Ported from sherpa-onnx 1.12.26 sherpa_onnx/utils.py text2token (Apache-2.0),
+    which sherpa-onnx 1.10.46 (used on macOS < 13.4) does not have."""
+    from pypinyin import pinyin
+    from pypinyin.contrib.tone_convert import to_finals_tone, to_initials
+    phones, table = _table(lexicon, True), _table(tokens, False)
+    result = []
+    for word in text.split():
+        if word in phones:
+            result += phones[word]
+        elif re.fullmatch(r'[\u4e00-\u9fff]+', word):
+            for x in (p[0] for p in pinyin(word)):
+                parts = [part for part in (to_initials(x, strict=False), to_finals_tone(x, strict=False)) if part]
+                result += parts or [x]
+        else:
+            return []
+    return result if all(t in table for t in result) else []
 
 
 def split_word(word, words):
@@ -189,21 +218,25 @@ class WakeKws:
             raise WakeError('wake_model_missing', 'Download the wake model in Settings first.')
         lexicon = str(self.path / 'en.phone')
         text = pronounceable_text(config['phrase'], _lexicon_words(lexicon))
-        tokens = sherpa_onnx.text2token([text], str(self.path / 'tokens.txt'),
-                                      tokens_type='phone+ppinyin', lexicon=lexicon)
-        tokens = tokens[0] if tokens else []
+        tokens = text2token(text, str(self.path / 'tokens.txt'), lexicon)
         if not tokens:
             raise WakeError('wake_phrase_unpronounceable', 'Unable to convert this wake phrase to pronunciations',
                             word=config['phrase'])
         keyword = ' '.join(tokens) + ' @' + config['phrase'].replace(' ', '_')
-        # KeywordSpotter reads the file during construction only.
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', encoding='utf-8') as f:
-            f.write(keyword + '\n'); f.flush()
+        # KeywordSpotter reads the file during construction only. The file is
+        # closed before sherpa opens it: Windows refuses a second open of a
+        # NamedTemporaryFile that is still open.
+        f = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', encoding='utf-8', delete=False)
+        try:
+            with f:
+                f.write(keyword + '\n')
             model = sherpa_onnx.KeywordSpotter(
                 tokens=str(self.path / 'tokens.txt'), encoder=str(self.path / FILES[0]),
                 decoder=str(self.path / FILES[1]), joiner=str(self.path / FILES[2]),
                 keywords_file=f.name, keywords_threshold=config['kws_threshold'],
                 num_threads=2, provider='cpu')
+        finally:
+            os.unlink(f.name)
         self.models[key] = model
         while len(self.models) > 2:
             self.models.popitem(last=False)

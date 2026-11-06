@@ -8,7 +8,7 @@ export const WAKE_ERROR_CODES = [
   'wake_phrase_empty', 'wake_phrase_invalid', 'wake_phrase_unpronounceable',
   'wake_engine_unsupported_os', 'wake_engine_unavailable', 'wake_model_missing',
   'voiceprint_missing', 'voiceprint_enroll_failed', 'wake_mic_unavailable',
-  'wake_service_unavailable', 'wake_service_error',
+  'wake_service_unavailable', 'wake_service_error', 'wake_mic_silent',
 ] as const;
 export type WakeErrorCode = typeof WAKE_ERROR_CODES[number];
 export type WakeError = { code: WakeErrorCode; params: Record<string, string> };
@@ -21,6 +21,9 @@ type WakeErrorStrings =
     savedButWakeOff: (reason: string) => string;
   };
 
+// Microphone settings live in different places on Windows and macOS.
+const WINDOWS = typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent);
+
 const WAKE_ERROR_TEXT: Record<SettingsLang, WakeErrorStrings> = {
   zh: {
     wake_phrase_invalid: () => '唤醒词格式不对：请只用 2–48 个汉字、英文字母和空格。',
@@ -30,7 +33,12 @@ const WAKE_ERROR_TEXT: Record<SettingsLang, WakeErrorStrings> = {
     wake_model_missing: () => '唤醒模型还没下载：请在「唤醒词」设置里下载模型。',
     voiceprint_missing: () => '还没有声纹：请先录制声纹，或关闭「仅本人唤醒」。',
     voiceprint_enroll_failed: () => '声纹录制失败：请在安静的环境里重新录制，并说满 5 秒。',
-    wake_mic_unavailable: () => '无法打开麦克风：请在「系统设置 → 隐私与安全性 → 麦克风」中允许 Pocket Agent。',
+    wake_mic_unavailable: () => WINDOWS
+      ? '无法打开麦克风：请在「设置 → 隐私 → 麦克风」中打开「允许桌面应用访问你的麦克风」。'
+      : '无法打开麦克风：请在「系统设置 → 隐私与安全性 → 麦克风」中允许 Pocket Agent。',
+    wake_mic_silent: () => WINDOWS
+      ? '麦克风录到的是完全无声的音频：请在「设置 → 系统 → 声音 → 输入」中选择正在使用的麦克风，确认它没有静音，并在「设置 → 隐私 → 麦克风」中允许桌面应用访问麦克风，然后重新录制。'
+      : '麦克风录到的是完全无声的音频：请在「系统设置 → 声音 → 输入」中选择正在使用的麦克风并确认没有静音，然后重新录制。',
     wake_service_unavailable: () => '语音服务还没准备好：请稍等几秒再试；如果一直这样，请重启 PA。',
     wake_service_error: () => '唤醒服务出错：请重启 PA；如果仍然出现，请查看日志。',
     saved: '设置已保存。',
@@ -44,7 +52,12 @@ const WAKE_ERROR_TEXT: Record<SettingsLang, WakeErrorStrings> = {
     wake_model_missing: () => 'The wake model is not downloaded: download it in Wake word settings.',
     voiceprint_missing: () => 'No voiceprint yet: record your voice first, or turn off "Only my voice".',
     voiceprint_enroll_failed: () => 'Voiceprint recording failed: record again somewhere quiet and speak for the full 5 seconds.',
-    wake_mic_unavailable: () => 'Cannot open the microphone: allow Pocket Agent in System Settings → Privacy & Security → Microphone.',
+    wake_mic_unavailable: () => WINDOWS
+      ? 'Cannot open the microphone: in Settings → Privacy → Microphone, turn on "Allow desktop apps to access your microphone".'
+      : 'Cannot open the microphone: allow Pocket Agent in System Settings → Privacy & Security → Microphone.',
+    wake_mic_silent: () => WINDOWS
+      ? 'The microphone recorded pure silence: choose the microphone you are using in Settings → System → Sound → Input, make sure it is not muted, and allow desktop apps in Settings → Privacy → Microphone. Then record again.'
+      : 'The microphone recorded pure silence: choose the microphone you are using in System Settings → Sound → Input and make sure it is not muted. Then record again.',
     wake_service_unavailable: () => 'The voice service is not ready yet: wait a few seconds and try again; if it keeps happening, restart PA.',
     wake_service_error: () => 'The wake service hit an error: restart PA; if this persists, check the log.',
     saved: 'Settings saved.',
@@ -58,7 +71,12 @@ const WAKE_ERROR_TEXT: Record<SettingsLang, WakeErrorStrings> = {
     wake_model_missing: () => 'ウェイクモデルがダウンロードされていません：ウェイクワード設定でダウンロードしてください。',
     voiceprint_missing: () => '声紋が未登録です：先に声紋を録音するか、本人の声のみで起動する設定をオフにしてください。',
     voiceprint_enroll_failed: () => '声紋の録音に失敗しました：静かな場所で、5 秒間話して録音し直してください。',
-    wake_mic_unavailable: () => 'マイクを使用できません：システム設定 → プライバシーとセキュリティ → マイク で Pocket Agent を許可してください。',
+    wake_mic_unavailable: () => WINDOWS
+      ? 'マイクを使用できません：設定 → プライバシー → マイク で「デスクトップ アプリがマイクにアクセスできるようにする」をオンにしてください。'
+      : 'マイクを使用できません：システム設定 → プライバシーとセキュリティ → マイク で Pocket Agent を許可してください。',
+    wake_mic_silent: () => WINDOWS
+      ? 'マイクの録音が完全に無音でした：設定 → システム → サウンド → 入力 で使用中のマイクを選び、ミュートされていないこと、設定 → プライバシー → マイク でデスクトップ アプリが許可されていることを確認してから、もう一度録音してください。'
+      : 'マイクの録音が完全に無音でした：システム設定 → サウンド → 入力 で使用中のマイクを選び、ミュートされていないことを確認してから、もう一度録音してください。',
     wake_service_unavailable: () => '音声サービスの準備ができていません：数秒待ってから再度お試しください。続く場合は PA を再起動してください。',
     wake_service_error: () => 'ウェイクサービスでエラーが発生しました：PA を再起動してください。解決しない場合はログを確認してください。',
     saved: '設定を保存しました。',
@@ -72,7 +90,12 @@ const WAKE_ERROR_TEXT: Record<SettingsLang, WakeErrorStrings> = {
     wake_model_missing: () => '웨이크 모델이 다운로드되지 않았습니다: 웨이크 워드 설정에서 모델을 다운로드하세요.',
     voiceprint_missing: () => '등록된 성문이 없습니다: 먼저 성문을 녹음하거나, 본인 목소리로만 깨우기 설정을 끄세요.',
     voiceprint_enroll_failed: () => '성문 녹음에 실패했습니다: 조용한 곳에서 5초 동안 말하며 다시 녹음하세요.',
-    wake_mic_unavailable: () => '마이크를 열 수 없습니다: 시스템 설정 → 개인정보 보호 및 보안 → 마이크에서 Pocket Agent를 허용하세요.',
+    wake_mic_unavailable: () => WINDOWS
+      ? '마이크를 열 수 없습니다: 설정 → 개인 정보 → 마이크에서 "데스크톱 앱에서 마이크에 액세스하도록 허용"을 켜세요.'
+      : '마이크를 열 수 없습니다: 시스템 설정 → 개인정보 보호 및 보안 → 마이크에서 Pocket Agent를 허용하세요.',
+    wake_mic_silent: () => WINDOWS
+      ? '마이크에 완전한 무음이 녹음되었습니다: 설정 → 시스템 → 소리 → 입력에서 사용 중인 마이크를 선택하고, 음소거되지 않았는지와 설정 → 개인 정보 → 마이크에서 데스크톱 앱이 허용되었는지 확인한 뒤 다시 녹음하세요.'
+      : '마이크에 완전한 무음이 녹음되었습니다: 시스템 설정 → 사운드 → 입력에서 사용 중인 마이크를 선택하고 음소거되지 않았는지 확인한 뒤 다시 녹음하세요.',
     wake_service_unavailable: () => '음성 서비스가 아직 준비되지 않았습니다: 몇 초 후 다시 시도하세요. 계속되면 PA를 다시 시작하세요.',
     wake_service_error: () => '웨이크 서비스에 오류가 발생했습니다: PA를 다시 시작하세요. 계속되면 로그를 확인하세요.',
     saved: '설정을 저장했습니다.',
@@ -86,7 +109,12 @@ const WAKE_ERROR_TEXT: Record<SettingsLang, WakeErrorStrings> = {
     wake_model_missing: () => "Le modèle de réveil n'est pas téléchargé : téléchargez-le dans les réglages du mot de réveil.",
     voiceprint_missing: () => "Aucune empreinte vocale : enregistrez d'abord votre voix, ou désactivez le réveil par votre seule voix.",
     voiceprint_enroll_failed: () => "L'enregistrement de l'empreinte vocale a échoué : recommencez dans un endroit calme en parlant pendant 5 secondes.",
-    wake_mic_unavailable: () => "Impossible d'ouvrir le micro : autorisez Pocket Agent dans Réglages Système → Confidentialité et sécurité → Micro.",
+    wake_mic_unavailable: () => WINDOWS
+      ? "Impossible d'ouvrir le micro : dans Paramètres → Confidentialité → Microphone, activez « Autoriser les applications de bureau à accéder au microphone »."
+      : "Impossible d'ouvrir le micro : autorisez Pocket Agent dans Réglages Système → Confidentialité et sécurité → Micro.",
+    wake_mic_silent: () => WINDOWS
+      ? "Le micro n'a enregistré que du silence : choisissez le micro utilisé dans Paramètres → Système → Son → Entrée, vérifiez qu'il n'est pas coupé et autorisez les applications de bureau dans Paramètres → Confidentialité → Microphone, puis réenregistrez."
+      : "Le micro n'a enregistré que du silence : choisissez le micro utilisé dans Réglages Système → Son → Entrée et vérifiez qu'il n'est pas coupé, puis réenregistrez.",
     wake_service_unavailable: () => "Le service vocal n'est pas encore prêt : patientez quelques secondes puis réessayez ; si cela continue, redémarrez PA.",
     wake_service_error: () => 'Le service de réveil a rencontré une erreur : redémarrez PA ; si le problème persiste, consultez le journal.',
     saved: 'Réglages enregistrés.',
@@ -100,7 +128,12 @@ const WAKE_ERROR_TEXT: Record<SettingsLang, WakeErrorStrings> = {
     wake_model_missing: () => 'Das Aktivierungsmodell ist nicht heruntergeladen: Lade es in den Einstellungen zum Aktivierungswort herunter.',
     voiceprint_missing: () => 'Noch kein Stimmabdruck: Nimm zuerst deine Stimme auf oder schalte die Aktivierung nur durch deine Stimme aus.',
     voiceprint_enroll_failed: () => 'Aufnahme des Stimmabdrucks fehlgeschlagen: Nimm an einem ruhigen Ort erneut auf und sprich die vollen 5 Sekunden.',
-    wake_mic_unavailable: () => 'Mikrofon kann nicht geöffnet werden: Erlaube Pocket Agent unter Systemeinstellungen → Datenschutz & Sicherheit → Mikrofon.',
+    wake_mic_unavailable: () => WINDOWS
+      ? 'Mikrofon kann nicht geöffnet werden: Aktiviere unter Einstellungen → Datenschutz → Mikrofon „Desktop-Apps den Zugriff auf das Mikrofon erlauben“.'
+      : 'Mikrofon kann nicht geöffnet werden: Erlaube Pocket Agent unter Systemeinstellungen → Datenschutz & Sicherheit → Mikrofon.',
+    wake_mic_silent: () => WINDOWS
+      ? 'Das Mikrofon hat nur Stille aufgenommen: Wähle unter Einstellungen → System → Sound → Eingabe das verwendete Mikrofon, prüfe, dass es nicht stummgeschaltet ist, und erlaube Desktop-Apps unter Einstellungen → Datenschutz → Mikrofon. Nimm dann erneut auf.'
+      : 'Das Mikrofon hat nur Stille aufgenommen: Wähle unter Systemeinstellungen → Ton → Eingabe das verwendete Mikrofon und prüfe, dass es nicht stummgeschaltet ist. Nimm dann erneut auf.',
     wake_service_unavailable: () => 'Der Sprachdienst ist noch nicht bereit: Warte einige Sekunden und versuche es erneut; wenn es so bleibt, starte PA neu.',
     wake_service_error: () => 'Im Aktivierungsdienst ist ein Fehler aufgetreten: Starte PA neu; wenn es weiter auftritt, sieh im Protokoll nach.',
     saved: 'Einstellungen gespeichert.',
@@ -114,7 +147,12 @@ const WAKE_ERROR_TEXT: Record<SettingsLang, WakeErrorStrings> = {
     wake_model_missing: () => 'El modelo de activación no está descargado: descárgalo en los ajustes de la palabra de activación.',
     voiceprint_missing: () => 'Aún no hay huella de voz: graba tu voz primero o desactiva la activación solo con tu voz.',
     voiceprint_enroll_failed: () => 'No se pudo grabar la huella de voz: vuelve a grabar en un lugar tranquilo y habla durante los 5 segundos.',
-    wake_mic_unavailable: () => 'No se puede abrir el micrófono: permite Pocket Agent en Ajustes del Sistema → Privacidad y seguridad → Micrófono.',
+    wake_mic_unavailable: () => WINDOWS
+      ? 'No se puede abrir el micrófono: en Configuración → Privacidad → Micrófono, activa «Permitir que las aplicaciones de escritorio accedan al micrófono».'
+      : 'No se puede abrir el micrófono: permite Pocket Agent en Ajustes del Sistema → Privacidad y seguridad → Micrófono.',
+    wake_mic_silent: () => WINDOWS
+      ? 'El micrófono grabó solo silencio: elige el micrófono que usas en Configuración → Sistema → Sonido → Entrada, comprueba que no esté silenciado y permite las aplicaciones de escritorio en Configuración → Privacidad → Micrófono. Luego vuelve a grabar.'
+      : 'El micrófono grabó solo silencio: elige el micrófono que usas en Ajustes del Sistema → Sonido → Entrada y comprueba que no esté silenciado. Luego vuelve a grabar.',
     wake_service_unavailable: () => 'El servicio de voz aún no está listo: espera unos segundos y vuelve a intentarlo; si sigue pasando, reinicia PA.',
     wake_service_error: () => 'El servicio de activación tuvo un error: reinicia PA; si continúa, revisa el registro.',
     saved: 'Ajustes guardados.',
