@@ -186,24 +186,39 @@ curl -X POST http://127.0.0.1:8650/bridge/send \
 
 ## 手机终端(`/ui/`、`/ui/ws`、`/audio`、`/phone`、`/pair/*`)
 
-把 PA 的界面、收音和播放搬到手机(安卓壳见 `android/`)。一台手机可以配对多台 PA(例如 Mac 和 Windows),在它们之间切换;同一时刻只给一台用。实现：`src-tauri/src/api/remote.rs`、`src-tauri/src/voice/remote.rs`、`src-tauri/src/api/pairing.rs`、`src-tauri/src/api/phone.rs`、`src-tauri/src/api/discovery.rs`、`src/lib/ipc.ts`。
+把 PA 的界面、收音和播放搬到手机(安卓壳见 `android/`)。一台手机可以配对多台 PA(例如 Mac 和 Windows),在它们之间切换;同一时刻只给一台用。实现：`src-tauri/src/api/remote.rs`、`src-tauri/src/voice/remote.rs`、`src-tauri/src/api/pairing.rs`、`src-tauri/src/api/phone.rs`、`src/lib/ipc.ts`。
 
 **鉴权**:`/ui/ws`、`/audio`、`/phone` 都必须带 `?token=`,值是 `API_SERVER_KEY`(手填方式，旧版 app)或某台已配对手机的设备 token(见「配对」)。没配 key 且没有配对过手机时一律拒绝(与 `/push` 的「没配 key 就放行」不同)。错误或缺失 → 升级前返回 401。在设置 → 设备里移除一台手机后，它用设备 token 开的 `/ui/ws`、`/audio`、`/phone` 立即被断开，旧 token 之后一律 401。8650 只在局域网用，不要做端口映射:`/ui` 能批准电脑操作。
 
-**发现**:PA 启动后用 mDNS 广播 `_pocket-agent._tcp`,端口 8650,TXT 记录 `id=<pa_id>`、`name=<电脑名>`、`v=1`。`pa_id` 是首次启动时生成的 UUID,存在 `settings.db` 的 metadata 里，电脑改名、换 IP 都不变。广播失败只记日志(`[mdns] not advertising …`),手机仍可手动输入地址。Mac 上检查:`dns-sd -B _pocket-agent._tcp`。测试时 `POCKET_AGENT_PORT` 环境变量可以让第二个 PA 用别的端口(默认 8650)。
+**身份**:`pa_id` 是 PA 首次启动时生成的 UUID,存在 `settings.db` 的 metadata 里，电脑改名、换 IP 都不变。PA 不在局域网里广播自己(没有 mDNS);手机只通过扫描电脑屏幕上的二维码认识它。测试时 `POCKET_AGENT_PORT` 环境变量可以让第二个 PA 用别的端口(默认 8650)。
 
-### 配对(POST /pair/start、POST /pair/confirm)
+### 配对(扫码:GET /pair/hello、POST /pair/confirm)
 
-手机发起，6 位配对码只显示在电脑屏幕上。两个接口都不需要鉴权(手机此时还没有凭据)。
+电脑发起：设置 → 设备 →「添加手机」显示二维码，手机扫码。两个接口都不需要鉴权(手机此时还没有凭据);保护来自二维码里的一次性密钥，**密钥本身从不经过网络**(局域网是明文 HTTP,同一 Wi-Fi 下能被嗅探)。
 
-1. `POST /pair/start {"phone_id":"…","phone_name":"Pixel 2"}` → `200 {"ok":true,"pa_id","pa_name","expires_in":120}`。PA 生成配对码(2 分钟有效)，打开设置窗口的「设备」页，显示「Pixel 2 想要配对这台电脑」和配对码。**响应里没有配对码。**
-   - `phone_id`:1–64 位字母、数字、`-`、`_`;`phone_name`:去掉控制字符后 1–64 个字符。不合格 → `400`。
-   - 同一时间只允许一个配对：别的手机正在配对 → `409`;距上一次 start 不到 10 秒 → `429`(防止反复弹窗)。同一台手机可以重新发起，旧码作废。
-2. `POST /pair/confirm {"phone_id":"…","code":"123456"}` → `200 {"ok":true,"pa_id","pa_name","token"}`。`token` 是 32 字节随机数(64 位十六进制),之后当 `?token=` 用。
-   - 码或 `phone_id` 不对 → `403 {"attempts_left":N}`;错满 5 次这次配对作废，之后(包括第 6 次)→ `410`,并且 5 分钟内 `/pair/start` 一律 `429`(防止反复发起来暴力猜码);过期、没有在进行的配对 → `410`。比较用常量时间。
-   - 同一台手机再次配对会换新 token,旧 token 和用它开的连接一起作废。
+**二维码内容**:`pocketagent://pair?v=1&id=<pa_id>&s=<secret>&h=<ip:port>,<ip:port>…`
+- `secret`:32 字节随机数,base64url 无填充(43 个字符)。点「添加手机」时生成,2 分钟有效、只能配对一次;再点一次就换新码，旧码作废;设置页点「取消」也作废。
+- `h`:电脑所有非回环的私网 IPv4(10/8、172.16/12、192.168/16),端口是实际监听端口(含 `POCKET_AGENT_PORT`)。
 
-PA 只在 `settings.db` 的 `paired_phones(phone_id, name, token_hash, created_at, last_seen_at)` 里存 token 的 SHA-256;日志不打印 token 和配对码。设置 → 设备列出已配对的手机(在线状态、上次在线时间),可以移除。这些设置页命令(`pairing_status`、`list_paired_phones`、`remove_paired_phone`、`cancel_pairing`)只在电脑上的设置窗口可用,`/ui/ws` 不接受。
+**HMAC**:HMAC-SHA256(RFC 2104),key = `secret` 的 32 个原始字节，消息是 UTF-8 字符串;结果用 base64url 无填充传输。
+- `proof = HMAC(secret, "phone|" + nonce + "|" + phone_id)`(手机算)
+- `server_proof = HMAC(secret, "pa|" + nonce + "|" + phone_id)`(PA 算)
+
+`nonce` 按 `/pair/hello` 返回的字符串原样参与计算。
+
+1. `GET /pair/hello` → `200 {"ok":true,"v":1,"pa_id","pa_name","nonce"}`。`nonce` 是 16 字节随机数(base64url),只能用一次;每个二维码最多保留 8 个未用的 nonce,更早的作废。**没有二维码在显示时 → `410`**,不返回任何身份信息。
+   - 手机按二维码里的地址逐个请求，先试与自己 IP 同一 /24 的;只向 `pa_id` 与二维码一致的地址继续。
+2. `POST /pair/confirm {"phone_id":"…","phone_name":"Pixel 2","nonce":"…","proof":"…"}` → `200 {"ok":true,"pa_id","pa_name","token","server_proof"}`。`token` 是 32 字节随机数(64 位十六进制),之后当 `?token=` 用;二维码随即作废。
+   - `phone_id`:1–64 位字母、数字、`-`、`_`;`phone_name`:去掉控制字符后 1–64 个字符。不合格 → `400`(不计错误次数)。
+   - `nonce` 不认识或已用过 → `403 {"error":"unknown or used nonce"}`。nonce 不论成功失败都只能用一次。
+   - `proof` 不对(包括无法解码)→ `403 {"error":"wrong proof","tries_left":N}`;错满 5 次这个二维码作废，之后 → `410`。比较用常量时间;nonce 消费、错误计数、作废在同一把锁内完成。
+   - 没有二维码(过期、已用、取消、换了新码、作废)→ `410`。
+3. 手机先用常量时间比较校验 `server_proof`,确认对方确实持有同一个密钥(即显示二维码的那台电脑),通过后才保存 token;不通过则什么都不保存。
+   - 同一台手机再次配对会换新 token,旧 token 和用它开的连接一起作废;手机端按 `pa_id` 覆盖已有记录(电脑换了 IP,重新扫一次即可)。
+
+PA 只在 `settings.db` 的 `paired_phones(phone_id, name, token_hash, created_at, last_seen_at)` 里存 token 的 SHA-256;日志不打印密钥、proof 和 token。设置 → 设备列出已配对的手机(在线状态、上次在线时间),可以移除。这些设置页命令(`start_pairing`、`cancel_pairing`、`list_paired_phones`、`remove_paired_phone`)只在电脑上的设置窗口可用,`/ui/ws` 不接受。`start_pairing` 返回 `{svg, expires_in, generation}`(二维码 SVG 与它的世代号),没有局域网地址时报错 `no LAN address`;`cancel_pairing(generation)` 只取消同一世代的二维码。二维码结束(配对成功、错 5 次作废、取消)时发 `pairing-ended {generation}`,设置页只关闭世代相同的二维码;列表或在线状态变化发 `pairing-changed`。
+
+**自测**(Mac):不显示二维码时 `curl -i http://127.0.0.1:8650/pair/hello` → `410`;点「添加手机」后 → `200` 带 nonce。
 
 ### WS /phone(在线连接与占用)
 

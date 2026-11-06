@@ -1,5 +1,4 @@
 pub mod client;
-pub mod discovery;
 pub mod mcp;
 pub mod pairing;
 pub mod phone;

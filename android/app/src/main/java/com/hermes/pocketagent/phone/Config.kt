@@ -78,7 +78,7 @@ object Config {
 
     fun pa(context: Context, key: String?) = key?.let { k -> pas(context).firstOrNull { it.key == k } }
 
-    /** A new pairing (or a hand-entered address). Pairing the same PA again replaces it. */
+    /** A new pairing. Pairing the same PA again (by pa_id) replaces it, keeping its local key. */
     fun add(context: Context, paId: String, name: String, host: String, token: String): Pa {
         val list = pas(context)
         val old = list.firstOrNull { paId.isNotEmpty() && it.paId == paId }

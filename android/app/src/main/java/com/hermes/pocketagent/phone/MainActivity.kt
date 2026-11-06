@@ -14,7 +14,6 @@ import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.text.InputType
 import android.view.Gravity
 import android.view.WindowInsets
 import android.view.WindowInsetsController
@@ -25,23 +24,16 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
-import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONObject
-import java.util.concurrent.TimeUnit
 
 /**
  * Two screens. The device page (native) lists the paired computers: who uses
- * the phone, who is online, 「接入」, and adding one (LAN scan → pairing code,
- * or a typed address). While a PA uses the phone (the occupant, decided in
+ * the phone, who is online, 「接入」, and adding one by scanning the QR code
+ * the computer shows ([QrScanner], [Pairing]). While a PA uses the phone (the occupant, decided in
  * [AudioService]) a full-screen WebView runs that PA's own frontend (`/ui/`);
  * Back returns to the device page. Audio lives in [AudioService] so it keeps
  * running with the screen off.
@@ -50,10 +42,10 @@ class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private var webView: WebView? = null
     private var shownPa: String? = null // the PA whose page the WebView shows
-    private var discovery: Discovery? = null
-    private var found: List<FoundPa> = emptyList()
-    private var onFound: (() -> Unit)? = null // the open 「添加电脑」 list
-    private val http = OkHttpClient.Builder().callTimeout(10, TimeUnit.SECONDS).build()
+    private enum class Page { DEVICES, SCANNER, PAIRING, WEB }
+    private var page = Page.DEVICES // what is on screen; background refreshes may only redraw DEVICES
+    private var scanner: QrScanner? = null // the 「扫码添加电脑」 page
+    private var pendingScan = false // the user asked to scan, waiting for the permission / onResume
     private var camera: PhoneCamera? = null
     private var pendingCamera: CameraRequest? = null // the open the user asked for, waiting for the permission / onResume
     // A CAMERA permission request is in flight. Kept apart from pendingCamera: closing drops
@@ -79,7 +71,8 @@ class MainActivity : Activity() {
     private val voiceActive: (Boolean) -> Unit = { wake -> voiceActive(wake, bringForward = wake && !resumed) }
     // From AudioService: the phone now belongs to a PA (show its page) or to none (the device page).
     private val occupantChanged: (String?) -> Unit = { key -> route(key) }
-    private val devicesChanged: () -> Unit = { if (webView == null) showDevices() }
+    // A PA going online / offline must not close the scanner or the 「正在配对」 page.
+    private val devicesChanged: () -> Unit = { if (page == Page.DEVICES) showDevices() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -102,7 +95,7 @@ class MainActivity : Activity() {
         super.onResume()
         resumed = true
         AudioService.setForeground(true)
-        if (webView == null) discovery?.start()
+        if (pendingScan && !awaitingCameraPermission) showScanner()
         // Back from the CAMERA permission dialog: open only if that request still stands.
         val request = pendingCamera
         if (request != null && !awaitingCameraPermission) {
@@ -117,8 +110,8 @@ class MainActivity : Activity() {
         super.onPause()
         resumed = false
         AudioService.setForeground(false)
-        discovery?.stop()
         if (!awaitingCameraPermission) stopCamera()
+        if (scanner != null) showDevices() // the camera runs only in the foreground
     }
 
     override fun onStop() {
@@ -134,7 +127,7 @@ class MainActivity : Activity() {
         if (AudioService.onVoiceActive === voiceActive) AudioService.onVoiceActive = null
         if (AudioService.onOccupant === occupantChanged) AudioService.onOccupant = null
         if (AudioService.onChanged === devicesChanged) AudioService.onChanged = null
-        discovery?.stop()
+        scanner?.close()
         camera?.close()
         unregisterReceiver(powerReceiver)
         handler.removeCallbacksAndMessages(null)
@@ -144,7 +137,7 @@ class MainActivity : Activity() {
 
     @Deprecated("Back opens the device page; predictive back is not opted in.")
     override fun onBackPressed() {
-        if (webView != null) showDevices() else super.onBackPressed()
+        if (webView != null || scanner != null) showDevices() else super.onBackPressed()
     }
 
     private fun keepScreenOnWhenPlugged(battery: Intent) {
@@ -193,13 +186,25 @@ class MainActivity : Activity() {
     /** The occupant's page, or the device page when the phone is free. */
     private fun route(occupant: String?) {
         val pa = Config.pa(this, occupant)
-        if (pa == null) showDevices() else if (webView == null || shownPa != pa.key) showWebView(pa)
+        if (pa != null) {
+            if (webView == null || shownPa != pa.key) showWebView(pa)
+        } else if (page == Page.DEVICES || page == Page.WEB) showDevices() // scanning / pairing: keep it
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, results: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, results)
         if (requestCode == REQUEST_CAMERA) {
             awaitingCameraPermission = false
+            if (pendingScan) {
+                when {
+                    results.firstOrNull() == PackageManager.PERMISSION_GRANTED -> if (resumed) showScanner() // else onResume
+                    results.isEmpty() -> pendingScan = false // cancelled by the system, not refused
+                    else -> {
+                        pendingScan = false
+                        toast("需要相机权限才能扫码添加电脑")
+                    }
+                }
+            }
             val request = pendingCamera ?: return // dropped meanwhile (navigation / left the app)
             when {
                 results.firstOrNull() == PackageManager.PERMISSION_GRANTED -> if (resumed) {
@@ -229,9 +234,8 @@ class MainActivity : Activity() {
 
     @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
     private fun showWebView(config: Pa) {
-        discovery?.stop()
-        discovery = null
-        onFound = null
+        closeScanner()
+        page = Page.WEB
         shownPa = config.key
         camera?.close()
         webView?.destroy()
@@ -344,21 +348,14 @@ class MainActivity : Activity() {
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     private fun showDevices() {
+        closeScanner()
+        page = Page.DEVICES
         camera?.close()
         camera = null
         webView?.destroy()
         webView = null
         shownPa = null
         handler.removeCallbacksAndMessages(RETRY)
-        if (discovery == null) {
-            discovery = Discovery(this) { list ->
-                val before = Config.pas(this).map { movedTo(it) }
-                found = list
-                onFound?.invoke()
-                if (webView == null && Config.pas(this).map { movedTo(it) } != before) showDevices()
-            }
-        }
-        if (resumed) discovery?.start()
 
         val occupant = Config.occupant(this)
         val list = LinearLayout(this).apply {
@@ -369,22 +366,19 @@ class MainActivity : Activity() {
         val pas = Config.pas(this)
         if (pas.isEmpty()) {
             list.addView(TextView(this).apply {
-                text = "还没有配对的电脑。点下面的「添加电脑」,或者手动输入地址。"
+                text = "还没有配对的电脑。在电脑上打开 Pocket Agent 设置 → 设备 → 添加手机，再点下面的「扫码添加电脑」。"
                 setPadding(0, dp(16), 0, dp(16))
             })
         }
         for (pa in pas) list.addView(deviceRow(pa, occupant))
-        list.addView(Button(this).apply { text = "添加电脑"; setOnClickListener { showAddComputer() } })
-        list.addView(Button(this).apply { text = "手动输入地址"; setOnClickListener { showManualForm() } })
+        list.addView(Button(this).apply { text = "扫码添加电脑"; setOnClickListener { showScanner() } })
         setContentView(ScrollView(this).apply { addView(list) })
     }
 
     private fun deviceRow(pa: Pa, occupant: String?): LinearLayout {
         val online = AudioService.isOnline(pa.key)
         val busyWith = occupant?.takeIf { it != pa.key }?.let { Config.pa(this, it)?.name }
-        val moved = if (online) null else movedTo(pa)
         val (status, action, enabled) = when {
-            moved != null -> Triple("地址变了:$moved", "重新配对", true)
             occupant == pa.key -> Triple("正在使用" + if (online) "" else " · 离线", "打开", true)
             busyWith != null -> Triple("先让「$busyWith」回到电脑", "接入", false)
             !online -> Triple("离线", "接入", false)
@@ -403,7 +397,7 @@ class MainActivity : Activity() {
             addView(Button(this@MainActivity).apply {
                 text = action
                 isEnabled = enabled
-                setOnClickListener { if (moved != null) confirmRepair(pa, moved) else enterPa(pa) }
+                setOnClickListener { enterPa(pa) }
             })
             setOnLongClickListener { confirmRemove(pa); true }
         }
@@ -431,156 +425,79 @@ class MainActivity : Activity() {
             .show()
     }
 
-    /**
-     * The new address a paired PA announces (DHCP gave its computer another IP),
-     * or null. mDNS is unauthenticated — anyone on the LAN can announce a paired
-     * PA's id — so the phone never sends the saved token there by itself.
-     */
-    private fun movedTo(pa: Pa): String? =
-        found.firstOrNull { pa.paId.isNotEmpty() && it.paId == pa.paId }?.host
-            ?.takeIf { Pa.hostPort(it) != Pa.hostPort(pa.host) }
+    // ── Adding a computer by QR code (FEAT-QR2 / SEC-QR2) ───────────────────
 
-    /** Pairing again at the new address: only the real computer's screen shows the code. */
-    private fun confirmRepair(pa: Pa, host: String) {
-        AlertDialog.Builder(this)
-            .setTitle("「${pa.name}」换了地址？")
-            .setMessage("局域网里有一台自称「${pa.name}」的电脑在 $host。为了安全，要在那台电脑的屏幕上看配对码，重新配对一次。")
-            .setNegativeButton("取消", null)
-            .setPositiveButton("重新配对") { _, _ -> startPairing(host, pa.name) }
-            .show()
-    }
-
-    private fun showAddComputer() {
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(8), dp(16), 0) }
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("添加电脑")
-            .setView(ScrollView(this).apply { addView(box) })
-            .setNegativeButton("取消", null)
-            .setOnDismissListener { onFound = null }
-            .create()
-        fun render() {
-            box.removeAllViews()
-            val paired = Config.pas(this).map { it.paId }.filter { it.isNotEmpty() }.toSet()
-            val candidates = found.filter { it.paId !in paired }
-            if (candidates.isEmpty()) {
-                box.addView(TextView(this).apply {
-                    text = "正在局域网里找运行 Pocket Agent 的电脑…\n找不到时用「手动输入地址」。"
-                })
+    private fun showScanner() {
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            pendingScan = true
+            if (!awaitingCameraPermission) {
+                awaitingCameraPermission = true
+                requestPermissions(arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA)
             }
-            for (pa in candidates) box.addView(Button(this).apply {
-                text = "${pa.name}  (${pa.host})"
-                setOnClickListener { dialog.dismiss(); startPairing(pa.host, pa.name) }
-            })
+            return
         }
-        onFound = { render() }
-        render()
-        dialog.show()
+        pendingScan = false
+        if (!resumed || webView != null || scanner != null) return
+        val root = FrameLayout(this).apply { setBackgroundColor(0xFF000000.toInt()) }
+        root.addView(TextView(this).apply {
+            text = "对准电脑设置 → 设备里的二维码"
+            textSize = 16f
+            setTextColor(0xFFFFFFFF.toInt())
+            setShadowLayer(4f, 0f, 0f, 0xFF000000.toInt())
+            setPadding(dp(16), dp(32), dp(16), dp(16))
+        }, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+        root.addView(Button(this).apply { text = "取消"; setOnClickListener { showDevices() } },
+            FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(32) })
+        scanner = QrScanner(this, root, onFound = ::scanned, onFailed = {
+            toast("打不开相机")
+            showDevices()
+        })
+        page = Page.SCANNER
+        setContentView(root)
     }
 
-    private fun showManualForm() {
-        val host = EditText(this).apply {
-            hint = "电脑地址，例如 192.168.1.20"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-        }
-        val key = EditText(this).apply {
-            hint = "API_SERVER_KEY(留空则用配对码)"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        }
-        AlertDialog.Builder(this)
-            .setTitle("手动输入地址")
-            .setView(LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(16), dp(8), dp(16), 0)
-                addView(host)
-                addView(key)
-            })
-            .setNegativeButton("取消", null)
-            .setPositiveButton("连接") { _, _ ->
-                val typed = host.text.toString().trim()
-                val h = Pa.parseHost(typed)
-                val k = key.text.toString().trim()
-                when {
-                    typed.isEmpty() -> Toast.makeText(this, "要填电脑地址", Toast.LENGTH_SHORT).show()
-                    h == null -> toast("地址不对:$typed(例如 192.168.1.20 或 192.168.1.20:8650)")
-                    k.isEmpty() -> startPairing(h, h)
-                    else -> paired(Config.add(this, "", h, h, k))
-                }
-            }
-            .show()
+    private fun closeScanner() {
+        scanner?.close()
+        scanner = null
     }
 
-    private fun post(host: String, path: String, body: JSONObject, done: (Int, JSONObject?) -> Unit) {
-        val request = try {
-            Request.Builder()
-                .url("http://${Pa.hostPort(host)}$path")
-                .post(body.toString().toRequestBody("application/json".toMediaType()))
-                .build()
-        } catch (e: IllegalArgumentException) {
-            return toast("地址不对:$host")
+    private fun scanned(text: String) {
+        if (scanner == null) return // left the page meanwhile
+        closeScanner()
+        val qr = PairQr.parse(text)
+        if (qr == null) {
+            toast("二维码无效，请在电脑上重新点「添加手机」")
+            return showDevices()
         }
+        page = Page.PAIRING
+        setContentView(TextView(this).apply {
+            this.text = "正在配对…"
+            textSize = 18f
+            gravity = Gravity.CENTER
+        })
+        val phoneId = Config.phoneId(this)
         Thread {
-            val result = try {
-                http.newCall(request).execute().use { r ->
-                    r.code to (try { JSONObject(r.body?.string().orEmpty()) } catch (e: Exception) { null })
+            val result = Pairing.pair(qr, phoneId, Config.phoneName())
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                when (result) {
+                    is PairResult.Paired -> return@runOnUiThread paired(
+                        Config.add(this, result.paId, result.name.ifEmpty { result.host }, result.host, result.token),
+                    )
+                    PairResult.Expired -> toast("二维码已失效，请在电脑上重新点「添加手机」")
+                    PairResult.Unreachable -> toast("连不上这台电脑：手机和电脑要连在同一个局域网")
+                    PairResult.NotThatComputer -> toast("对方没能证明自己是显示二维码的那台电脑，没有保存。请重新扫码")
+                    is PairResult.Failed -> toast("配对失败(${result.status})")
                 }
-            } catch (e: Exception) {
-                0 to null
+                if (page == Page.PAIRING) showDevices() // else a PA took the phone meanwhile
             }
-            runOnUiThread { done(result.first, result.second) }
         }.start()
-    }
-
-    /** /pair/start: the computer shows a code; the user types it here. */
-    private fun startPairing(host: String, name: String) {
-        val body = JSONObject().put("phone_id", Config.phoneId(this)).put("phone_name", Config.phoneName())
-        post(host, "/pair/start", body) { code, reply ->
-            when (code) {
-                200 -> askCode(host, reply?.optString("pa_name").orEmpty().ifEmpty { name })
-                409 -> toast("另一台手机正在配对这台电脑，稍后再试")
-                429 -> toast(if (reply?.optString("error").orEmpty().contains("5 minutes")) "配对码错误次数太多，5 分钟后再试" else "请稍等几秒再试")
-                0 -> toast("连不上 $host")
-                else -> toast("配对失败($code)")
-            }
-        }
-    }
-
-    private fun askCode(host: String, name: String, hint: String? = null) {
-        val input = EditText(this).apply {
-            this.hint = "6 位配对码"
-            inputType = InputType.TYPE_CLASS_NUMBER
-        }
-        AlertDialog.Builder(this)
-            .setTitle("配对「$name」")
-            .setMessage(hint ?: "在「$name」的屏幕上会显示配对码，2 分钟内有效。")
-            .setView(LinearLayout(this).apply { setPadding(dp(16), 0, dp(16), 0); addView(input, LinearLayout.LayoutParams(-1, -2)) })
-            .setNegativeButton("取消", null)
-            .setPositiveButton("配对") { _, _ -> confirmPairing(host, name, input.text.toString().trim()) }
-            .show()
-    }
-
-    private fun confirmPairing(host: String, name: String, code: String) {
-        val body = JSONObject().put("phone_id", Config.phoneId(this)).put("code", code)
-        post(host, "/pair/confirm", body) { status, reply ->
-            when {
-                status == 200 && reply != null -> paired(Config.add(
-                    this, reply.optString("pa_id"), reply.optString("pa_name").ifEmpty { name }, host, reply.getString("token"),
-                ))
-                status == 403 -> {
-                    val left = reply?.optInt("attempts_left", 0) ?: 0
-                    if (left > 0) askCode(host, name, "配对码不对，还可以再试 $left 次。")
-                    else toast("错误次数太多，这次配对已作废，5 分钟后再重新添加")
-                }
-                status == 410 -> toast("配对码已失效，请重新添加")
-                status == 0 -> toast("连不上 $host")
-                else -> toast("配对失败($status)")
-            }
-        }
     }
 
     private fun paired(pa: Pa) {
         toast("已添加「${pa.name}」")
         AudioService.start(this) // first pairing starts it; later ones make it re-read the list
-        showDevices()
+        if (page == Page.PAIRING) showDevices()
     }
 
     private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()

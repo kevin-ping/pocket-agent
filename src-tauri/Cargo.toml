@@ -59,9 +59,10 @@ sha2 = "0.10"
 flate2 = "1"
 tar = { version = "0.4", default-features = false }
 
-# Phone pairing: device tokens and codes; LAN discovery (_pocket-agent._tcp)
+# Phone pairing: device tokens and QR secrets; LAN addresses and the QR code
 getrandom = "0.3"
-mdns-sd = "0.13"
+if-addrs = "0.13"
+qrcodegen = "1.8"
 [profile.release]
 opt-level = "s"     # 优化体积（旧机器存储也紧张）
 lto = true

@@ -168,7 +168,7 @@ pub fn run() {
             api::runs::pending_computer_approvals,
             api::subagents::settle_background_subagents,
             api::remote::is_ui_remote_active,
-            api::pairing::pairing_status,
+            api::pairing::start_pairing,
             api::pairing::cancel_pairing,
             api::pairing::list_paired_phones,
             api::pairing::remove_paired_phone,

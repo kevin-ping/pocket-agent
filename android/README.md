@@ -28,19 +28,17 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ## Use
 
-1. **Pair a computer** (like Bluetooth, once per computer). On the device page
-   tap 「添加电脑」: the phone scans the LAN for PAs (`_pocket-agent._tcp`, mDNS).
-   Tap one; that computer opens Settings → Devices with a 6-digit code. Type it
-   on the phone (2 minutes, 5 tries). The phone stores a device token for that
-   computer only. Pair as many computers as you like (e.g. a Mac and a Windows PC).
-   Grant the microphone (the camera is asked for the first time Hermes opens it).
-2. **No scan result** (some routers drop multicast, or Windows Firewall blocks
-   it): 「手动输入地址」 takes the computer's LAN address (port 8650 is implied).
-   Leave the key empty to pair with a code, or enter `API_SERVER_KEY` from that
-   computer's `~/.pocket-agent/.env` as before.
-   A paired computer that got a new LAN address shows 「地址变了」 with
-   「重新配对」: pair again with the code on its screen. The phone does not send
-   the saved token to an announced address by itself (mDNS is unauthenticated).
+1. **Pair a computer** (once per computer). On the computer open Pocket Agent
+   Settings → Devices → 「添加手机」: a QR code shows for 2 minutes. On the phone
+   tap 「扫码添加电脑」 and point the camera at it (the camera permission is asked
+   the first time). The phone checks that the computer really holds the code's
+   secret, then stores a device token for that computer only. Pair as many
+   computers as you like (e.g. a Mac and a Windows PC). Grant the microphone too.
+2. **Problems.** 「二维码已失效」: the code expired, was used, or a newer one
+   replaced it — click 「添加手机」 again. 「连不上这台电脑」: phone and computer
+   must be on the same LAN (on Windows allow TCP 8650, see docs/windows-install.md).
+   A computer that got a new LAN address: show its QR code again and scan; the
+   phone updates the existing entry instead of adding a second one.
 3. **Switch.** The phone serves one computer at a time. Each row shows the
    computer's name and 在线 / 离线 / 正在使用. 「接入」 hands the phone to that
    computer and opens its page. While one computer uses the phone, every other
@@ -57,7 +55,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 4. **Each computer has its own conversation.** Every PA talks to its own
    Hermes, so switching computers switches history and context too.
 5. Back on a PA's page returns to the device page. Old setups (one address +
-   key) become a hand-entered entry after updating; nothing to re-enter.
+   key) become a hand-entered entry after updating and keep working; nothing to
+   re-enter. New computers can only be added by scanning.
 6. Home and screen lock keep the voice on the phone (the service keeps running).
    Swiping the app away from recents, or 「断开」 on its notification, stops the
    service (and with 「断开」 also the camera and the page): PA goes back to the

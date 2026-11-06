@@ -1,26 +1,32 @@
-// pairing.rs — Pairing phones with this PA (FEAT-MP1 / FEAT-MP2 / SEC-MP1)
+// pairing.rs — Pairing phones with this PA by QR code (FEAT-MP1 / SEC-QR1 / FEAT-QR1)
 //
-//   POST /pair/start   {phone_id, phone_name}  → a 6-digit code shows on this computer only
-//   POST /pair/confirm {phone_id, code}        → {pa_id, pa_name, token}
+//   settings → 设备 → 添加手机: start_pairing shows
+//     pocketagent://pair?v=1&id=<pa_id>&s=<secret>&h=<ip:port>,…
+//   GET  /pair/hello                                  → {pa_id, pa_name, nonce}
+//   POST /pair/confirm {phone_id, phone_name, nonce, proof}
+//        proof        = HMAC-SHA256(secret, "phone|" + nonce + "|" + phone_id)
+//        → {pa_id, pa_name, token, server_proof = HMAC-SHA256(secret, "pa|" + nonce + "|" + phone_id)}
 //
-// Both are open (the phone has no credentials yet); what guards them:
-//   - the code never leaves this computer except on its own screen (settings
-//     window, through a desktop-only Tauri command — not /ui, not HTTP);
-//   - one pairing at a time, 2 minutes, a cooldown between starts so a
-//     stranger cannot keep popping the settings window;
-//   - 5 wrong codes void it, compared in constant time, and lock pairing for
-//     5 minutes (a stranger restarting it every 10 s would otherwise get
-//     thousands of guesses overnight);
+// Both endpoints are open (the phone has no credentials yet); what guards them:
+//   - the secret (32 random bytes) only leaves this computer on its screen;
+//     the network sees nonces and HMACs, never the secret itself;
+//   - it lasts 2 minutes, pairs one phone once, and a new QR code voids the old;
+//   - without a QR code on screen /pair/hello answers 410 and says nothing;
+//   - a nonce is single-use (at most 8 outstanding); 5 wrong proofs void the
+//     code; proofs are compared in constant time, all under one lock;
+//   - server_proof lets the phone check it reached the PA that showed the code;
 //   - the token is 32 random bytes; settings.db keeps only its SHA-256.
 // Removing a phone drops its token and cuts every socket it opened with it.
-// Neither tokens nor codes are ever logged.
+// Neither secrets, proofs nor tokens are ever logged.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{HashMap, VecDeque};
+use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::{extract::State, http::StatusCode, Json};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -30,17 +36,18 @@ use tokio::sync::oneshot;
 use super::server::ServerState;
 use crate::commands::settings_repository::{self as repo, PairedPhoneRow};
 
-pub const CODE_TTL: Duration = Duration::from_secs(120);
-pub const MAX_ATTEMPTS: u32 = 5;
-/// Between two /pair/start calls (each one brings up the settings window).
-pub const START_COOLDOWN: Duration = Duration::from_secs(10);
-/// After a pairing is voided by wrong codes, no new one starts for this long.
-pub const LOCKOUT: Duration = Duration::from_secs(300);
+pub const QR_TTL: Duration = Duration::from_secs(120);
+pub const MAX_WRONG: u32 = 5;
+/// Outstanding /pair/hello nonces per QR code; older ones drop off.
+pub const MAX_NONCES: usize = 8;
 const ID_MAX: usize = 64;
 const NAME_MAX: usize = 64;
 
-/// Settings window: the pairing panel or the paired list changed (no payload).
+/// Settings window: the paired list or who is online changed (no payload).
 pub const PAIRING_CHANGED: &str = "pairing-changed";
+/// Settings window: the QR code is no longer valid — paired, voided by wrong
+/// proofs, or cancelled (no payload). Only this takes the QR code down.
+pub const PAIRING_ENDED: &str = "pairing-ended";
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -63,6 +70,23 @@ fn same_bytes(a: &[u8], b: &[u8]) -> bool {
 
 fn token_hash(token: &str) -> String {
     hex(&Sha256::digest(token.as_bytes()))
+}
+
+/// RFC 2104 over SHA-256 (the sha2 crate is already here; no hmac crate).
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    let mut block = [0u8; 64];
+    if key.len() > block.len() {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let inner = Sha256::new().chain_update(block.map(|b| b ^ 0x36)).chain_update(msg).finalize();
+    Sha256::new().chain_update(block.map(|b| b ^ 0x5c)).chain_update(inner).finalize().into()
+}
+
+/// `side` is "phone" or "pa".
+fn proof(secret: &[u8], side: &str, nonce: &str, phone_id: &str) -> [u8; 32] {
+    hmac_sha256(secret, format!("{side}|{nonce}|{phone_id}").as_bytes())
 }
 
 // ── Identity (FEAT-MP1) ──────────────────────────────────────────────────────
@@ -113,37 +137,31 @@ pub fn identity() -> &'static (String, String) {
     })
 }
 
-// ── Pending pairing ──────────────────────────────────────────────────────────
+// ── The QR code on screen ────────────────────────────────────────────────────
 
 struct Pending {
-    phone_id: String,
-    phone_name: String,
-    code: String,
+    secret: [u8; 32],
     expires: Instant,
-    attempts: u32,
+    nonces: VecDeque<String>,
+    wrong: u32,
 }
 
 #[derive(Default)]
 pub(crate) struct Pairing {
     pending: Option<Pending>,
-    last_start: Option<Instant>,
-    locked_until: Option<Instant>,
-}
-
-#[derive(Debug, PartialEq)]
-pub(crate) enum StartError {
-    /// Another phone is pairing right now.
-    Busy,
-    TooSoon,
-    /// A pairing was voided by wrong codes a moment ago.
-    Locked,
+    /// Bumped by every new QR code, so the one on screen (if any) is always
+    /// this generation. pairing-ended carries it: a late event from an older
+    /// code must not take down a newer one.
+    generation: u64,
 }
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum ConfirmError {
-    /// None in progress: never started, expired, finished, or voided by wrong codes.
+    /// No QR code on screen: never shown, expired, used, cancelled, or voided.
     NoPairing,
-    WrongCode { attempts_left: u32 },
+    /// Not a nonce this QR code handed out, or one already spent.
+    UnknownNonce,
+    WrongProof { tries_left: u32 },
 }
 
 impl Pairing {
@@ -154,60 +172,59 @@ impl Pairing {
         self.pending.as_mut()
     }
 
-    /// The same phone may start again (the user backed out and retried); its old code is void.
-    pub(crate) fn start(&mut self, phone_id: &str, phone_name: &str, code: String, now: Instant) -> Result<(), StartError> {
-        if self.locked_until.is_some_and(|t| now < t) {
-            return Err(StartError::Locked);
-        }
-        if self.live(now).is_some_and(|p| p.phone_id != phone_id) {
-            return Err(StartError::Busy);
-        }
-        if self.last_start.is_some_and(|t| now.duration_since(t) < START_COOLDOWN) {
-            return Err(StartError::TooSoon);
-        }
-        self.last_start = Some(now);
-        self.pending = Some(Pending {
-            phone_id: phone_id.into(),
-            phone_name: phone_name.into(),
-            code,
-            expires: now + CODE_TTL,
-            attempts: 0,
-        });
-        Ok(())
+    /// A new QR code; whatever was on screen before is void. Returns its generation.
+    pub(crate) fn begin(&mut self, secret: [u8; 32], now: Instant) -> u64 {
+        self.generation += 1;
+        self.pending = Some(Pending { secret, expires: now + QR_TTL, nonces: VecDeque::new(), wrong: 0 });
+        self.generation
     }
 
-    /// Every wrong try counts, whichever phone_id it claims. Ok(phone name).
-    pub(crate) fn confirm(&mut self, phone_id: &str, code: &str, now: Instant) -> Result<String, ConfirmError> {
+    /// Hands out `nonce` if a QR code is on screen.
+    pub(crate) fn hello(&mut self, nonce: String, now: Instant) -> bool {
+        let Some(p) = self.live(now) else { return false };
+        if p.nonces.len() == MAX_NONCES {
+            p.nonces.pop_front();
+        }
+        p.nonces.push_back(nonce);
+        true
+    }
+
+    /// The nonce is spent whatever the outcome. Ok(server_proof); the QR code
+    /// is used up.
+    pub(crate) fn confirm(&mut self, phone_id: &str, nonce: &str, claimed: &[u8], now: Instant) -> Result<[u8; 32], ConfirmError> {
         let Some(p) = self.live(now) else { return Err(ConfirmError::NoPairing) };
-        let right = same_bytes(p.code.as_bytes(), code.as_bytes()) & same_bytes(p.phone_id.as_bytes(), phone_id.as_bytes());
-        if !right {
-            p.attempts += 1;
-            let left = MAX_ATTEMPTS.saturating_sub(p.attempts);
+        let Some(at) = p.nonces.iter().position(|n| n == nonce) else { return Err(ConfirmError::UnknownNonce) };
+        p.nonces.remove(at);
+        if !same_bytes(&proof(&p.secret, "phone", nonce, phone_id), claimed) {
+            p.wrong += 1;
+            let left = MAX_WRONG.saturating_sub(p.wrong);
             if left == 0 {
                 self.pending = None;
-                self.locked_until = Some(now + LOCKOUT);
             }
-            return Err(ConfirmError::WrongCode { attempts_left: left });
+            return Err(ConfirmError::WrongProof { tries_left: left });
         }
-        Ok(self.pending.take().map(|p| p.phone_name).unwrap_or_default())
-    }
-
-    fn cancel(&mut self) {
+        let server = proof(&p.secret, "pa", nonce, phone_id);
         self.pending = None;
+        Ok(server)
     }
 
-    /// What the settings window shows: (phone name, code, seconds left).
-    fn status(&mut self, now: Instant) -> Option<(String, String, u64)> {
-        self.live(now)
-            .map(|p| (p.phone_name.clone(), p.code.clone(), p.expires.saturating_duration_since(now).as_secs()))
+    /// Takes QR code `generation` off screen; false if it is gone already.
+    fn cancel(&mut self, generation: u64) -> bool {
+        if generation != self.generation || self.pending.is_none() {
+            return false;
+        }
+        self.pending = None;
+        true
     }
 }
 
-static PAIRING: Mutex<Pairing> = Mutex::new(Pairing { pending: None, last_start: None, locked_until: None });
+static PAIRING: Mutex<Pairing> = Mutex::new(Pairing { pending: None, generation: 0 });
 
-fn new_code() -> String {
-    // 32 bits mod 10^6: bias below 0.03 %.
-    format!("{:06}", u32::from_le_bytes(random_bytes::<4>()) % 1_000_000)
+/// The port the API server listens on (0 until it is up).
+static PORT: AtomicU16 = AtomicU16::new(0);
+
+pub fn set_port(port: u16) {
+    PORT.store(port, Ordering::Release);
 }
 
 fn valid_id(id: &str) -> bool {
@@ -219,6 +236,53 @@ fn clean_name(name: &str) -> Option<String> {
     let name: String = name.chars().filter(|c| !c.is_control()).take(NAME_MAX).collect();
     let name = name.trim();
     (!name.is_empty()).then(|| name.to_string())
+}
+
+/// 10/8, 172.16/12 and 192.168/16, each once, in the order given.
+fn lan_addresses(ips: impl IntoIterator<Item = Ipv4Addr>) -> Vec<Ipv4Addr> {
+    let mut out: Vec<Ipv4Addr> = Vec::new();
+    for ip in ips {
+        if ip.is_private() && !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    out
+}
+
+fn local_lan_addresses() -> Vec<Ipv4Addr> {
+    let ips = if_addrs::get_if_addrs().unwrap_or_else(|e| {
+        eprintln!("[pair] listing network interfaces failed: {e}");
+        Vec::new()
+    });
+    lan_addresses(ips.into_iter().filter(|i| !i.is_loopback()).filter_map(|i| match i.ip() {
+        std::net::IpAddr::V4(ip) => Some(ip),
+        _ => None,
+    }))
+}
+
+fn pair_uri(pa_id: &str, secret: &[u8], hosts: &[Ipv4Addr], port: u16) -> String {
+    let hosts: Vec<String> = hosts.iter().map(|ip| format!("{ip}:{port}")).collect();
+    format!("pocketagent://pair?v=1&id={pa_id}&s={}&h={}", URL_SAFE_NO_PAD.encode(secret), hosts.join(","))
+}
+
+/// Dark modules as one path, 4-module quiet zone, scales to its box.
+fn qr_svg(text: &str) -> Result<String, String> {
+    use qrcodegen::{QrCode, QrCodeEcc};
+    let qr = QrCode::encode_text(text, QrCodeEcc::Medium).map_err(|e| e.to_string())?;
+    let (n, border) = (qr.size(), 4);
+    let mut path = String::new();
+    for y in 0..n {
+        for x in 0..n {
+            if qr.get_module(x, y) {
+                path.push_str(&format!("M{},{}h1v1h-1z", x + border, y + border));
+            }
+        }
+    }
+    let side = n + border * 2;
+    Ok(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {side} {side}\" shape-rendering=\"crispEdges\">\
+         <rect width=\"100%\" height=\"100%\" fill=\"#fff\"/><path d=\"{path}\" fill=\"#000\"/></svg>"
+    ))
 }
 
 // ── Paired phones and their sockets ──────────────────────────────────────────
@@ -360,15 +424,11 @@ fn issue_token(phone_id: &str, name: &str) -> Result<String, String> {
 // ── HTTP ─────────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct StartRequest {
-    phone_id: String,
-    phone_name: String,
-}
-
-#[derive(Deserialize)]
 pub struct ConfirmRequest {
     phone_id: String,
-    code: String,
+    phone_name: String,
+    nonce: String,
+    proof: String,
 }
 
 fn fail(status: StatusCode, error: &str) -> (StatusCode, Json<Value>) {
@@ -379,42 +439,41 @@ fn changed(app: &AppHandle) {
     let _ = app.emit(PAIRING_CHANGED, ());
 }
 
-pub async fn pair_start(State(state): State<Arc<ServerState>>, Json(body): Json<StartRequest>) -> (StatusCode, Json<Value>) {
-    let (Some(name), true) = (clean_name(&body.phone_name), valid_id(&body.phone_id)) else {
-        return fail(StatusCode::BAD_REQUEST, "invalid phone_id or phone_name");
-    };
-    let started = lock(&PAIRING).start(&body.phone_id, &name, new_code(), Instant::now());
-    match started {
-        Err(StartError::Busy) => return fail(StatusCode::CONFLICT, "another phone is pairing"),
-        Err(StartError::TooSoon) => return fail(StatusCode::TOO_MANY_REQUESTS, "try again in a few seconds"),
-        Err(StartError::Locked) => {
-            return fail(StatusCode::TOO_MANY_REQUESTS, "too many wrong codes; try again in 5 minutes")
-        }
-        Ok(()) => {}
+fn ended(app: &AppHandle, generation: u64) {
+    let _ = app.emit(PAIRING_ENDED, json!({ "generation": generation }));
+}
+
+const NO_QR: &str = "no pairing QR code on screen";
+
+pub async fn pair_hello() -> (StatusCode, Json<Value>) {
+    let nonce = URL_SAFE_NO_PAD.encode(random_bytes::<16>());
+    if !lock(&PAIRING).hello(nonce.clone(), Instant::now()) {
+        return fail(StatusCode::GONE, NO_QR);
     }
-    eprintln!("[pair] {} asks to pair", name);
-    let app = state.app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        if let Err(e) = crate::commands::config::open_settings_window(app.clone()) {
-            eprintln!("[pair] settings window: {e}");
-        }
-        changed(&app);
-    });
     let (pa_id, pa_name) = identity();
-    (StatusCode::OK, Json(json!({ "ok": true, "pa_id": pa_id, "pa_name": pa_name, "expires_in": CODE_TTL.as_secs() })))
+    (StatusCode::OK, Json(json!({ "ok": true, "v": 1, "pa_id": pa_id, "pa_name": pa_name, "nonce": nonce })))
 }
 
 pub async fn pair_confirm(State(state): State<Arc<ServerState>>, Json(body): Json<ConfirmRequest>) -> (StatusCode, Json<Value>) {
-    let confirmed = lock(&PAIRING).confirm(&body.phone_id, &body.code, Instant::now());
-    let name = match confirmed {
-        Ok(name) => name,
-        Err(ConfirmError::NoPairing) => return fail(StatusCode::GONE, "no pairing in progress"),
-        Err(ConfirmError::WrongCode { attempts_left }) => {
-            eprintln!("[pair] wrong code ({attempts_left} tries left)");
-            if attempts_left == 0 {
-                changed(&state.app);
+    let (Some(name), true) = (clean_name(&body.phone_name), valid_id(&body.phone_id)) else {
+        return fail(StatusCode::BAD_REQUEST, "invalid phone_id or phone_name");
+    };
+    // Undecodable counts as a wrong proof, like any other.
+    let claimed = URL_SAFE_NO_PAD.decode(body.proof.as_bytes()).unwrap_or_default();
+    let (generation, confirmed) = {
+        let mut pairing = lock(&PAIRING);
+        (pairing.generation, pairing.confirm(&body.phone_id, &body.nonce, &claimed, Instant::now()))
+    };
+    let server_proof = match confirmed {
+        Ok(server_proof) => server_proof,
+        Err(ConfirmError::NoPairing) => return fail(StatusCode::GONE, NO_QR),
+        Err(ConfirmError::UnknownNonce) => return fail(StatusCode::FORBIDDEN, "unknown or used nonce"),
+        Err(ConfirmError::WrongProof { tries_left }) => {
+            eprintln!("[pair] wrong proof ({tries_left} tries left)");
+            if tries_left == 0 {
+                ended(&state.app, generation);
             }
-            return (StatusCode::FORBIDDEN, Json(json!({ "ok": false, "error": "wrong code", "attempts_left": attempts_left })));
+            return (StatusCode::FORBIDDEN, Json(json!({ "ok": false, "error": "wrong proof", "tries_left": tries_left })));
         }
     };
     let issued = {
@@ -422,12 +481,15 @@ pub async fn pair_confirm(State(state): State<Arc<ServerState>>, Json(body): Jso
         let name = name.clone();
         tauri::async_runtime::spawn_blocking(move || issue_token(&phone_id, &name)).await
     };
+    // By now the settings window may show a newer QR code: the generation spares it.
+    ended(&state.app, generation);
     changed(&state.app);
     match issued.map_err(|e| e.to_string()).and_then(|r| r) {
         Ok(token) => {
             eprintln!("[pair] {} paired", name);
             let (pa_id, pa_name) = identity();
-            (StatusCode::OK, Json(json!({ "ok": true, "pa_id": pa_id, "pa_name": pa_name, "token": token })))
+            let server_proof = URL_SAFE_NO_PAD.encode(server_proof);
+            (StatusCode::OK, Json(json!({ "ok": true, "pa_id": pa_id, "pa_name": pa_name, "token": token, "server_proof": server_proof })))
         }
         Err(e) => {
             eprintln!("[pair] saving the pairing failed: {e}");
@@ -439,23 +501,34 @@ pub async fn pair_confirm(State(state): State<Arc<ServerState>>, Json(body): Jso
 // ── Settings window (desktop only: none of these are in remote::UI_COMMANDS) ─
 
 #[derive(Serialize)]
-pub struct PairingStatus {
-    phone_name: String,
-    code: String,
+pub struct PairingQr {
+    svg: String,
     expires_in: u64,
+    generation: u64,
+}
+
+/// A fresh QR code (the previous one is void).
+#[tauri::command]
+pub fn start_pairing() -> Result<PairingQr, String> {
+    let port = PORT.load(Ordering::Acquire);
+    if port == 0 {
+        return Err("api server not running".into());
+    }
+    let hosts = local_lan_addresses();
+    if hosts.is_empty() {
+        return Err("no LAN address".into());
+    }
+    let secret = random_bytes::<32>();
+    let svg = qr_svg(&pair_uri(&identity().0, &secret, &hosts, port))?;
+    let generation = lock(&PAIRING).begin(secret, Instant::now());
+    Ok(PairingQr { svg, expires_in: QR_TTL.as_secs(), generation })
 }
 
 #[tauri::command]
-pub fn pairing_status() -> Option<PairingStatus> {
-    lock(&PAIRING)
-        .status(Instant::now())
-        .map(|(phone_name, code, expires_in)| PairingStatus { phone_name, code, expires_in })
-}
-
-#[tauri::command]
-pub fn cancel_pairing(app: AppHandle) {
-    lock(&PAIRING).cancel();
-    changed(&app);
+pub fn cancel_pairing(app: AppHandle, generation: u64) {
+    if lock(&PAIRING).cancel(generation) {
+        ended(&app, generation);
+    }
 }
 
 #[derive(Serialize)]
@@ -488,83 +561,160 @@ pub async fn remove_paired_phone(app: AppHandle, phone_id: String) -> Result<boo
 mod tests {
     use super::*;
 
-    fn started(code: &str, now: Instant) -> Pairing {
+    const SECRET: [u8; 32] = [7u8; 32];
+
+    fn shown(now: Instant) -> Pairing {
         let mut p = Pairing::default();
-        p.start("phone-a", "Pixel 2", code.into(), now).unwrap();
+        p.begin(SECRET, now);
         p
     }
 
-    #[test]
-    fn the_right_code_pairs_once() {
-        let now = Instant::now();
-        let mut p = started("123456", now);
-        assert_eq!(p.confirm("phone-a", "123456", now), Ok("Pixel 2".into()));
-        assert_eq!(p.confirm("phone-a", "123456", now), Err(ConfirmError::NoPairing), "a code is single-use");
+    fn hello(p: &mut Pairing, nonce: &str, now: Instant) {
+        assert!(p.hello(nonce.into(), now), "a QR code is on screen");
+    }
+
+    fn phone_proof(nonce: &str, phone_id: &str) -> [u8; 32] {
+        proof(&SECRET, "phone", nonce, phone_id)
     }
 
     #[test]
-    fn the_code_expires_after_two_minutes() {
-        let now = Instant::now();
-        let mut p = started("123456", now);
-        assert!(p.status(now + CODE_TTL - Duration::from_secs(1)).is_some());
-        assert_eq!(p.confirm("phone-a", "123456", now + CODE_TTL), Err(ConfirmError::NoPairing));
-        assert!(p.status(now + CODE_TTL).is_none(), "the panel closes too");
+    fn hmac_matches_rfc_4231() {
+        // Test cases 1, 2 and 6 (key longer than the block).
+        let hx = |b: &[u8]| hex(b);
+        assert_eq!(hx(&hmac_sha256(&[0x0b; 20], b"Hi There")), "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+        assert_eq!(hx(&hmac_sha256(b"Jefe", b"what do ya want for nothing?")), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+        assert_eq!(
+            hx(&hmac_sha256(&[0xaa; 131], b"Test Using Larger Than Block-Size Key - Hash Key First")),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
     }
 
     #[test]
-    fn five_wrong_codes_void_it_and_the_sixth_try_is_refused() {
+    fn the_right_proof_pairs_once_and_proves_the_pa_back() {
         let now = Instant::now();
-        let mut p = started("123456", now);
-        for left in (0..MAX_ATTEMPTS).rev() {
-            assert_eq!(p.confirm("phone-a", "000000", now), Err(ConfirmError::WrongCode { attempts_left: left }));
+        let mut p = shown(now);
+        hello(&mut p, "n1", now);
+        hello(&mut p, "n2", now);
+        let server = p.confirm("phone-a", "n1", &phone_proof("n1", "phone-a"), now).unwrap();
+        assert_eq!(server, proof(&SECRET, "pa", "n1", "phone-a"));
+        assert_ne!(server, phone_proof("n1", "phone-a"), "the two directions differ");
+        assert_eq!(p.confirm("phone-a", "n2", &phone_proof("n2", "phone-a"), now), Err(ConfirmError::NoPairing), "single-use");
+        assert!(!p.hello("n3".into(), now), "and /pair/hello is gone again");
+    }
+
+    #[test]
+    fn no_qr_code_no_hello() {
+        let now = Instant::now();
+        let mut p = Pairing::default();
+        assert!(!p.hello("n".into(), now));
+        assert_eq!(p.confirm("phone-a", "n", &phone_proof("n", "phone-a"), now), Err(ConfirmError::NoPairing));
+    }
+
+    #[test]
+    fn the_qr_code_expires_after_two_minutes() {
+        let now = Instant::now();
+        let mut p = shown(now);
+        hello(&mut p, "n1", now + QR_TTL - Duration::from_secs(1));
+        assert_eq!(p.confirm("phone-a", "n1", &phone_proof("n1", "phone-a"), now + QR_TTL), Err(ConfirmError::NoPairing));
+        assert!(!p.hello("n2".into(), now + QR_TTL));
+    }
+
+    #[test]
+    fn a_new_qr_code_voids_the_old_one() {
+        let now = Instant::now();
+        let mut p = shown(now);
+        hello(&mut p, "n1", now);
+        p.begin([9u8; 32], now);
+        assert_eq!(p.confirm("phone-a", "n1", &phone_proof("n1", "phone-a"), now), Err(ConfirmError::UnknownNonce), "its nonces go too");
+        hello(&mut p, "n2", now);
+        assert_eq!(
+            p.confirm("phone-a", "n2", &phone_proof("n2", "phone-a"), now),
+            Err(ConfirmError::WrongProof { tries_left: MAX_WRONG - 1 }),
+            "the old secret no longer proves anything"
+        );
+        p.cancel(p.generation);
+        assert!(!p.hello("n3".into(), now), "cancel takes it off screen");
+    }
+
+    #[test]
+    fn a_late_end_of_an_old_qr_code_spares_the_new_one() {
+        // pair_confirm reads the generation in the lock, then waits for
+        // issue_token; meanwhile the user cancels and shows a new code.
+        let now = Instant::now();
+        let mut p = Pairing::default();
+        let old = p.begin(SECRET, now);
+        hello(&mut p, "n1", now);
+        let (ended_gen, confirmed) = (p.generation, p.confirm("phone-a", "n1", &phone_proof("n1", "phone-a"), now));
+        assert!(confirmed.is_ok());
+        assert_eq!(ended_gen, old);
+        assert!(!p.cancel(old), "already used: nothing to cancel, no second end");
+        let new = p.begin([9u8; 32], now);
+        assert!(new > old, "generations only go up");
+        // The old confirm resumes and emits pairing-ended { generation: old }:
+        assert_ne!(ended_gen, new, "the settings window keeps the new code");
+        assert!(!p.cancel(old), "a late cancel of the old code leaves the new one alone");
+        hello(&mut p, "n2", now); // and /pair/hello still answers 200
+        assert!(p.cancel(new));
+        assert!(!p.hello("n3".into(), now));
+    }
+
+    #[test]
+    fn nonces_are_single_use_and_at_most_eight() {
+        let now = Instant::now();
+        let mut p = shown(now);
+        for i in 0..=MAX_NONCES {
+            hello(&mut p, &format!("n{i}"), now);
         }
-        assert_eq!(p.confirm("phone-a", "123456", now), Err(ConfirmError::NoPairing), "even the right code: void");
-        assert!(p.status(now).is_none());
+        assert_eq!(p.confirm("phone-a", "n0", &phone_proof("n0", "phone-a"), now), Err(ConfirmError::UnknownNonce), "the oldest dropped off");
+        assert_eq!(p.confirm("phone-a", "n1", b"wrong", now), Err(ConfirmError::WrongProof { tries_left: 4 }));
+        assert_eq!(p.confirm("phone-a", "n1", &phone_proof("n1", "phone-a"), now), Err(ConfirmError::UnknownNonce), "spent even when wrong");
+        assert_eq!(p.confirm("phone-a", "never", &phone_proof("never", "phone-a"), now), Err(ConfirmError::UnknownNonce));
+        assert!(p.confirm("phone-a", "n8", &phone_proof("n8", "phone-a"), now).is_ok());
     }
 
     #[test]
-    fn a_voided_pairing_locks_new_ones_for_five_minutes() {
+    fn a_proof_is_bound_to_its_nonce_and_phone_id() {
         let now = Instant::now();
-        let mut p = started("123456", now);
-        for _ in 0..MAX_ATTEMPTS {
-            let _ = p.confirm("phone-a", "000000", now);
+        let mut p = shown(now);
+        hello(&mut p, "n1", now);
+        hello(&mut p, "n2", now);
+        assert_eq!(p.confirm("phone-b", "n1", &phone_proof("n1", "phone-a"), now), Err(ConfirmError::WrongProof { tries_left: 4 }));
+        assert_eq!(p.confirm("phone-a", "n2", &phone_proof("n1", "phone-a"), now), Err(ConfirmError::WrongProof { tries_left: 3 }));
+    }
+
+    #[test]
+    fn five_wrong_proofs_void_the_qr_code() {
+        let now = Instant::now();
+        let mut p = shown(now);
+        for left in (0..MAX_WRONG).rev() {
+            let n = format!("n{left}");
+            hello(&mut p, &n, now);
+            assert_eq!(p.confirm("phone-a", &n, &[0u8; 32], now), Err(ConfirmError::WrongProof { tries_left: left }));
         }
-        let later = now + START_COOLDOWN;
-        assert_eq!(p.start("phone-a", "Pixel 2", "1".into(), later), Err(StartError::Locked), "the same phone too");
-        assert_eq!(p.start("phone-b", "Other", "1".into(), later), Err(StartError::Locked));
-        p.cancel();
-        assert_eq!(p.start("phone-b", "Other", "1".into(), later), Err(StartError::Locked), "cancel does not unlock");
-        assert_eq!(p.start("phone-b", "Other", "1".into(), now + LOCKOUT), Ok(()));
+        assert!(!p.hello("n".into(), now), "void: even the right proof can no longer get a nonce");
     }
 
     #[test]
-    fn a_wrong_phone_id_counts_as_a_wrong_try() {
-        let now = Instant::now();
-        let mut p = started("123456", now);
-        assert_eq!(p.confirm("phone-b", "123456", now), Err(ConfirmError::WrongCode { attempts_left: 4 }));
-        assert_eq!(p.confirm("phone-a", "123456", now), Ok("Pixel 2".into()));
+    fn only_private_ipv4_addresses_go_into_the_qr_code() {
+        let ips = ["192.168.1.20", "127.0.0.1", "10.0.0.5", "172.16.3.4", "172.32.0.1", "169.254.1.1", "8.8.8.8", "192.168.1.20"];
+        let got = lan_addresses(ips.iter().map(|s| s.parse().unwrap()));
+        let want: Vec<Ipv4Addr> = ["192.168.1.20", "10.0.0.5", "172.16.3.4"].iter().map(|s| s.parse().unwrap()).collect();
+        assert_eq!(got, want);
     }
 
     #[test]
-    fn one_pairing_at_a_time_with_a_cooldown_between_starts() {
-        let now = Instant::now();
-        let mut p = started("123456", now);
-        let later = now + START_COOLDOWN;
-        assert_eq!(p.start("phone-b", "Other", "1".into(), later), Err(StartError::Busy));
-        assert_eq!(p.start("phone-a", "Pixel 2", "654321".into(), now + Duration::from_secs(1)), Err(StartError::TooSoon));
-        assert_eq!(p.start("phone-a", "Pixel 2", "654321".into(), later), Ok(()), "the same phone may retry");
-        assert_eq!(p.confirm("phone-a", "123456", later), Err(ConfirmError::WrongCode { attempts_left: 4 }), "the old code is void");
-        // Once it expires another phone may start.
-        assert_eq!(p.start("phone-b", "Other", "1".into(), later + CODE_TTL), Ok(()));
-    }
-
-    #[test]
-    fn codes_are_six_digits() {
-        for _ in 0..50 {
-            let c = new_code();
-            assert_eq!(c.len(), 6);
-            assert!(c.bytes().all(|b| b.is_ascii_digit()));
-        }
+    fn the_uri_carries_id_secret_and_every_address() {
+        let hosts: Vec<Ipv4Addr> = vec!["192.168.1.20".parse().unwrap(), "10.0.0.5".parse().unwrap()];
+        let uri = pair_uri("0f3a9c21-1111-4222-8333-444455556666", &[0xffu8; 32], &hosts, 8651);
+        assert_eq!(
+            uri,
+            format!(
+                "pocketagent://pair?v=1&id=0f3a9c21-1111-4222-8333-444455556666&s={}&h=192.168.1.20:8651,10.0.0.5:8651",
+                "_".repeat(42) + "8"
+            )
+        );
+        let svg = qr_svg(&uri).unwrap();
+        assert!(svg.starts_with("<svg") && svg.contains("<path d=\"M"));
     }
 
     #[test]
@@ -641,17 +791,17 @@ mod tests {
     }
 
     #[test]
-    fn no_http_reply_or_log_line_carries_the_code_or_token() {
-        // The handlers' JSON bodies and eprintln! lines name neither field.
+    fn no_http_reply_or_log_line_carries_a_secret() {
+        // Log lines and error texts name no secret, proof or token value.
         let src = include_str!("pairing.rs");
-        let handlers = &src[src.find("// ── HTTP").unwrap()..src.find("// ── Settings window").unwrap()];
-        for line in handlers.lines().filter(|l| l.contains("eprintln!")) {
-            assert!(!line.contains("code") || line.contains("wrong code"), "{line}");
-            assert!(!line.contains("token"), "{line}");
+        let code = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
+        for line in code.lines().filter(|l| l.contains("eprintln!") || l.contains("Err(format!")) {
+            for word in ["secret", "token}", "proof}", "nonce}", "uri", "svg"] {
+                assert!(!line.contains(word), "{line}");
+            }
         }
-        let start = &handlers[handlers.find("pub async fn pair_start").unwrap()..handlers.find("pub async fn pair_confirm").unwrap()];
-        assert!(!start.contains("\"code\""), "/pair/start never returns the code");
-        let confirm = &handlers[handlers.find("pub async fn pair_confirm").unwrap()..];
-        assert!(!confirm.contains("\"code\""), "/pair/confirm never echoes the code");
+        let hello = &code[code.find("pub async fn pair_hello").unwrap()..code.find("pub async fn pair_confirm").unwrap()];
+        assert!(!hello.contains("secret"), "/pair/hello never touches the secret");
+        assert!(!code.contains("\"secret\""), "no reply carries the secret");
     }
 }

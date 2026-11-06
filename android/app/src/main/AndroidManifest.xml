@@ -10,8 +10,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <!-- Discovery.kt: some Wi-Fi drivers drop the mDNS replies without a multicast lock. -->
-    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <!-- Cleartext: PA serves http/ws on the LAN only (8650 is never exposed to the internet). -->
     <application
