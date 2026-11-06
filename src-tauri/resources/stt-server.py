@@ -745,11 +745,17 @@ def _kws_verify(samples, speaker):
     if not NAME_RE.fullmatch(speaker) or not ref_path.is_file() or len(samples) < 8000:
         return 0.0
     ref = np.frombuffer(ref_path.read_bytes(), dtype=np.float32)
-    with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+    # Closed before wave and the embedder reopen it: Windows refuses a second
+    # open of a NamedTemporaryFile that is still open.
+    f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    f.close()
+    try:
         with wave.open(f.name, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
             w.writeframes((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
         embedding = _extract_embedding_from_wav(f.name)
+    finally:
+        os.unlink(f.name)
     if ref.shape != embedding.shape:
         return 0.0
     norm = float(np.linalg.norm(ref) * np.linalg.norm(embedding))
