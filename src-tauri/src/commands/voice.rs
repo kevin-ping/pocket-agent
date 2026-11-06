@@ -557,7 +557,17 @@ pub async fn stop_enroll_recording(
 
     let wav_path = tokio::task::spawn_blocking(move || stop_recording_no_handle())
         .await
-        .map_err(|e| format!("停止录音失败: {}", e))??;
+        .map_err(|e| format!("停止录音失败: {}", e))?
+        // The wake settings page shows only coded errors; a silent mic is one
+        // the user can fix, so give it a code instead of "wake service error".
+        .map_err(|e| {
+            if e.starts_with(crate::voice::record::SILENT_RECORDING) {
+                eprintln!("[voice] enroll recording is pure silence");
+                crate::voice::sherpa_wake::wake_error("wake_mic_silent", serde_json::json!({}))
+            } else {
+                e
+            }
+        })?;
 
     let path_clone = wav_path.clone();
     let duration_secs = tokio::task::spawn_blocking(move || wav_duration_secs(&path_clone))

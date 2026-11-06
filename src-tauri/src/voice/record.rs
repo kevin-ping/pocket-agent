@@ -279,6 +279,11 @@ const SOUND_INPUT_SETTINGS: &str = "设置 → 系统 → 声音 → 输入";
 #[cfg(windows)]
 const WINDOWS_MIC_PRIVACY_HINT: &str = "如果是 Windows 隐私设置挡住了麦克风：打开「设置 → 隐私(Windows 11 为「隐私和安全性」)→ 麦克风」，打开「允许桌面应用访问你的麦克风」，然后再按一次录音键。";
 
+/// Start of the error for a recording of pure zeros (wrong input device,
+/// muted, or blocked by Windows privacy settings).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const SILENT_RECORDING: &str = "录到的是完全无声的音频：可能选错了输入设备、麦克风被静音，或被系统挡住。请在「设置 → 系统 → 声音 → 输入」中选择正在使用的麦克风。";
+
 /// `message` plus, on Windows, the privacy-settings hint.
 fn with_privacy_hint(message: String) -> String {
     #[cfg(windows)]
@@ -535,9 +540,7 @@ fn stop_recording_internal() -> Result<String, String> {
     #[cfg(windows)]
     if let Ok(path) = &result {
         if is_digital_silence(Path::new(path)) {
-            return Err(format!(
-                "录到的是完全无声的音频：麦克风可能被静音，或被系统挡住。{WINDOWS_MIC_PRIVACY_HINT}"
-            ));
+            return Err(format!("{SILENT_RECORDING}{WINDOWS_MIC_PRIVACY_HINT}"));
         }
     }
     result
