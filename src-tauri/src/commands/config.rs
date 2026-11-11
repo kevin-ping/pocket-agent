@@ -351,7 +351,7 @@ pub(crate) fn default_avatar_bg_colors() -> BTreeMap<String, String> {
 }
 
 fn default_wake_word_threshold() -> f32 {
-    0.5
+    0.35
 }
 
 impl Default for AppConfig {

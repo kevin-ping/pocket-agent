@@ -217,7 +217,7 @@ pub fn start_conversation(
     let speech_threshold = speech_rms_threshold
         .unwrap_or(SPEECH_RMS_THRESHOLD)
         .clamp(0.003, 0.030);
-    let wake_threshold = wake_word_threshold.unwrap_or(0.5).clamp(0.1, 1.0);
+    let wake_threshold = wake_word_threshold.unwrap_or(0.35).clamp(0.1, 1.0);
     let app_clone = app.clone();
 
     std::thread::Builder::new()

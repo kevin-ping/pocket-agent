@@ -139,7 +139,7 @@ def validate_config(config):
     if not 2 <= len(phrase) <= 48 or not re.fullmatch(r'[A-Za-z\u4e00-\u9fff ]+', phrase):
         raise WakeError('wake_phrase_invalid', 'Use 2–48 Chinese or English characters and spaces for the wake phrase.')
     threshold = config.get('kws_threshold', 0.25)
-    speaker_threshold = config.get('speaker_threshold', 0.5)
+    speaker_threshold = config.get('speaker_threshold', 0.35)
     if (not isinstance(threshold, (int, float)) or not math.isfinite(threshold)
             or not 0.05 <= threshold <= 0.9):
         raise ValueError('Invalid keyword threshold')

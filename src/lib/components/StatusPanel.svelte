@@ -108,7 +108,7 @@
     box-sizing: border-box;
     max-height: 88px;
     overflow-y: auto;
-    overscroll-behavior: contain;
+    overscroll-behavior-y: contain;
     scrollbar-width: thin;
     scrollbar-color: rgba(160, 168, 255, 0.25) transparent;
   }

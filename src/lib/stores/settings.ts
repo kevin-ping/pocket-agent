@@ -84,7 +84,7 @@ export const SETTINGS_DEFAULTS: AppSettings = {
   barge_in_enabled: true,
   skip_interrupt_confirmation: true,
   wake_word_enabled: false,
-  wake_word_threshold: 0.5,
+  wake_word_threshold: 0.35,
   wake_phrase: "",
   wake_kws_threshold: 0.25,
   wake_owner_only: true,
