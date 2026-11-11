@@ -557,21 +557,21 @@ Right now (as of this message) Pocket Agent is on this computer; its phone app i
 const PHONE_GONE_HINT: &str = "
 Right now (as of this message) Pocket Agent is on this computer; its phone app is not connected.";
 const PHONE_LIVE_STATE: &str = " This is the live state at this message and can change between turns (for example when the user opens or closes the phone app); it is authoritative, and anything said earlier in this conversation about which device Pocket Agent is on may be out of date.";
-/// Only when Hermes can reach PA's MCP server (BUG-MCP1, api/mcp_status.rs).
+/// Unless PA knows Hermes can't reach its MCP server (BUG-MCP3, api/mcp_status.rs).
 const PHONE_SWITCH_TOOL: &str = " The switch_device tool (pocket_agent MCP server) moves Pocket Agent between the phone and this computer.";
-/// Otherwise PA can't tell whether Hermes has the tool, so it states only what is certain.
+/// Only on a definite no; Hermes may still re-enable the server itself, so it states only what is certain.
 const PHONE_SWITCH_BY_HAND: &str = " The user can switch by hand in the phone app: Connect next to this computer in its device list moves Pocket Agent to the phone, Move to computer on the phone screen moves it back.";
 
 /// `phone_ui`: a /ui page is attached; `seen`: the phone app connected at some point in this run;
-/// `mcp_ready`: Hermes has PA's MCP tools.
-fn phone_device_hint(phone_ui: bool, parked: bool, seen: bool, mcp_ready: bool) -> String {
+/// `mcp_usable`: Hermes may have PA's MCP tools (false only on a definite no).
+fn phone_device_hint(phone_ui: bool, parked: bool, seen: bool, mcp_usable: bool) -> String {
     let state = match (phone_ui, parked) {
         (true, false) => PHONE_DRIVING_HINT,
         (true, true) => PHONE_PARKED_HINT,
         (false, _) if seen || parked => PHONE_GONE_HINT,
         (false, _) => return String::new(),
     };
-    let switch = if mcp_ready { PHONE_SWITCH_TOOL } else { PHONE_SWITCH_BY_HAND };
+    let switch = if mcp_usable { PHONE_SWITCH_TOOL } else { PHONE_SWITCH_BY_HAND };
     format!("{state}{PHONE_LIVE_STATE}{switch}")
 }
 
@@ -1231,7 +1231,7 @@ pub async fn send_message(
         crate::api::remote::ui_attached(),
         crate::voice::remote::is_parked(),
         crate::api::remote::phone_seen(),
-        crate::api::mcp_status::mcp_ready(),
+        crate::api::mcp_status::mcp_usable(),
     ));
     if fixed.is_empty() {
         hint.push_str("
@@ -1695,7 +1695,7 @@ mod tests {
     }
 
     #[test]
-    fn phone_device_hint_offers_switch_device_only_when_hermes_has_it() {
+    fn phone_device_hint_offers_switch_device_unless_hermes_cannot_have_it() {
         for (ui, parked, seen) in [(true, false, true), (true, true, true), (false, false, true)] {
             let with = phone_device_hint(ui, parked, seen, true);
             let without = phone_device_hint(ui, parked, seen, false);

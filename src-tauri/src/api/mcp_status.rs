@@ -102,8 +102,13 @@ pub fn mcp_status() -> McpStatus {
     decide(EVIDENCE.load(Ordering::Acquire), config)
 }
 
-pub fn mcp_ready() -> bool {
-    mcp_status() == McpStatus::Ready
+/// Hermes may have PA's MCP tools: only a definite no rules them out (BUG-MCP3).
+pub fn mcp_usable() -> bool {
+    usable(&mcp_status())
+}
+
+fn usable(status: &McpStatus) -> bool {
+    !matches!(status, McpStatus::NotRegistered { .. } | McpStatus::Rejected | McpStatus::ServerDown { .. })
 }
 
 /// Async: it reads files, so it stays off the main thread.
@@ -377,5 +382,16 @@ mod tests {
         assert_eq!(decide(REJECTED, Config::Registered), McpStatus::Rejected);
         assert_eq!(decide(SEEN, Config::Unknown(REMOTE_GATEWAY)), McpStatus::Ready);
         assert_eq!(decide(NO_EVIDENCE, Config::Unknown(MANY_PROFILES)), McpStatus::Unknown { reason: MANY_PROFILES });
+    }
+
+    #[test]
+    fn only_a_definite_no_rules_the_tools_out() {
+        assert!(usable(&McpStatus::Ready));
+        for reason in [REMOTE_GATEWAY, NOT_HERMES, NO_PROFILE, MANY_PROFILES, ENV_UNREADABLE, CONFIG_UNREADABLE, NOT_LOCAL_URL, SERVER_STARTING] {
+            assert!(usable(&McpStatus::Unknown { reason }), "{reason}: PA just doesn't know");
+        }
+        assert!(!usable(&McpStatus::NotRegistered { config: "/h/config.yaml".into() }));
+        assert!(!usable(&McpStatus::Rejected));
+        assert!(!usable(&McpStatus::ServerDown { port: 8650 }));
     }
 }
