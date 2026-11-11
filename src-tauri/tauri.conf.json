@@ -3,7 +3,7 @@
   "version": "0.3.3",
   "identifier": "com.hermes.pocket-agent",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run build && npm run dev",
     "beforeBuildCommand": "npm run build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
