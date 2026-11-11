@@ -54,7 +54,7 @@ export const PA_EMOTIONS = ['cheerful', 'excited', 'friendly', 'sad', 'angry', '
 export const MESH_AVATAR_EMOTIONS = ['happy', 'sad', 'angry', 'surprised', 'relaxed', 'neutral'] as const;
 
 export const AVATAR_BG_DEFAULTS: Record<string, string> = {
-  idle: '#6b8cff', listening: '#ff6b9d', thinking: '#ffd06b', speaking: '#6bffd0',
+  idle: '#002e7a', listening: '#ff6b9d', thinking: '#ffd06b', speaking: '#6bffd0',
 };
 
 export const SETTINGS_DEFAULTS: AppSettings = {

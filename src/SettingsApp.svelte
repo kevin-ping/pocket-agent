@@ -28,6 +28,7 @@
     type SettingsLang,
   } from './lib/settingsI18n';
   import { convLabelsLang } from './lib/i18n';
+  import { PRESET_AVATAR_IMAGE, PRESET_AVATAR_GIF } from './lib/avatarPresets';
   import { wakeErrorMessage, wakeSaveNotice } from './lib/wakeErrors';
 
   type Section = 'general' | 'avatar' | 'voice' | 'conversation' | 'interruption' | 'wake' | 'phones';
@@ -474,9 +475,9 @@
 
   function resetMeshView() {
     if (!local) return;
-    local.mesh_avatar_scale = 1;
-    local.mesh_avatar_offset_x = 0;
-    local.mesh_avatar_offset_y = 0;
+    local.mesh_avatar_scale = SETTINGS_DEFAULTS.mesh_avatar_scale;
+    local.mesh_avatar_offset_x = SETTINGS_DEFAULTS.mesh_avatar_offset_x;
+    local.mesh_avatar_offset_y = SETTINGS_DEFAULTS.mesh_avatar_offset_y;
   }
 
   function resetBgColors() {
@@ -638,18 +639,18 @@
             {/each}
           </section>
           <section class="card asset-grid">
-            <AssetCard title={text.staticAvatar} src={local.avatar_image} hint={text.imageHint}
+            <AssetCard title={text.staticAvatar} src={local.avatar_image ?? PRESET_AVATAR_IMAGE} builtin={!local.avatar_image} hint={text.imageHint}
               choose={() => chooseAsset('avatar_image')} remove={() => {
                 if (local) local.avatar_image = null;
                 avatarImageChanged = true;
               }}
-              chooseText={text.chooseImage} removeText={text.remove} />
-            <AssetCard title={text.animatedAvatar} src={local.avatar_gif} hint={text.imageHint}
+              chooseText={text.chooseImage} removeText={meshText.restore} builtinText={meshText.builtin} />
+            <AssetCard title={text.animatedAvatar} src={local.avatar_gif ?? PRESET_AVATAR_GIF} builtin={!local.avatar_gif} hint={text.imageHint}
               choose={() => chooseAsset('avatar_gif')} remove={() => {
                 if (local) local.avatar_gif = null;
                 avatarGifChanged = true;
               }}
-              chooseText={text.chooseImage} removeText={text.remove} />
+              chooseText={text.chooseImage} removeText={meshText.restore} builtinText={meshText.builtin} />
             <input bind:this={fileInput} hidden type="file" accept="image/jpeg,image/png,image/webp,image/gif" onchange={(e) => readAsset(e, 'avatar_image')} />
             <input bind:this={gifInput} hidden type="file" accept="image/gif" onchange={(e) => readAsset(e, 'avatar_gif')} />
           </section>
@@ -790,7 +791,8 @@
 <style>
   .mesh-card{margin-bottom:14px}.mesh-body{border:0;margin:0;padding:0;min-width:0}.mesh-body:disabled{opacity:.45}
   .mesh-preview{display:flex;align-items:center;gap:18px;padding:16px;border-bottom:1px solid #e8eaf0}
-  .mesh-circle{position:relative;width:76px;height:76px;flex-shrink:0;border-radius:50%;overflow:hidden;display:grid;place-items:center;color:#fff;font-weight:800}
+  /* Same 2px border as the main window's .avatar-circle, so MeshFace gets the same 72px box and offset */
+  .mesh-circle{position:relative;width:76px;height:76px;border:2px solid transparent;flex-shrink:0;border-radius:50%;overflow:hidden;display:grid;place-items:center;color:#fff;font-weight:800}
   .mesh-states{display:flex;flex-wrap:wrap;gap:6px}.mesh-states button.selected{background:#788cff22;border-color:#7589f4;color:#3a4566}
   .mesh-reset{display:flex;justify-content:flex-end;padding:8px 16px;border-bottom:1px solid #e8eaf0}
   .mesh-heading{padding:12px 16px 4px;font-size:11px;font-weight:600;color:#5a6178;border-top:1px solid #e8eaf0}

@@ -343,7 +343,7 @@ pub(crate) fn default_mesh_avatar_emotions() -> BTreeMap<String, String> {
 
 pub(crate) fn default_avatar_bg_colors() -> BTreeMap<String, String> {
     string_map(&[
-        ("idle", "#6b8cff"),
+        ("idle", "#002e7a"),
         ("listening", "#ff6b9d"),
         ("thinking", "#ffd06b"),
         ("speaking", "#6bffd0"),

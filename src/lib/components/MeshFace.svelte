@@ -26,15 +26,19 @@
   export let expressions: Record<string, string>;
   /** PA reply emotion → mesh emotion. */
   export let emotions: Record<string, string>;
-  /** Custom `.mavatar` as a data URI, or null for the bundled avatar. */
-  export let customSource: string | null = null;
+  /** Custom `.mavatar` as a data URI, null for the bundled avatar, undefined while still being read. */
+  export let customSource: string | null | undefined = undefined;
   export let status: 'loading' | 'ready' | 'failed' = 'loading';
   /** circle: the desktop's face close-up; fill: the whole picture, as large as the box allows, standing on its bottom edge (phone). */
   export let variant: 'circle' | 'fill' = 'circle';
 
   // Fixed same-origin path, kept even for custom files: <mesh-avatar> without src fetches a remote sample.
   const MESH_SRC = '/avatars/default.mavatar';
-  const SIZE = 96;
+  // Baseline framing at scale 1, offset 0. Since 0.3.2 it is the earlier 96px / (-12, -10)
+  // crop zoomed to 0.9 and moved down 5px; settings_repository converts older saved values.
+  const SIZE = 96 * 0.9;
+  const BASE_LEFT = -7.2;
+  const BASE_TOP = -0.2;
 
   let meshEl: MeshAvatarElement | null = null;
   let mouthFrame = 0;
@@ -57,10 +61,10 @@
     builtinGeneration += 1;
   }
 
-  // Scale around the face center so the default crop (left -12, top -10) stays put.
+  // Scale around the face center so the default crop stays put.
   $: size = SIZE * scale;
-  $: left = -12 + offsetX - (SIZE / 2) * (scale - 1);
-  $: top = -10 + offsetY - (SIZE / 2) * (scale - 1);
+  $: left = BASE_LEFT + offsetX - (SIZE / 2) * (scale - 1);
+  $: top = BASE_TOP + offsetY - (SIZE / 2) * (scale - 1);
 
   // The element renders at min(devicePixelRatio, 2) backing pixels per CSS pixel. On a 100%-scaled
   // display (most Windows PCs: DPR 1) the 1600px picture then drops to ~96 px through mipmaps and
@@ -135,6 +139,8 @@
 </script>
 
 <div class="mesh-face" class:fill aria-hidden="true" bind:clientWidth={boxW} bind:clientHeight={boxH}>
+  <!-- Created only once the source is known: a custom load() then replaces the queued `src` load. -->
+  {#if customSource !== undefined}
   {#key builtinGeneration}
   <mesh-avatar
     bind:this={meshEl}
@@ -150,6 +156,7 @@
     on:error={handleError}
   ></mesh-avatar>
   {/key}
+  {/if}
 </div>
 
 <style>

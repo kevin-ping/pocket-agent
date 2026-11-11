@@ -30,6 +30,11 @@ const PA_EMOTIONS: &[&str] = &[
     "cheerful", "excited", "friendly", "sad", "angry", "calm", "whisper", "serious",
 ];
 const MESH_EMOTIONS: &[&str] = &["happy", "sad", "angry", "surprised", "relaxed", "neutral"];
+// 0.3.2 moved the mesh avatar's baseline framing to the old one at this scale and
+// vertical offset; settings saved before then are converted once (see migrate_mesh_framing).
+const MESH_FRAMING_KEY: &str = "mesh_framing_v2";
+const MESH_FRAMING_SCALE: f64 = 0.9;
+const MESH_FRAMING_OFFSET_Y: i64 = 5;
 
 #[derive(Debug, Serialize)]
 pub struct SaveConfigResponse {
@@ -120,15 +125,22 @@ pub fn initialize(app: &AppHandle) -> Result<(), String> {
             [],
         )
         .map_err(|e| e.to_string())?;
+        // The legacy store has no mesh framing, so a new database is already in the new baseline.
+        tx.execute(
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES(?1,'1')",
+            [MESH_FRAMING_KEY],
+        )
+        .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| format!("commit settings migration: {e}"))?;
         return Ok(());
     }
 
     // Normalize existing databases on every schema-compatible startup. This
     // fills keys introduced by newer releases without returning to JSON.
-    let config = load_from_connection(&conn)?;
-    validate(&config)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    migrate_mesh_framing(&tx)?;
+    let config = load_from_connection(&tx)?;
+    validate(&config)?;
     write_config(&tx, &config)?;
     tx.commit().map_err(|e| e.to_string())
 }
@@ -206,6 +218,49 @@ pub fn delete_asset(key: &str) -> Result<u64, String> {
     conn.execute("DELETE FROM assets WHERE key=?1", [key])
         .map_err(|e| e.to_string())?;
     bump_revision(&conn)
+}
+
+/// Convert saved mesh scale / offsets from the pre-0.3.2 baseline so the avatar looks
+/// the same: scale ÷ 0.9, vertical offset − 5, clamped to the allowed ranges. Runs once.
+fn migrate_mesh_framing(conn: &Connection) -> Result<(), String> {
+    let done = conn
+        .query_row("SELECT 1 FROM metadata WHERE key=?1", [MESH_FRAMING_KEY], |_| Ok(()))
+        .optional()
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if done {
+        return Ok(());
+    }
+    let read = |key: &str| -> Result<Option<Value>, String> {
+        conn.query_row("SELECT value_json FROM settings WHERE key=?1", [key], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+        .map_err(|e| e.to_string())?
+        .map(|raw| serde_json::from_str(&raw).map_err(|e| format!("invalid setting {key}: {e}")))
+        .transpose()
+    };
+    let now = Local::now().to_rfc3339();
+    let write = |key: &str, value: Value| {
+        conn.execute(
+            "UPDATE settings SET value_json=?2, updated_at=?3 WHERE key=?1",
+            params![key, value.to_string(), now],
+        )
+        .map_err(|e| format!("write setting: {e}"))
+    };
+    if let Some(scale) = read("mesh_avatar_scale")?.and_then(|v| v.as_f64()) {
+        let scale = ((scale / MESH_FRAMING_SCALE * 100.0).round() / 100.0).clamp(0.5, 2.0);
+        write("mesh_avatar_scale", scale.into())?;
+    }
+    if let Some(y) = read("mesh_avatar_offset_y")?.and_then(|v| v.as_i64()) {
+        write("mesh_avatar_offset_y", (y - MESH_FRAMING_OFFSET_Y).clamp(-40, 40).into())?;
+    }
+    conn.execute(
+        "INSERT OR REPLACE INTO metadata(key,value) VALUES(?1,'1')",
+        [MESH_FRAMING_KEY],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn load_from_connection(conn: &Connection) -> Result<AppConfig, String> {
@@ -644,7 +699,7 @@ mod tests {
         initialize_schema(&conn).unwrap();
         let loaded = load_from_connection(&conn).unwrap();
         assert_eq!(loaded.avatar_bg_colors, AppConfig::default().avatar_bg_colors);
-        assert_eq!(loaded.avatar_bg_colors["idle"], "#6b8cff");
+        assert_eq!(loaded.avatar_bg_colors["idle"], "#002e7a");
 
         let mut config = AppConfig::default();
         config.avatar_bg_colors.insert("idle".into(), "#123abc".into());
@@ -670,6 +725,7 @@ mod tests {
         assert!(loaded.mesh_avatar_enabled);
         assert_eq!(loaded.mesh_avatar_scale, d.mesh_avatar_scale);
         assert_eq!(loaded.mesh_avatar_offset_x, 0);
+        assert_eq!(loaded.mesh_avatar_offset_y, d.mesh_avatar_offset_y);
         assert_eq!(loaded.mesh_avatar_expressions, d.mesh_avatar_expressions);
         assert_eq!(loaded.mesh_avatar_emotions, d.mesh_avatar_emotions);
         assert!(validate(&loaded).is_ok());
@@ -692,6 +748,47 @@ mod tests {
         assert_eq!(loaded.mesh_avatar_scale, 1.5);
         assert_eq!(loaded.mesh_avatar_offset_x, -12);
         assert_eq!(loaded.mesh_avatar_expressions["listening"], "smile");
+    }
+
+    #[test]
+    fn mesh_framing_is_converted_once_to_the_new_baseline() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize_schema(&conn).unwrap();
+        let mut config = AppConfig::default();
+        config.mesh_avatar_scale = 0.9;
+        config.mesh_avatar_offset_x = 7;
+        config.mesh_avatar_offset_y = 5;
+        let tx = conn.transaction().unwrap();
+        write_config(&tx, &config).unwrap();
+        tx.commit().unwrap();
+
+        migrate_mesh_framing(&conn).unwrap();
+        let loaded = load_from_connection(&conn).unwrap();
+        assert_eq!(loaded.mesh_avatar_scale, 1.0);
+        assert_eq!(loaded.mesh_avatar_offset_x, 7);
+        assert_eq!(loaded.mesh_avatar_offset_y, 0);
+
+        // A second startup leaves converted values alone.
+        migrate_mesh_framing(&conn).unwrap();
+        assert_eq!(load_from_connection(&conn).unwrap().mesh_avatar_offset_y, 0);
+    }
+
+    #[test]
+    fn mesh_framing_conversion_clamps_to_the_allowed_ranges() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize_schema(&conn).unwrap();
+        let mut config = AppConfig::default();
+        config.mesh_avatar_scale = 2.0;
+        config.mesh_avatar_offset_y = -38;
+        let tx = conn.transaction().unwrap();
+        write_config(&tx, &config).unwrap();
+        tx.commit().unwrap();
+
+        migrate_mesh_framing(&conn).unwrap();
+        let loaded = load_from_connection(&conn).unwrap();
+        assert_eq!(loaded.mesh_avatar_scale, 2.0);
+        assert_eq!(loaded.mesh_avatar_offset_y, -40);
+        assert!(validate(&loaded).is_ok());
     }
 
     fn octet_uri(data: &[u8]) -> String {
