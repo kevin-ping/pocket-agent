@@ -33,6 +33,11 @@
   type Section = 'general' | 'avatar' | 'voice' | 'conversation' | 'interruption' | 'wake' | 'phones';
   type PairingQr = { svg: string; expires_in: number; generation: number };
   type PairedPhone = { phone_id: string; name: string; created_at: string; last_seen_at: string | null; online: boolean };
+  type McpStatus =
+    | { state: 'ready' | 'rejected' }
+    | { state: 'not_registered'; config: string }
+    | { state: 'server_down'; port: number }
+    | { state: 'unknown'; reason: string };
   type SaveResponse = { config: AppSettings; revision: number; wake_error?: string };
   type WakeModelStatus = { ready: boolean; error?: { code: string; params: Record<string, string> } | null };
   type SettingsBootstrap = { config?: AppSettings; error?: string };
@@ -125,6 +130,28 @@
       pairedPhones = await invoke<PairedPhone[]>('list_paired_phones');
     } catch (e) {
       console.warn('[settings] phones:', e);
+    }
+  }
+  // Phone / MCP status (BUG-MCP2): read when the Devices section opens or on demand.
+  let mcpStatus = $state<McpStatus | null>(null);
+  async function refreshMcp() {
+    if (!isTauri) return;
+    try {
+      mcpStatus = await invoke<McpStatus>('get_mcp_status');
+    } catch (e) {
+      console.warn('[settings] mcp status:', e);
+    }
+  }
+  $effect(() => {
+    if (active === 'phones') void refreshMcp();
+  });
+  function mcpText(status: McpStatus): string {
+    switch (status.state) {
+      case 'ready': return phoneText.mcpReady;
+      case 'rejected': return phoneText.mcpRejected;
+      case 'not_registered': return phoneText.mcpNotRegistered(status.config);
+      case 'server_down': return phoneText.mcpServerDown(status.port);
+      case 'unknown': return phoneText.mcpUnknown;
     }
   }
   function closeQr() {
@@ -709,6 +736,17 @@
               </div>
             {/if}
           </section>
+          {#if mcpStatus}
+            <section class="card mcp-card">
+              <div class="sample">
+                <div>
+                  <strong>{phoneText.mcpTitle}</strong>
+                  <p class:mcp-ok={mcpStatus.state === 'ready'} class:mcp-bad={mcpStatus.state !== 'ready'} role="status">{mcpText(mcpStatus)}</p>
+                </div>
+                <button class="ghost" onclick={refreshMcp}>{phoneText.mcpCheck}</button>
+              </div>
+            </section>
+          {/if}
           <section class="card">
             <p class="mesh-heading">{phoneText.paired}</p>
             {#each pairedPhones as phone (phone.phone_id)}
@@ -758,6 +796,7 @@
   .mesh-heading{padding:12px 16px 4px;font-size:11px;font-weight:600;color:#5a6178;border-top:1px solid #e8eaf0}
   .mesh-advanced{border-top:1px solid #e8eaf0}.mesh-advanced summary{padding:12px 16px;font-size:11px;font-weight:600;color:#5a6178;cursor:pointer}
   .wake-help { color: var(--muted, #64748b); font-size: 13px; line-height: 1.6; margin: 8px 16px 16px; }
+  .mcp-card{margin:14px 0}.mcp-card button{white-space:nowrap;flex-shrink:0}.mcp-card .sample p{font-size:11px;line-height:1.5;word-break:break-word}.mcp-card .sample p.mcp-ok{color:#1a9d63}.mcp-card .sample p.mcp-bad{color:#c2410c}
   :global {
   :global(*){box-sizing:border-box} :global(html,body,#app){margin:0;width:100%;height:100%;overflow:hidden}
   :global(body){font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei UI",sans-serif;background:#f4f5f9;color:#1e2235;-webkit-font-smoothing:antialiased}

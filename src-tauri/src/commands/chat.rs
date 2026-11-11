@@ -556,17 +556,23 @@ const PHONE_PARKED_HINT: &str = "
 Right now (as of this message) Pocket Agent is on this computer; its phone app is connected and on standby.";
 const PHONE_GONE_HINT: &str = "
 Right now (as of this message) Pocket Agent is on this computer; its phone app is not connected.";
-const PHONE_LIVE_STATE: &str = " This is the live state at this message and can change between turns (for example when the user opens or closes the phone app); it is authoritative, and anything said earlier in this conversation about which device Pocket Agent is on may be out of date. The switch_device tool (pocket_agent MCP server) moves Pocket Agent between the phone and this computer.";
+const PHONE_LIVE_STATE: &str = " This is the live state at this message and can change between turns (for example when the user opens or closes the phone app); it is authoritative, and anything said earlier in this conversation about which device Pocket Agent is on may be out of date.";
+/// Only when Hermes can reach PA's MCP server (BUG-MCP1, api/mcp_status.rs).
+const PHONE_SWITCH_TOOL: &str = " The switch_device tool (pocket_agent MCP server) moves Pocket Agent between the phone and this computer.";
+/// Otherwise PA can't tell whether Hermes has the tool, so it states only what is certain.
+const PHONE_SWITCH_BY_HAND: &str = " The user can switch by hand in the phone app: Connect next to this computer in its device list moves Pocket Agent to the phone, Move to computer on the phone screen moves it back.";
 
-/// `phone_ui`: a /ui page is attached; `seen`: the phone app connected at some point in this run.
-fn phone_device_hint(phone_ui: bool, parked: bool, seen: bool) -> String {
+/// `phone_ui`: a /ui page is attached; `seen`: the phone app connected at some point in this run;
+/// `mcp_ready`: Hermes has PA's MCP tools.
+fn phone_device_hint(phone_ui: bool, parked: bool, seen: bool, mcp_ready: bool) -> String {
     let state = match (phone_ui, parked) {
         (true, false) => PHONE_DRIVING_HINT,
         (true, true) => PHONE_PARKED_HINT,
         (false, _) if seen || parked => PHONE_GONE_HINT,
         (false, _) => return String::new(),
     };
-    format!("{state}{PHONE_LIVE_STATE}")
+    let switch = if mcp_ready { PHONE_SWITCH_TOOL } else { PHONE_SWITCH_BY_HAND };
+    format!("{state}{PHONE_LIVE_STATE}{switch}")
 }
 
 fn mode_hint(mode: HermesTurnMode) -> &'static str {
@@ -1225,6 +1231,7 @@ pub async fn send_message(
         crate::api::remote::ui_attached(),
         crate::voice::remote::is_parked(),
         crate::api::remote::phone_seen(),
+        crate::api::mcp_status::mcp_ready(),
     ));
     if fixed.is_empty() {
         hint.push_str("
@@ -1671,18 +1678,34 @@ mod tests {
 
     #[test]
     fn phone_device_hint_states_where_pa_is_now_once_a_phone_connected() {
-        assert!(phone_device_hint(false, false, false).is_empty(), "desktop alone: unchanged");
-        for (ui, parked, seen) in [(true, false, true), (true, true, true), (false, false, true), (false, true, true)] {
-            let hint = phone_device_hint(ui, parked, seen);
-            assert!(hint.contains("Right now (as of this message)") && hint.contains("live state"));
-            assert!(hint.contains("authoritative") && hint.contains("switch_device"));
-            let lower = hint.to_lowercase();
-            assert!(!lower.contains("should") && !lower.contains("must"), "states a fact, gives no advice");
+        for mcp in [true, false] {
+            assert!(phone_device_hint(false, false, false, mcp).is_empty(), "desktop alone: unchanged");
+            for (ui, parked, seen) in [(true, false, true), (true, true, true), (false, false, true), (false, true, true)] {
+                let hint = phone_device_hint(ui, parked, seen, mcp);
+                assert!(hint.contains("Right now (as of this message)") && hint.contains("live state"));
+                assert!(hint.contains("authoritative"));
+                let lower = hint.to_lowercase();
+                assert!(!lower.contains("should") && !lower.contains("must"), "states a fact, gives no advice");
+            }
+            assert!(phone_device_hint(true, false, true, mcp).contains("on the user's phone"));
+            assert!(phone_device_hint(true, true, true, mcp).contains("on this computer; its phone app is connected and on standby"));
+            assert!(phone_device_hint(false, false, true, mcp).contains("on this computer; its phone app is not connected"));
+            assert!(phone_device_hint(false, true, true, mcp).contains("not connected"), "parked page gone");
         }
-        assert!(phone_device_hint(true, false, true).contains("on the user's phone"));
-        assert!(phone_device_hint(true, true, true).contains("on this computer; its phone app is connected and on standby"));
-        assert!(phone_device_hint(false, false, true).contains("on this computer; its phone app is not connected"));
-        assert!(phone_device_hint(false, true, true).contains("not connected"), "parked page gone");
+    }
+
+    #[test]
+    fn phone_device_hint_offers_switch_device_only_when_hermes_has_it() {
+        for (ui, parked, seen) in [(true, false, true), (true, true, true), (false, false, true)] {
+            let with = phone_device_hint(ui, parked, seen, true);
+            let without = phone_device_hint(ui, parked, seen, false);
+            assert!(with.contains("switch_device") && !with.contains("Move to computer"));
+            assert!(!without.contains("switch_device") && !without.contains("MCP"));
+            assert!(!without.to_lowercase().contains("no tool"), "PA may just not know: no claim either way");
+            assert!(without.contains("Connect") && without.contains("Move to computer"));
+            // The device fact itself is the same either way.
+            assert_eq!(with.strip_suffix(PHONE_SWITCH_TOOL), without.strip_suffix(PHONE_SWITCH_BY_HAND));
+        }
     }
 
     #[test]

@@ -276,7 +276,9 @@ PA 主界面的前端(打包进 app 的静态资源，不含 key);远程模式�
 
 ## POST /mcp(Hermes 用的 MCP 服务端)
 
-最小的 MCP Streamable HTTP 服务端(`src-tauri/src/api/mcp.rs`)。什么时候开相机、拍照、切设备由 Hermes 决定;PA 只执行，并用文字如实返回结果(从不返回 JSON-RPC 错误)。相机开着时 PA 在该轮附一行事实提示。本次 PA 运行中手机 app 连过以后，每个 UI 回合还附一句设备事实：此刻(本条消息时)PA 在手机上 / 在电脑上、手机待命 / 在电脑上、手机 app 未连接，并注明这是实时状态、可能在两轮之间变化、以此为准(对话里更早的设备说法可能已过时);从没连过手机时不附(`commands/chat.rs::phone_device_hint`)。
+最小的 MCP Streamable HTTP 服务端(`src-tauri/src/api/mcp.rs`)。什么时候开相机、拍照、切设备由 Hermes 决定;PA 只执行，并用文字如实返回结果(从不返回 JSON-RPC 错误)。相机开着时 PA 在该轮附一行事实提示。本次 PA 运行中手机 app 连过以后，每个 UI 回合还附一句设备事实：此刻(本条消息时)PA 在手机上 / 在电脑上、手机待命 / 在电脑上、手机 app 未连接，并注明这是实时状态、可能在两轮之间变化、以此为准(对话里更早的设备说法可能已过时);从没连过手机时不附(`commands/chat.rs::phone_device_hint`)。这句末尾只在 PA 判定 Hermes 能用 pocket_agent MCP 时写「switch_device 可以切换」;否则(PA 无法确认 Hermes 有这个工具)不提工具，只写手动切换方法：「用户可以在手机 app 的设备列表点这台电脑旁的 Connect(接入)切到手机，在手机页面点「移到电脑」切回」。
+
+**MCP 可用性**(`api/mcp_status.rs`,设置 → 设备显示同一结论):8650 绑定失败 → 本地服务未启动;本机网关时，在 Hermes 主目录和 `profiles/*` 里找 `.env` 有 `API_SERVER_KEY`、`API_SERVER_PORT`(缺省 8642)等于 `API_SERVER` 端口的唯一 profile,读它的 `config.yaml`:`mcp_servers.pocket_agent` 不存在、已关闭(`enabled` 按 Hermes 的规则解释：`false` / `0` / `"false"` / `off` / `no` 等都算关闭;认不出的值 → 无法确认)、url 不是本机的 `http://…:PA 端口/mcp`(协议、端口或路径不对)→ 未接入(优先于本次运行的请求记录);否则本次运行最近一次 `/mcp` 请求带了错的 Bearer → 被拒;带对的 Bearer 或配置已注册 → 正常;远程网关 / 找不到唯一 profile / 文件读不了 / url 指向其他主机 → 无法确认。只读这两个文件的上述字段，错误只记类别，不回显内容。
 
 | 工具 | 参数 | `readOnlyHint` | 返回 |
 |---|---|---|---|

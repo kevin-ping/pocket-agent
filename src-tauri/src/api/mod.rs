@@ -1,5 +1,6 @@
 pub mod client;
 pub mod mcp;
+pub mod mcp_status;
 pub mod pairing;
 pub mod phone;
 pub mod remote;

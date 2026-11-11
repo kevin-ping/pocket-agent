@@ -259,22 +259,25 @@ pub async fn start_server(app: AppHandle, port: u16) {
         .with_state(state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-    eprintln!("[API] listening on http://{}", addr);
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => {
             #[cfg(windows)]
             crate::platform::not_inherited(&l);
             crate::api::pairing::set_port(port);
+            crate::api::mcp_status::server_bound(port);
+            eprintln!("[API] listening on http://{}", addr);
             l
         }
         Err(e) => {
             eprintln!("[API] bind failed: {} (port {} in use?)", e, port);
+            crate::api::mcp_status::server_bind_failed(port);
             return;
         }
     };
 
-    if let Err(e) = axum::serve(listener, router).await {
+    // ConnectInfo: /mcp tells this machine from the LAN (api/mcp.rs).
+    if let Err(e) = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await {
         eprintln!("[API] server error: {}", e);
     }
 }

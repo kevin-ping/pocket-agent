@@ -63,6 +63,10 @@ tar = { version = "0.4", default-features = false }
 getrandom = "0.3"
 if-addrs = "0.13"
 qrcodegen = "1.8"
+
+# Reading the Hermes profile config.yaml (MCP status, SEC-MCP1): maintained, pure Rust;
+# serde_yaml is archived. No encoding feature: config.yaml is UTF-8.
+yaml-rust2 = { version = "=0.13.0", default-features = false }
 [profile.release]
 opt-level = "s"     # 优化体积（旧机器存储也紧张）
 lto = true
