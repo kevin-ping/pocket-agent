@@ -149,7 +149,7 @@ always-on mic → sherpa-onnx KWS (wake phrase)
 - **Settings center** — SQLite-backed settings UI in its own window
 - **Interruptible TTS** — pressing the hotkey while PA is speaking stops current audio immediately before recording starts
 - **TTS toggle** — disable voice output for text-only mode
-- **Animated mesh avatar** — the widget circle shows a 2D mesh avatar (xingyin) that blinks and idles, reacts to listening / thinking / speaking, and follows the reply emotion; falls back to the image or CSS avatar if it can't load (see [docs/mesh-avatar.md](docs/mesh-avatar.md))
+- **Animated mesh avatar** — the widget circle shows the built-in 2D mesh avatar that blinks and idles, reacts to listening / thinking / speaking, and follows the reply emotion; falls back to the image or CSS avatar if it can't load (see [docs/mesh-avatar.md](docs/mesh-avatar.md))
 - **Compact widget** — 220x360px always-on-top window, dark sci-fi aesthetic
 - **Phone terminal (experimental)** — an Android phone on the same LAN can be PA's screen, microphone and speaker (`android/`); the desktop window hides while the phone drives. Hermes can open, flip and read the phone camera and move PA between the phone and the Mac by voice (`switch_device`), through PA's own MCP server. The APK is built and installed over `adb` with USB debugging on (see [android/README.md](android/README.md))
   - **Several computers, paired by QR code** — on each computer open Settings → Devices → Add phone and scan the code with the phone app's Scan to add device. The phone serves one computer at a time and its device list shows which computers are online. Computers never broadcast themselves: the phone keeps a connection to each paired computer's saved address.
@@ -470,7 +470,7 @@ Open **Settings** from the tray menu.
 
 ### Mesh Avatar
 
-The avatar circle shows the bundled mesh avatar `public/avatars/xingyin.mavatar` by default. In **Settings → Avatar** you can turn it off, zoom (50–200%) and offset it (±40 px) with a live preview, upload your own `.mavatar` (or restore the built-in one), and change the expressions and emotion mapping below. While it is on and loads successfully, it covers the **Avatar image** and per-state media skins. Those show when it is turned off or fails to load (bad file or no WebGL2).
+The avatar circle shows the bundled mesh avatar `public/avatars/default.mavatar` by default. In **Settings → Avatar** you can turn it off, zoom (50–200%) and offset it (±40 px) with a live preview, upload your own `.mavatar` (or restore the built-in one), and change the expressions and emotion mapping below. While it is on and loads successfully, it covers the **Avatar image** and per-state media skins. Those show when it is turned off or fails to load (bad file or no WebGL2).
 
 **Making your own animated avatar:** PA's avatar is made with [mesh-avatar-studio](https://github.com/shinshin86/mesh-avatar-studio), the same project whose runtime PA uses to play it. Build your character there, export it with `npm run pack-avatar -- projects/<name> --no-source` (`--no-source` leaves the source image out, so the file can only be played), then upload the `.mavatar` in **Settings → Avatar**.
 
@@ -611,7 +611,7 @@ pocket-agent/
 │           ├── remote.rs         # Phone audio source / sink + camera state
 │           └── venv.rs           # Managed Python venv (~/.pocket-agent/venv)
 ├── android/                      # Android shell app for the phone terminal (Kotlin)
-├── public/avatars/               # Bundled mesh avatar (xingyin.mavatar)
+├── public/avatars/               # Bundled mesh avatar (default.mavatar)
 ├── docs/                         # computer-interaction.md, mesh-avatar.md, API_MANUAL.md
 ├── scripts/                      # dev + voice test scripts (phone_sim.py: fake phone on /audio)
 ├── assets/media/                 # Demo videos + screenshots

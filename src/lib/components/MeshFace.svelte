@@ -33,7 +33,7 @@
   export let variant: 'circle' | 'fill' = 'circle';
 
   // Fixed same-origin path, kept even for custom files: <mesh-avatar> without src fetches a remote sample.
-  const MESH_SRC = '/avatars/xingyin.mavatar';
+  const MESH_SRC = '/avatars/default.mavatar';
   const SIZE = 96;
 
   let meshEl: MeshAvatarElement | null = null;
