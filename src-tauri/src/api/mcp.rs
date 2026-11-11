@@ -11,11 +11,12 @@
 // Auth: `Authorization: Bearer <API_SERVER_KEY>`, and unlike the other bearer
 // routes an unset key rejects every request.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -41,8 +42,13 @@ const CAMERA_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 pub const MAX_BODY: usize = 64 * 1024;
 const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
-pub async fn mcp_post(State(state): State<Arc<ServerState>>, headers: HeaderMap, body: Bytes) -> Response {
-    if !authorized(&state.api_key, &headers) {
+pub async fn mcp_post(
+    State(state): State<Arc<ServerState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !check(&state.api_key, &headers, peer) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     match respond(&body).await {
@@ -80,8 +86,12 @@ async fn respond(body: &[u8]) -> Option<Value> {
     })
 }
 
-pub async fn mcp_other(State(state): State<Arc<ServerState>>, headers: HeaderMap) -> Response {
-    if !authorized(&state.api_key, &headers) {
+pub async fn mcp_other(
+    State(state): State<Arc<ServerState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if !check(&state.api_key, &headers, peer) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     StatusCode::METHOD_NOT_ALLOWED.into_response()
@@ -93,6 +103,16 @@ fn authorized(expected: &str, headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     super::remote::token_ok(expected, provided)
+}
+
+/// `authorized`, also kept as evidence for the MCP status (api/mcp_status.rs).
+/// A wrong key counts only from this machine, where the gateway runs: anyone
+/// on the LAN can send one, and must not change what PA tells Hermes.
+fn check(expected: &str, headers: &HeaderMap, peer: SocketAddr) -> bool {
+    let ok = authorized(expected, headers);
+    let wrong_key_here = headers.contains_key(header::AUTHORIZATION) && peer.ip().is_loopback();
+    super::mcp_status::record_request(ok, wrong_key_here);
+    ok
 }
 
 fn initialize(params: &Value) -> Value {
@@ -249,6 +269,21 @@ mod tests {
 
     async fn call(body: &str) -> Option<Value> {
         respond(body.as_bytes()).await
+    }
+
+    #[test]
+    fn only_a_wrong_key_from_this_machine_counts_as_rejected() {
+        let _t = crate::api::mcp_status::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let lan: SocketAddr = "192.168.1.20:5000".parse().unwrap();
+        let local: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        assert!(check("secret", &bearer("Bearer secret"), local));
+        assert!(!check("secret", &bearer("Bearer wrong"), lan));
+        assert!(!check("secret", &HeaderMap::new(), local), "no header: not Hermes");
+        assert_eq!(crate::api::mcp_status::evidence(), crate::api::mcp_status::SEEN);
+        assert!(!check("secret", &bearer("Bearer wrong"), local));
+        assert_eq!(crate::api::mcp_status::evidence(), crate::api::mcp_status::REJECTED);
+        assert!(check("secret", &bearer("Bearer secret"), lan), "the right key counts from anywhere");
+        assert_eq!(crate::api::mcp_status::evidence(), crate::api::mcp_status::SEEN);
     }
 
     #[test]

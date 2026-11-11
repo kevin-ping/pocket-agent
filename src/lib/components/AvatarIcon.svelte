@@ -20,15 +20,15 @@
   export let meshOffsetY = 0;
   export let meshExpressions: Record<string, string>;
   export let meshEmotions: Record<string, string>;
-  /** Custom `.mavatar` data URI, or null for the bundled avatar. */
-  export let meshCustom: string | null = null;
+  /** Custom `.mavatar` data URI, null for the bundled avatar, undefined while still being read. */
+  export let meshCustom: string | null | undefined = undefined;
   /** State → background colour; only drives --grad1/--grad2, not ring/glow. */
   export let bgColors: Record<string, string> = {};
 
   let meshStatus: 'loading' | 'ready' | 'failed' = 'loading';
   // A new file or re-enabling gets a fresh attempt even after an earlier failure.
   $: resetMeshStatus(meshEnabled, meshCustom);
-  function resetMeshStatus(enabled: boolean, _custom: string | null) {
+  function resetMeshStatus(enabled: boolean, _custom: string | null | undefined) {
     meshStatus = MESH_SUPPORTED && enabled ? 'loading' : 'failed';
   }
 
@@ -46,8 +46,10 @@
 
   $: colors = { ...STATE_COLORS[state], ...avatarGradient(state, bgColors[state]) };
   $: willChange = state !== 'idle' ? 'transform' : 'auto';
-  $: effectiveSkin = mediaSkins[state] ? 'media' : (avatarImage ? 'image' : 'css');
   $: mediaSrc = mediaSkins[state] ?? avatarImage ?? '';
+  // A picture that fails to load falls back to the drawn face.
+  let failedSrc = '';
+  $: effectiveSkin = !mediaSrc || mediaSrc === failedSrc ? 'css' : (mediaSkins[state] ? 'media' : 'image');
 
   $: meshReady = meshStatus === 'ready';
 
@@ -143,9 +145,9 @@
       {:else if effectiveSkin === 'media' || effectiveSkin === 'image'}
         {#if mediaSrc.startsWith('data:video') || mediaSrc.endsWith('.mp4') || mediaSrc.endsWith('.webm')}
           <!-- svelte-ignore a11y-media-has-caption -->
-          <video class="avatar-media" src={mediaSrc} autoplay loop muted playsinline></video>
+          <video class="avatar-media" src={mediaSrc} autoplay loop muted playsinline on:error={() => (failedSrc = mediaSrc)}></video>
         {:else}
-          <img class="avatar-media" src={mediaSrc} alt="头像" draggable="false" />
+          <img class="avatar-media" src={mediaSrc} alt="头像" draggable="false" on:error={() => (failedSrc = mediaSrc)} />
         {/if}
       {:else}
         <div class="css-face" class:talking={mouthActive && !interrupted} style:will-change={willChange}>

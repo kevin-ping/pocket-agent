@@ -14,7 +14,7 @@
     meshEnabled = true,
     meshExpressions,
     meshEmotions,
-    meshCustom = null,
+    meshCustom = undefined,
     bgColors = {},
   }: {
     avatarImage?: string | null;
@@ -25,6 +25,7 @@
     meshEnabled?: boolean;
     meshExpressions: Record<string, string>;
     meshEmotions: Record<string, string>;
+    /** undefined while App is still reading it. */
     meshCustom?: string | null;
     bgColors?: Record<string, string>;
   } = $props();
@@ -41,7 +42,12 @@
     meshStatus = MESH_SUPPORTED && meshEnabled ? 'loading' : 'failed';
   });
 
-  let mediaSrc = $derived(mediaSkins[$characterState] ?? avatarImage ?? '');
+  // A picture that fails to load falls back to the drawn face.
+  let failedSrc = $state('');
+  let mediaSrc = $derived.by(() => {
+    const src = mediaSkins[$characterState] ?? avatarImage ?? '';
+    return src === failedSrc ? '' : src;
+  });
   let isVideo = $derived(mediaSrc.startsWith('data:video') || mediaSrc.endsWith('.mp4') || mediaSrc.endsWith('.webm'));
 </script>
 
@@ -51,9 +57,9 @@
       expressions={meshExpressions} emotions={meshEmotions} customSource={meshCustom} bind:status={meshStatus} />
   {:else if mediaSrc && isVideo}
     <!-- svelte-ignore a11y_media_has_caption -->
-    <video class="media" src={mediaSrc} autoplay loop muted playsinline></video>
+    <video class="media" src={mediaSrc} autoplay loop muted playsinline onerror={() => (failedSrc = mediaSrc)}></video>
   {:else if mediaSrc}
-    <img class="media" src={mediaSrc} alt="头像" draggable="false" />
+    <img class="media" src={mediaSrc} alt="头像" draggable="false" onerror={() => (failedSrc = mediaSrc)} />
   {:else}
     <!-- No picture at all: the desktop's drawn face, enlarged. -->
     <div class="drawn">

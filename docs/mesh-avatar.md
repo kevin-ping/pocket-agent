@@ -1,6 +1,6 @@
 # 主窗口 Mesh 头像
 
-主窗口左侧 76×76 的圆形头像默认显示 2D 网格头像 **xingyin**，由 [mesh-avatar-studio](https://github.com/shinshin86/mesh-avatar-studio) 制作，用 `mesh-avatar-element` 的 `<mesh-avatar>` 自定义元素渲染。圆里只显示脸部特写。头像待机时会呼吸、眨眼、轻微晃动，并随对话状态和回复情绪变化。
+主窗口左侧 76×76 的圆形头像默认显示内置 2D 网格头像(`default.mavatar`)，由 [mesh-avatar-studio](https://github.com/shinshin86/mesh-avatar-studio) 制作，用 `mesh-avatar-element` 的 `<mesh-avatar>` 自定义元素渲染。圆里只显示脸部特写。头像待机时会呼吸、眨眼、轻微晃动，并随对话状态和回复情绪变化。
 
 设计文档：`.auto-work/docs/plans/design-20261028-145935.md`(主窗口头像)、`.auto-work/docs/plans/design-20261028-155955.md`(设置页)
 
@@ -25,11 +25,11 @@
 
 ### 自定义头像文件
 
-「选择 .mavatar」上传一个自己的头像，「恢复内置」删除它，回到 xingyin。
+「选择 .mavatar」上传一个自己的头像，「恢复内置」删除它，回到内置默认头像。
 
 - 文件存在设置数据库的 `assets` 表(key `mesh_avatar`，MIME `application/octet-stream`)，**不放进 `AppConfig`**,以免每次 `get_config` 都传几 MB 的 base64。主窗口在启动和每次收到 `settings-changed` 时用 `get_setting_asset` 读取，只有内容变化才重新加载。
 - 存储层只允许 `mesh_avatar` 使用 octet-stream，图片 key 不能用;数据必须以 zip 文件头 `PK\x03\x04` 开头;上限 10 MB。设置页选择文件时也会先检查扩展名、大小和文件头，不符合的当场提示。
-- 自定义文件通过 `meshEl.load(Uint8Array)` 加载，`src` 始终保留内置路径 `/avatars/xingyin.mavatar`,所以不会去网上下载示例头像。恢复内置时组件会重建 `<mesh-avatar>` 元素，重新加载 `src`。
+- 自定义文件通过 `meshEl.load(Uint8Array)` 加载，`src` 始终保留内置路径 `/avatars/default.mavatar`,所以不会去网上下载示例头像。恢复内置时组件会重建 `<mesh-avatar>` 元素，重新加载 `src`。
 - 自定义文件加载失败时，同样回退到静态图、GIF 或 CSS 脸;重新选择文件或恢复内置后会再次尝试。
 
 ## 状态联动
@@ -70,7 +70,9 @@ WebGL 上下文丢失后恢复时，元素会换一个新的头像实例。组�
 
 设置页关掉 mesh 开关，或满足以下任一情况时，头像会回退到原来的显示方式，优先级依次为：按状态设置的图片或视频皮肤 → 「Avatar image」→ CSS 脸。
 
-- `public/avatars/xingyin.mavatar`(或自定义文件)不存在或无法读取
+回退用的「静态头像 / 动画头像」没有自定义时用内置预设 `public/avatars/default.jpeg` / `default.gif`(常量在 `src/lib/avatarPresets.ts`):idle 显示静态头像，thinking / speaking 显示动画头像(只自定义了静态图时用这张静态图),listening 是 `user_input.gif`。图片加载失败时退回 CSS 脸。聊天记录页(`open_chat_history`)未自定义静态头像时嵌入同一张预设 jpeg。
+
+- `public/avatars/default.mavatar`(或自定义文件)不存在或无法读取
 - 系统不支持 WebGL2
 - WebView 缺少 `Array.prototype.at`、`Object.hasOwn` 或 `structuredClone`。依赖直接调用这三个 API，要 Safari 15.4 起才有。app 最低支持 macOS 12.0，更早的 WKWebView 可能没有，且项目没有为它们提供 polyfill。组件在创建 `<mesh-avatar>` 之前先检测，缺任何一个就直接用回退头像，不会创建元素，也不打印警告
 
@@ -80,7 +82,7 @@ WebGL 上下文丢失后恢复时，元素会换一个新的头像实例。组�
 
 - **默认设置值**：Rust `src-tauri/src/commands/config.rs`(`AppConfig::default`、`default_mesh_avatar_expressions`、`default_mesh_avatar_emotions`)和 TS `src/lib/stores/settings.ts`(`SETTINGS_DEFAULTS`)两边要保持一致;白名单在 `settings_repository.rs` 和 `settings.ts` 里各有一份。
 - **内置头像文件**：`MeshFace.svelte` 的常量 `MESH_SRC`。只用同源的 `/avatars/...` 路径。`<mesh-avatar>` 在 `src` 为空时会去作者网站下载示例头像，所以 `src` 不能留空。
-- **基准画面**：`MeshFace.svelte` 里缩放 1、偏移 0 时为 `96px` × `96px`,`left: -12px`、`top: -10px`,即原图 1600px 缩放 0.06，脸中心落在圆心下方 6px。设置页的缩放和偏移都叠加在这个基准上。
+- **基准画面**：`MeshFace.svelte` 里缩放 1、偏移 0 时为 `86.4px` × `86.4px`,`left: -7.2px`、`top: -0.2px`,即原图 1600px 缩放 0.054。设置页的缩放和偏移都叠加在这个基准上。0.3.2 之前的基准是 `96px`、`left: -12px`、`top: -10px`,新基准等于旧基准缩放 0.9、下移 5px;旧设置库里的缩放和偏移在启动时换算一次(`settings_repository::migrate_mesh_framing`,换算后写入 metadata `mesh_framing_v2`),画面不变。
 
 `.mavatar` 文件可以用 mesh-avatar-studio 的 `npm run pack-avatar -- projects/<name> --no-source` 生成。加上 `--no-source` 后，文件里不含原图，只能播放。
 

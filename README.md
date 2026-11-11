@@ -8,7 +8,7 @@
 
 > A minimal desktop AI voice companion that lives on your screen — press a key, speak, get things done.
 >
-> **v0.3.1** — see [releases/0.3.1.md](releases/0.3.1.md) for changelog
+> **v0.3.2** — see [releases/0.3.2.md](releases/0.3.2.md) for changelog
 
 Pocket Agent is a compact desktop widget built with **Tauri 2 + Svelte 5 + Rust**. It connects to a local [Hermes](https://github.com/nousresearch/hermes) agent gateway via SSE streaming for real-time voice conversations with an LLM. Think of it as a desktop pet that actually helps.
 
@@ -58,6 +58,32 @@ Install Hermes and Pocket Agent on each Mac, then enable the Hermes API computer
   | speaker + KWS|                            | speaker, camera  |
   +--------------+                            +------------------+
 ```
+
+### Computers and Phones (many-to-many)
+
+Every computer runs its own PA and Hermes. Phones and computers pair many-to-many, and each phone serves one computer at a time:
+
+```
+ +-------------------+      +-------------------+      +-------------------+
+ | Mac A             |      | Mac B             |      | Mac C             |
+ | PA :8650 + Hermes |      | PA :8650 + Hermes |      | PA :8650 + Hermes |
+ +---------+---------+      +----+---------+----+      +---------+---------+
+           |                     |         |                     |
+           |      /phone: always connected, one per pairing      |
+           |                     |         |                     |
+ +---------+---------------------+--+   +--+---------------------+---------+
+ | Phone 1   paired: A, B           |   | Phone 2   paired: B, C           |
+ | occupant: Mac B                  |   | occupant: Mac C                  |
+ | /ui/ws + /audio -> Mac B only    |   | /ui/ws + /audio -> Mac C only    |
+ +----------------------------------+   +----------------------------------+
+```
+
+- **Pairing** — on each computer open Settings → Devices → Add phone and scan the QR code with the phone app. A phone can pair with any number of computers, and a computer with any number of phones.
+- **Always connected** — the phone keeps a `/phone` control connection to every paired computer's saved address (computers never broadcast). Each PA always knows which phones are online, which computer is using each one, and whether the app is on screen.
+- **One computer at a time** — the phone decides which computer uses it (the occupant). Only that computer gets `/ui/ws` and `/audio`, which carry the screen, mic, speaker and camera. Any other computer that asks is told the phone is busy until the occupant's PA moves back to its own computer.
+- **Choosing a phone** — when Hermes calls `switch_device(phone)` on a computer with several phones, PA asks the online phone that used it most recently.
+- **Lease** — if the occupant's computer is unreachable for 90 s (asleep or off the network), the phone frees itself.
+- **Anywhere on the LAN** — the phone only needs to reach each computer's port 8650, so you can talk to Hermes from any room. Keep that port on the LAN (see [Privacy and Security](#privacy-and-security)).
 
 ### Voice Pipeline
 
@@ -123,7 +149,7 @@ always-on mic → sherpa-onnx KWS (wake phrase)
 - **Settings center** — SQLite-backed settings UI in its own window
 - **Interruptible TTS** — pressing the hotkey while PA is speaking stops current audio immediately before recording starts
 - **TTS toggle** — disable voice output for text-only mode
-- **Animated mesh avatar** — the widget circle shows a 2D mesh avatar (xingyin) that blinks and idles, reacts to listening / thinking / speaking, and follows the reply emotion; falls back to the image or CSS avatar if it can't load (see [docs/mesh-avatar.md](docs/mesh-avatar.md))
+- **Animated mesh avatar** — the widget circle shows the built-in 2D mesh avatar that blinks and idles, reacts to listening / thinking / speaking, and follows the reply emotion; falls back to the image or CSS avatar if it can't load (see [docs/mesh-avatar.md](docs/mesh-avatar.md))
 - **Compact widget** — 220x360px always-on-top window, dark sci-fi aesthetic
 - **Phone terminal (experimental)** — an Android phone on the same LAN can be PA's screen, microphone and speaker (`android/`); the desktop window hides while the phone drives. Hermes can open, flip and read the phone camera and move PA between the phone and the Mac by voice (`switch_device`), through PA's own MCP server. The APK is built and installed over `adb` with USB debugging on (see [android/README.md](android/README.md))
   - **Several computers, paired by QR code** — on each computer open Settings → Devices → Add phone and scan the code with the phone app's Scan to add device. The phone serves one computer at a time and its device list shows which computers are online. Computers never broadcast themselves: the phone keeps a connection to each paired computer's saved address.
@@ -444,7 +470,7 @@ Open **Settings** from the tray menu.
 
 ### Mesh Avatar
 
-The avatar circle shows the bundled mesh avatar `public/avatars/xingyin.mavatar` by default. In **Settings → Avatar** you can turn it off, zoom (50–200%) and offset it (±40 px) with a live preview, upload your own `.mavatar` (or restore the built-in one), and change the expressions and emotion mapping below. While it is on and loads successfully, it covers the **Avatar image** and per-state media skins. Those show when it is turned off or fails to load (bad file or no WebGL2).
+The avatar circle shows the bundled mesh avatar `public/avatars/default.mavatar` by default. In **Settings → Avatar** you can turn it off, zoom (50–200%) and offset it (±40 px) with a live preview, upload your own `.mavatar` (or restore the built-in one), and change the expressions and emotion mapping below. While it is on and loads successfully, it covers the **Avatar image** and per-state media skins. Those show when it is turned off or fails to load (bad file or no WebGL2).
 
 **Making your own animated avatar:** PA's avatar is made with [mesh-avatar-studio](https://github.com/shinshin86/mesh-avatar-studio), the same project whose runtime PA uses to play it. Build your character there, export it with `npm run pack-avatar -- projects/<name> --no-source` (`--no-source` leaves the source image out, so the file can only be played), then upload the `.mavatar` in **Settings → Avatar**.
 
@@ -585,7 +611,7 @@ pocket-agent/
 │           ├── remote.rs         # Phone audio source / sink + camera state
 │           └── venv.rs           # Managed Python venv (~/.pocket-agent/venv)
 ├── android/                      # Android shell app for the phone terminal (Kotlin)
-├── public/avatars/               # Bundled mesh avatar (xingyin.mavatar)
+├── public/avatars/               # Bundled mesh avatar (default.mavatar)
 ├── docs/                         # computer-interaction.md, mesh-avatar.md, API_MANUAL.md
 ├── scripts/                      # dev + voice test scripts (phone_sim.py: fake phone on /audio)
 ├── assets/media/                 # Demo videos + screenshots

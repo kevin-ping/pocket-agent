@@ -28,11 +28,17 @@
     type SettingsLang,
   } from './lib/settingsI18n';
   import { convLabelsLang } from './lib/i18n';
+  import { PRESET_AVATAR_IMAGE, PRESET_AVATAR_GIF } from './lib/avatarPresets';
   import { wakeErrorMessage, wakeSaveNotice } from './lib/wakeErrors';
 
   type Section = 'general' | 'avatar' | 'voice' | 'conversation' | 'interruption' | 'wake' | 'phones';
   type PairingQr = { svg: string; expires_in: number; generation: number };
   type PairedPhone = { phone_id: string; name: string; created_at: string; last_seen_at: string | null; online: boolean };
+  type McpStatus =
+    | { state: 'ready' | 'rejected' }
+    | { state: 'not_registered'; config: string }
+    | { state: 'server_down'; port: number }
+    | { state: 'unknown'; reason: string };
   type SaveResponse = { config: AppSettings; revision: number; wake_error?: string };
   type WakeModelStatus = { ready: boolean; error?: { code: string; params: Record<string, string> } | null };
   type SettingsBootstrap = { config?: AppSettings; error?: string };
@@ -125,6 +131,28 @@
       pairedPhones = await invoke<PairedPhone[]>('list_paired_phones');
     } catch (e) {
       console.warn('[settings] phones:', e);
+    }
+  }
+  // Phone / MCP status (BUG-MCP2): read when the Devices section opens or on demand.
+  let mcpStatus = $state<McpStatus | null>(null);
+  async function refreshMcp() {
+    if (!isTauri) return;
+    try {
+      mcpStatus = await invoke<McpStatus>('get_mcp_status');
+    } catch (e) {
+      console.warn('[settings] mcp status:', e);
+    }
+  }
+  $effect(() => {
+    if (active === 'phones') void refreshMcp();
+  });
+  function mcpText(status: McpStatus): string {
+    switch (status.state) {
+      case 'ready': return phoneText.mcpReady;
+      case 'rejected': return phoneText.mcpRejected;
+      case 'not_registered': return phoneText.mcpNotRegistered(status.config);
+      case 'server_down': return phoneText.mcpServerDown(status.port);
+      case 'unknown': return phoneText.mcpUnknown;
     }
   }
   function closeQr() {
@@ -447,9 +475,9 @@
 
   function resetMeshView() {
     if (!local) return;
-    local.mesh_avatar_scale = 1;
-    local.mesh_avatar_offset_x = 0;
-    local.mesh_avatar_offset_y = 0;
+    local.mesh_avatar_scale = SETTINGS_DEFAULTS.mesh_avatar_scale;
+    local.mesh_avatar_offset_x = SETTINGS_DEFAULTS.mesh_avatar_offset_x;
+    local.mesh_avatar_offset_y = SETTINGS_DEFAULTS.mesh_avatar_offset_y;
   }
 
   function resetBgColors() {
@@ -611,18 +639,18 @@
             {/each}
           </section>
           <section class="card asset-grid">
-            <AssetCard title={text.staticAvatar} src={local.avatar_image} hint={text.imageHint}
+            <AssetCard title={text.staticAvatar} src={local.avatar_image ?? PRESET_AVATAR_IMAGE} builtin={!local.avatar_image} hint={text.imageHint}
               choose={() => chooseAsset('avatar_image')} remove={() => {
                 if (local) local.avatar_image = null;
                 avatarImageChanged = true;
               }}
-              chooseText={text.chooseImage} removeText={text.remove} />
-            <AssetCard title={text.animatedAvatar} src={local.avatar_gif} hint={text.imageHint}
+              chooseText={text.chooseImage} removeText={meshText.restore} builtinText={meshText.builtin} />
+            <AssetCard title={text.animatedAvatar} src={local.avatar_gif ?? PRESET_AVATAR_GIF} builtin={!local.avatar_gif} hint={text.imageHint}
               choose={() => chooseAsset('avatar_gif')} remove={() => {
                 if (local) local.avatar_gif = null;
                 avatarGifChanged = true;
               }}
-              chooseText={text.chooseImage} removeText={text.remove} />
+              chooseText={text.chooseImage} removeText={meshText.restore} builtinText={meshText.builtin} />
             <input bind:this={fileInput} hidden type="file" accept="image/jpeg,image/png,image/webp,image/gif" onchange={(e) => readAsset(e, 'avatar_image')} />
             <input bind:this={gifInput} hidden type="file" accept="image/gif" onchange={(e) => readAsset(e, 'avatar_gif')} />
           </section>
@@ -709,6 +737,17 @@
               </div>
             {/if}
           </section>
+          {#if mcpStatus}
+            <section class="card mcp-card">
+              <div class="sample">
+                <div>
+                  <strong>{phoneText.mcpTitle}</strong>
+                  <p class:mcp-ok={mcpStatus.state === 'ready'} class:mcp-bad={mcpStatus.state !== 'ready'} role="status">{mcpText(mcpStatus)}</p>
+                </div>
+                <button class="ghost" onclick={refreshMcp}>{phoneText.mcpCheck}</button>
+              </div>
+            </section>
+          {/if}
           <section class="card">
             <p class="mesh-heading">{phoneText.paired}</p>
             {#each pairedPhones as phone (phone.phone_id)}
@@ -752,12 +791,14 @@
 <style>
   .mesh-card{margin-bottom:14px}.mesh-body{border:0;margin:0;padding:0;min-width:0}.mesh-body:disabled{opacity:.45}
   .mesh-preview{display:flex;align-items:center;gap:18px;padding:16px;border-bottom:1px solid #e8eaf0}
-  .mesh-circle{position:relative;width:76px;height:76px;flex-shrink:0;border-radius:50%;overflow:hidden;display:grid;place-items:center;color:#fff;font-weight:800}
+  /* Same 2px border as the main window's .avatar-circle, so MeshFace gets the same 72px box and offset */
+  .mesh-circle{position:relative;width:76px;height:76px;border:2px solid transparent;flex-shrink:0;border-radius:50%;overflow:hidden;display:grid;place-items:center;color:#fff;font-weight:800}
   .mesh-states{display:flex;flex-wrap:wrap;gap:6px}.mesh-states button.selected{background:#788cff22;border-color:#7589f4;color:#3a4566}
   .mesh-reset{display:flex;justify-content:flex-end;padding:8px 16px;border-bottom:1px solid #e8eaf0}
   .mesh-heading{padding:12px 16px 4px;font-size:11px;font-weight:600;color:#5a6178;border-top:1px solid #e8eaf0}
   .mesh-advanced{border-top:1px solid #e8eaf0}.mesh-advanced summary{padding:12px 16px;font-size:11px;font-weight:600;color:#5a6178;cursor:pointer}
   .wake-help { color: var(--muted, #64748b); font-size: 13px; line-height: 1.6; margin: 8px 16px 16px; }
+  .mcp-card{margin:14px 0}.mcp-card button{white-space:nowrap;flex-shrink:0}.mcp-card .sample p{font-size:11px;line-height:1.5;word-break:break-word}.mcp-card .sample p.mcp-ok{color:#1a9d63}.mcp-card .sample p.mcp-bad{color:#c2410c}
   :global {
   :global(*){box-sizing:border-box} :global(html,body,#app){margin:0;width:100%;height:100%;overflow:hidden}
   :global(body){font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei UI",sans-serif;background:#f4f5f9;color:#1e2235;-webkit-font-smoothing:antialiased}

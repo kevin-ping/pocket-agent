@@ -171,6 +171,7 @@ pub fn run() {
             api::pairing::start_pairing,
             api::pairing::cancel_pairing,
             api::pairing::list_paired_phones,
+            api::mcp_status::get_mcp_status,
             api::pairing::remove_paired_phone,
             commands::history::open_chat_history,
             commands::history::save_chat_message,

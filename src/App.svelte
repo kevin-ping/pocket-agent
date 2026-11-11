@@ -23,6 +23,7 @@
   import { STATUS_PHRASES, langFromVoice, detectLang, convLabels, convLabelsLang, type LangKey } from './lib/i18n';
   import { wakeErrorMessage } from './lib/wakeErrors';
   import { createSetupSequencer, type SetupSnapshot } from './lib/voiceSetup';
+  import { PRESET_AVATAR_IMAGE, PRESET_AVATAR_GIF } from './lib/avatarPresets';
 
   // Remote mode (phone WebView over /ui) has no native window.
   const appWindow = isRemote ? null : getCurrentWindow();
@@ -127,7 +128,8 @@
   let mouthLingerTimer: ReturnType<typeof setTimeout> | null = null;
   let bridgeThinkingActive = false;
   // Custom .mavatar lives outside AppConfig (it can be megabytes), so it is fetched on its own.
-  let meshCustom: string | null = null;
+  // undefined until the first read settles, so the bundled avatar doesn't flash before a custom one.
+  let meshCustom: string | null | undefined = undefined;
   let meshCustomRequest = 0;
 
   async function refreshMeshCustom() {
@@ -138,14 +140,19 @@
       if (request === meshCustomRequest && data !== meshCustom) meshCustom = data;
     } catch (e) {
       console.warn('[avatar] custom mesh avatar read failed:', e);
+      if (meshCustom === undefined) meshCustom = null;
     }
   }
 
   // ─── Media skins: avatar content per state ───
+  // Unset pictures fall back to the bundled presets; a custom static picture
+  // without a custom animation keeps showing while thinking / speaking.
+  $: avatarImage = $settingsStore.avatar_image ?? PRESET_AVATAR_IMAGE;
+  $: avatarAnimation = $settingsStore.avatar_gif ?? $settingsStore.avatar_image ?? PRESET_AVATAR_GIF;
   $: mediaSkins = {
     listening: 'user_input.gif',
-    thinking: $settingsStore.avatar_gif ?? $settingsStore.avatar_image ?? '',
-    speaking: $settingsStore.avatar_gif ?? $settingsStore.avatar_image ?? '',
+    thinking: avatarAnimation,
+    speaking: avatarAnimation,
   };
   let promptAudio: HTMLAudioElement | null = null;
 
@@ -1293,6 +1300,9 @@
     const playStartSound = async () => {
       console.log("[app] all services ready, showing window + playing start sound");
       try { await appWindow?.show(); } catch (e) { console.warn("[app] show failed:", e); }
+      // The phone page mounts while Android is switching to communication mode and recalibrating
+      // the speaker; sound played in that first second or so is swallowed (Pixel 2), so wait it out.
+      if (isRemote) await new Promise((resolve) => setTimeout(resolve, 1500));
       try {
         const audio = new Audio("app_start.mp3");
         audio.volume = 0.3;
@@ -1374,7 +1384,7 @@
     {audioLevel}
     {reasoningVisible}
     avatar={{
-      avatarImage: $settingsStore.avatar_image ?? null,
+      avatarImage,
       mediaSkins,
       emotion: avatarEmotion,
       interrupted: interruptedReply,
@@ -1404,7 +1414,7 @@
       on:mousedown={handleAvatarDragStart}
     >
       <AvatarIcon
-        avatarImage={$settingsStore.avatar_image ?? null}
+        {avatarImage}
         spiritPhase={spiritPhase}
         mediaSkins={mediaSkins}
         emotion={avatarEmotion}

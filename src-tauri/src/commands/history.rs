@@ -556,14 +556,27 @@ fn generate_html(messages: &[ChatMessage], avatar_data_uri: &str) -> String {
 </html>"#)
 }
 
+/// The bundled static avatar (public/avatars/default.jpeg) as a data URI.
+fn preset_avatar_data_uri() -> String {
+    use base64::Engine;
+    const PRESET: &[u8] = include_bytes!("../../../public/avatars/default.jpeg");
+    format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(PRESET)
+    )
+}
+
 /// Generate and open chat history HTML
 #[tauri::command]
 pub async fn open_chat_history(_app: tauri::AppHandle) -> Result<(), String> {
     let messages = get_all_messages()?;
 
-    // Read the current avatar from settings.db, the settings source of truth.
-    let avatar_data_uri = super::settings_repository::get_asset("avatar_image")?
-        .unwrap_or_default();
+    // Read the current avatar from settings.db, the settings source of truth;
+    // without a custom one the page shows the bundled preset.
+    let avatar_data_uri = match super::settings_repository::get_asset("avatar_image")? {
+        Some(uri) => uri,
+        None => preset_avatar_data_uri(),
+    };
 
     let html = generate_html(&messages, &avatar_data_uri);
     
@@ -605,4 +618,15 @@ pub async fn open_chat_history(_app: tauri::AppHandle) -> Result<(), String> {
     }
     
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preset_avatar_is_an_embedded_jpeg() {
+        // JPEG files start with FF D8 FF, which base64-encodes to "/9j/".
+        assert!(preset_avatar_data_uri().starts_with("data:image/jpeg;base64,/9j/"));
+    }
 }
