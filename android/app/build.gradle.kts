@@ -11,8 +11,8 @@ android {
         applicationId = "com.hermes.pocketagent.phone"
         minSdk = 30 // Pixel 2 tops out at Android 11
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.3.2"
+        versionCode = 3
+        versionName = "0.3.3"
     }
 
     compileOptions {

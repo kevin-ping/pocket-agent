@@ -1,6 +1,6 @@
 {
   "name": "pocket-agent",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "type": "module",
   "scripts": {
     "dev": "node scripts/check-deps.js && node scripts/clear-dev-port.js && vite",

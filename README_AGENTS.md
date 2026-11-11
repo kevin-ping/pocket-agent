@@ -11,7 +11,7 @@ Pocket Agent (PA) is a desktop voice companion. It connects to a Hermes agent ga
 - **GitHub**: https://github.com/kevin-ping/pocket-agent
 - **Stack**: Tauri 2 + Svelte 5 + Rust
 - **Platform**: macOS 12+ (UI built for the macOS 12.0 WebKit; verified only on Apple Silicon, macOS 26; macOS 12–15 and Intel not yet verified). Windows 10/11 x64 from source, experimental (verified on Windows 10 22H2)
-- **Current version**: 0.3.2
+- **Current version**: 0.3.3
 
 ---
 
