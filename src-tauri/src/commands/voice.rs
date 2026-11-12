@@ -662,6 +662,12 @@ pub async fn wake_model_status() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
+pub async fn wake_pronunciation(phrase: String) -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(move || crate::voice::sherpa_wake::kws_pronounce(&phrase))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub async fn install_wake_model() -> Result<serde_json::Value, String> {
     tokio::task::spawn_blocking(|| crate::voice::sherpa_wake::kws_model_action(true))
         .await.map_err(|e| e.to_string())?

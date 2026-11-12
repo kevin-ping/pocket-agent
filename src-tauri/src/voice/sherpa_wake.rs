@@ -430,6 +430,12 @@ pub fn kws_model_action(install: bool) -> Result<serde_json::Value, String> {
     }
 }
 
+/// What the detector would listen for: `{text, tokens}`, or a coded wake error.
+pub fn kws_pronounce(phrase: &str) -> Result<serde_json::Value, String> {
+    kws_response(kws_client(5)?.get(format!("{}/kws/pronounce", STT_SERVER_URL))
+        .query(&[("phrase", phrase)]).send())
+}
+
 pub fn test_wake_audio(path: &str, config: &crate::commands::config::AppConfig) -> Result<serde_json::Value, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let mut reader = hound::WavReader::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;

@@ -195,6 +195,7 @@ pub fn run() {
             commands::voice::stop_enroll_recording,
             commands::voice::enroll_speaker,
             commands::voice::wake_model_status,
+            commands::voice::wake_pronunciation,
             commands::voice::install_wake_model,
             commands::voice::test_wake_word,
             commands::voice::train_speaker,

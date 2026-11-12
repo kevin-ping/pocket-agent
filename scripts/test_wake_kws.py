@@ -143,15 +143,20 @@ class EngineTests(unittest.TestCase):
 
 class SplitTests(unittest.TestCase):
     WORDS = frozenset({'HEY', 'MIMI', 'KYU', 'MI', 'KU', 'JARVIS', 'BOT', 'Z', 'ORB', 'LAX',
-                       'A', 'B', 'AB', 'ABC', 'BCD', 'D'})
+                       'A', 'B', 'AB', 'ABC', 'BCD', 'D', 'POCK', 'Y'})
 
     def test_dictionary_words_are_kept(self):
         self.assertEqual(pronounceable_text('hey jarvis', self.WORDS), 'HEY JARVIS')
 
     def test_unknown_word_is_split(self):
         self.assertEqual(split_word('MIMIKYU', self.WORDS), ['MIMI', 'KYU'])
-        self.assertEqual(pronounceable_text('hey mimikyu', self.WORDS), 'HEY MIMI KYU')
-        self.assertEqual(pronounceable_text('嘿 jarvisbot', self.WORDS), '嘿 JARVIS BOT')
+        self.assertEqual(pronounceable_text('hey mimikyu', self.WORDS), 'HEY MIMI+KYU')
+        self.assertEqual(pronounceable_text('嘿 jarvisbot', self.WORDS), '嘿 JARVIS+BOT')
+
+    def test_split_pieces_stay_one_word(self):
+        self.assertEqual(pronounceable_text('hey pocky', self.WORDS), 'HEY POCK+Y')
+        # Typed apart by the user: still two words, so Y keeps its letter name.
+        self.assertEqual(pronounceable_text('hey pock y', self.WORDS), 'HEY POCK Y')
 
     def test_single_letter_pieces_are_avoided(self):
         # ABCDE+F is shorter but ends in a letter name; AB+CD+EF has none.
@@ -179,7 +184,7 @@ class SplitTests(unittest.TestCase):
         with patch.object(wake_kws, 'FILES', ['en.phone'] * 3), patch.dict(sys.modules, sherpa_onnx=FakeSherpa), \
                 patch.object(wake_kws, 'engine_error', return_value=None), patch.object(wake_kws, 'text2token', text2token):
             kws._model(dict(phrase='hey mimikyu', kws_threshold=0.25))
-        self.assertEqual(seen['text'], 'HEY MIMI KYU')
+        self.assertEqual(seen['text'], 'HEY MIMI+KYU')
         self.assertTrue(seen['keyword'].strip().endswith('@hey_mimikyu'))
 
 
@@ -203,6 +208,15 @@ class Text2TokenTests(unittest.TestCase):
         tokens, lexicon = self.files('HEY HH EY1\n', ['HH', 'EY1'])
         self.assertEqual(wake_kws.text2token('HEY QQQ', tokens, lexicon), [])
 
+    def test_final_y_after_consonant_reads_as_suffix(self):
+        tokens, lexicon = self.files('HEY HH EY1\nPOCK P AA1 K\nPA P AA1\nY W AY1\n',
+                                     ['HH', 'EY1', 'P', 'AA1', 'K', 'W', 'AY1', 'IY0'])
+        t2t = lambda text: ' '.join(wake_kws.text2token(text, tokens, lexicon))
+        self.assertEqual(t2t('HEY POCK+Y'), 'HH EY1 P AA1 K IY0')
+        self.assertEqual(t2t('HEY POCK Y'), 'HH EY1 P AA1 K W AY1')
+        self.assertEqual(t2t('HEY PA+Y'), 'HH EY1 P AA1 W AY1')
+        self.assertEqual(t2t('HEY POCK+QQ'), '')
+
     def test_token_missing_from_table_is_empty(self):
         tokens, lexicon = self.files('HEY HH EY1\n', ['HH'])
         self.assertEqual(wake_kws.text2token('HEY', tokens, lexicon), [])
@@ -213,6 +227,30 @@ class Text2TokenTests(unittest.TestCase):
         self.assertEqual(' '.join(wake_kws.text2token('你好小星', *args)), 'n ǐ h ǎo x iǎo x īng')
         self.assertEqual(' '.join(wake_kws.text2token('HELLO COMPUTER', *args)), 'HH AH0 L OW1 K AH0 M P Y UW1 T ER0')
         self.assertEqual(wake_kws.text2token('ZZQXJ', *args), [])
+        words = wake_kws._lexicon_words(args[1])
+        self.assertEqual(' '.join(wake_kws.text2token(pronounceable_text('hey pocky', words), *args)),
+                         'HH EY1 P AA1 K IY0')
+        self.assertEqual(' '.join(wake_kws.text2token(pronounceable_text('hey pock y', words), *args)),
+                         'HH EY1 P AA1 K W AY1')
+
+    def test_pronounce_reports_text_and_tokens(self):
+        d = Path(tempfile.mkdtemp())
+        (d / 'en.phone').write_text('HEY HH EY1\nMIMI M IY1 M IY0\nKYU K Y UW1\n', encoding='utf-8')
+        (d / 'tokens.txt').write_text(''.join(f'{t} {i}\n' for i, t in enumerate(
+            ['HH', 'EY1', 'M', 'IY1', 'IY0', 'K', 'Y', 'UW1'])), encoding='utf-8')
+        kws = WakeKws(tempfile.gettempdir(), tempfile.gettempdir(), Mock())
+        kws.path = d
+        with patch.object(wake_kws, 'FILES', ['en.phone', 'tokens.txt']):
+            self.assertEqual(kws.pronounce(' hey mimikyu '), dict(
+                text='HEY MIMI+KYU', tokens=['HH', 'EY1', 'M', 'IY1', 'M', 'IY0', 'K', 'Y', 'UW1']))
+            for phrase, code in [('  ', 'wake_phrase_empty'), ('hey 1', 'wake_phrase_invalid'),
+                                 ('hey qqq', 'wake_phrase_unpronounceable')]:
+                with self.subTest(phrase=phrase), self.assertRaises(WakeError) as cm: kws.pronounce(phrase)
+                self.assertEqual(cm.exception.code, code)
+        (d / 'tokens.txt').unlink()
+        with patch.object(wake_kws, 'FILES', ['en.phone', 'tokens.txt']), self.assertRaises(WakeError) as cm:
+            kws.pronounce('hey mimikyu')
+        self.assertEqual(cm.exception.code, 'wake_model_missing')
 
 
 if __name__ == '__main__': unittest.main()

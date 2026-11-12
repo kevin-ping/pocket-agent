@@ -29,7 +29,7 @@
   } from './lib/settingsI18n';
   import { convLabelsLang } from './lib/i18n';
   import { PRESET_AVATAR_IMAGE, PRESET_AVATAR_GIF } from './lib/avatarPresets';
-  import { wakeErrorMessage, wakeSaveNotice } from './lib/wakeErrors';
+  import { parseWakeError, wakeErrorMessage, wakeSaveNotice } from './lib/wakeErrors';
 
   type Section = 'general' | 'avatar' | 'voice' | 'conversation' | 'interruption' | 'wake' | 'phones';
   type PairingQr = { svg: string; expires_in: number; generation: number };
@@ -219,6 +219,43 @@
     finally { modelLoading = false; }
   }
   function lang() { return local?.ui_lang ?? 'en'; }
+
+  // What the detector listens for: a word missing from its dictionary is
+  // spelled with dictionary pieces ("hey pock-y"). Reads only the phrase and
+  // modelReady; a late reply for an older phrase is dropped by seq. Preview
+  // errors only replace the line, never `error` or saving.
+  let wakePronounced = $state<{ spelled: string; tokens: string } | null>(null);
+  let wakePronounceError = $state('');
+  let pronounceSeq = 0;
+  // A derived value only notifies when it changes, so replacing `local` with
+  // the same phrase (asset load, save) does not refetch.
+  const wakePhraseTrimmed = $derived(local?.wake_phrase.trim() ?? '');
+  $effect(() => {
+    const phrase = wakePhraseTrimmed;
+    const ready = modelReady;
+    const seq = ++pronounceSeq;
+    wakePronounced = null;
+    wakePronounceError = '';
+    if (!phrase || !isTauri || !ready) return;
+    const timer = setTimeout(async () => {
+      try {
+        const r = await invoke<{ text: string; tokens: string[] }>('wake_pronunciation', { phrase });
+        if (seq !== pronounceSeq) return;
+        const spelled = r.text.toLowerCase().replace(/\+/g, '-');
+        wakePronounced = {
+          spelled: spelled === phrase.toLowerCase().replace(/\s+/g, ' ') ? '' : spelled,
+          tokens: r.tokens.join(' '),
+        };
+      } catch (e) {
+        if (seq !== pronounceSeq) return;
+        const code = parseWakeError(e)?.code;
+        if (code === 'wake_phrase_unpronounceable' || code === 'wake_phrase_invalid') {
+          wakePronounceError = wakeErrorMessage(lang(), e);
+        }
+      }
+    }, 350);
+    return () => clearTimeout(timer);
+  });
   async function testWakePhrase() {
     if (!local || enrolling) return;
     if (!local.wake_phrase.trim()) { error = wakeText.required; return; }
@@ -689,12 +726,17 @@
           <section class="card">
             <Toggle label={text.wakeEnabled} hint={text.hintWakeEnabled} value={local.wake_word_enabled} change={() => local && (local.wake_word_enabled = !local.wake_word_enabled)} />
             <Field label={wakeText.phrase}>
-              <input type="text" aria-label={wakeText.phrase} maxlength="48" placeholder="桃子桃子 / star start" bind:value={local.wake_phrase} disabled={enrolling} />
+              <input type="text" aria-label={wakeText.phrase} maxlength="48" placeholder="助理助理 / pocky pocky" bind:value={local.wake_phrase} disabled={enrolling} />
             </Field>
             {#if local.wake_word_enabled && !local.wake_phrase.trim()}
               <p class="wake-help error" role="alert">{convLabelsLang(local.ui_lang).wakeNeedsPhrase}</p>
             {/if}
             <p class="wake-help">{wakeText.phraseHint}</p>
+            {#if wakePronounceError}
+              <p class="wake-help error" role="alert">{wakePronounceError}</p>
+            {:else if wakePronounced}
+              <p class="wake-help">{text.wakeListensFor} {#if wakePronounced.spelled}<code>{wakePronounced.spelled}</code> · {/if}<code>{wakePronounced.tokens}</code></p>
+            {/if}
             <div class="sample">
               <div><strong>{wakeText.model}</strong><p class:error={!!modelError}>{modelError || (modelReady ? wakeText.ready : wakeText.missing)}</p></div>
               {#if !modelReady && !modelError}<button class="secondary" onclick={downloadWakeModel} disabled={modelLoading}>{modelLoading ? wakeText.downloading : wakeText.download}</button>{/if}

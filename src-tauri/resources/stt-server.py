@@ -786,6 +786,11 @@ def kws_status():
     return kws.status()
 
 
+@app.get("/kws/pronounce")
+async def kws_pronounce(phrase: str = ""):
+    return await _kws_call(kws.pronounce, phrase)
+
+
 @app.post("/kws/install")
 async def kws_install():
     return await _kws_call(kws.install)

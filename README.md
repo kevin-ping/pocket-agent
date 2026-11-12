@@ -108,6 +108,7 @@ that keeps Whisper, Silero VAD, the speaker model and the KWS model loaded:
 | `POST /vad`, `POST /vad/check` | Silero VAD — speech present? used by the barge-in confirmation gate |
 | `POST /speaker/embed`, `/speaker/enroll`, `/speaker/train` | voiceprint enrollment and matching |
 | `GET /kws/status`, `POST /kws/install`, `/kws/session`, `/kws/audio/{sid}`, `/kws/check` | sherpa-onnx keyword spotting for the wake word |
+| `GET /kws/pronounce?phrase=…` | What the wake detector would listen for (`text`, `tokens`); read-only |
 | `GET /health` | liveness |
 
 If the HTTP path fails, transcription falls back to a one-shot subprocess, so dictation keeps
@@ -499,7 +500,7 @@ Configured in **Settings → Voice** (not via `.env`):
 
 Voiceprint enrollment and the KWS model download are driven from the same settings page; they call the resident voice service's `/speaker/*` and `/kws/*` endpoints.
 
-English words missing from the model's pronunciation dictionary are split into dictionary words for pronunciation only (for example `hey mimikyu` is pronounced as `hey mimi kyu`); the saved phrase is unchanged. If wake cannot start (empty or unpronounceable phrase, missing voiceprint, unsupported macOS), the other settings are still saved and the settings page explains what to fix.
+English words missing from the model's pronunciation dictionary are split into dictionary words for pronunciation only (for example `hey mimikyu` is pronounced as `hey mimi-kyu`); the saved phrase is unchanged. A final `y` after a consonant is read as "-ee" rather than the letter name (`hey pocky` → `hey pock-y`, "pock-ee"). The settings page shows what the detector actually listens for under the wake phrase box. If wake cannot start (empty or unpronounceable phrase, missing voiceprint, unsupported macOS), the other settings are still saved and the settings page explains what to fix.
 
 ### Continuous Conversation
 

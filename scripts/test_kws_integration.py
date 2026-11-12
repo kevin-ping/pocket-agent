@@ -17,6 +17,10 @@ headers={'authorization':'Bearer test-token','origin':'tauri://localhost'}
 assert c.get('/kws/status').status_code==403
 assert c.get('/kws/status',headers={'origin':'tauri://localhost'}).status_code==401
 assert c.get('/kws/status',headers=headers).json()['ready']
+assert c.get('/kws/pronounce',params={'phrase':'light up'},headers={'origin':'tauri://localhost'}).status_code==401
+r=c.get('/kws/pronounce',params={'phrase':'light up'},headers=headers);assert r.status_code==200 and r.json()['tokens'],r.text
+r=c.get('/kws/pronounce',params={'phrase':'hey 1'},headers=headers)
+assert r.status_code==422 and r.json()['detail']['code']=='wake_phrase_invalid',r.text
 config=dict(phrase='light up',owner_only=False)
 r=c.post('/kws/session',json=config,headers=headers);assert r.status_code==200,r.text
 sid=r.json()['session']
@@ -32,4 +36,4 @@ assert r.status_code==200,r.text
 assert r.json()['keyword_match'] and r.json()['speaker_match'],r.text
 assert not m.kws.sessions
 assert c.post('/speaker/train',content=b'').status_code==410
-print('HTTP auth, sequence rejection, real WAV detection, cleanup and retired training: PASS')
+print('HTTP auth, pronunciation preview, sequence rejection, real WAV detection, cleanup and retired training: PASS')

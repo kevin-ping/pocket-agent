@@ -26,6 +26,9 @@ FILES = [f'encoder-{SUFFIX}.int8.onnx', f'decoder-{SUFFIX}.onnx',
          f'joiner-{SUFFIX}.int8.onnx', 'tokens.txt', 'en.phone']
 # sherpa-onnx 1.12.26 needs this; requirements-stt.txt picks 1.10.46 below it.
 NATIVE_MIN_MACOS = '13.4'
+# How a last split piece sounds as an English suffix instead of a letter name:
+# "pock+y" is "pock-ee" (ROCKY, BECKY), not "pock-why".
+SUFFIX_SOUNDS = {'Y': ['IY0']}
 
 
 class WakeError(ValueError):
@@ -79,7 +82,9 @@ def _table(path, values):
 def text2token(text, tokens, lexicon):
     """phone+ppinyin tokens for `text`, or [] when a word or token is unknown.
     Ported from sherpa-onnx 1.12.26 sherpa_onnx/utils.py text2token (Apache-2.0),
-    which sherpa-onnx 1.10.46 (used on macOS < 13.4) does not have."""
+    which sherpa-onnx 1.10.46 (used on macOS < 13.4) does not have.
+    Addition: a word joined with `+` (from pronounceable_text) is read piece by
+    piece, with a final suffix piece after a consonant read from SUFFIX_SOUNDS."""
     from pypinyin import pinyin
     from pypinyin.contrib.tone_convert import to_finals_tone, to_initials
     phones, table = _table(lexicon, True), _table(tokens, False)
@@ -87,6 +92,16 @@ def text2token(text, tokens, lexicon):
     for word in text.split():
         if word in phones:
             result += phones[word]
+        elif '+' in word:
+            pieces = word.split('+')
+            for i, piece in enumerate(pieces):
+                if (i == len(pieces) - 1 and piece in SUFFIX_SOUNDS
+                        and pieces[i - 1][-1] not in 'AEIOUY'):
+                    result += SUFFIX_SOUNDS[piece]
+                elif piece in phones:
+                    result += phones[piece]
+                else:
+                    return []
         elif re.fullmatch(r'[\u4e00-\u9fff]+', word):
             for x in (p[0] for p in pinyin(word)):
                 parts = [part for part in (to_initials(x, strict=False), to_finals_tone(x, strict=False)) if part]
@@ -116,8 +131,9 @@ def split_word(word, words):
 
 def pronounceable_text(phrase, words):
     """Upper-case `phrase` with every English word missing from the dictionary
-    replaced by its pieces. Only the pronunciation input changes; the saved
-    phrase and the keyword label keep the user's spelling."""
+    replaced by its pieces, joined with `+` so text2token can tell them from
+    words the user typed apart ("pock y"). Only the pronunciation input
+    changes; the saved phrase and the keyword label keep the user's spelling."""
     def replace(match):
         word = match.group(0)
         if word in words:
@@ -126,18 +142,23 @@ def pronounceable_text(phrase, words):
         if pieces is None:
             raise WakeError('wake_phrase_unpronounceable', f'No pronunciation for "{word.lower()}"',
                             word=word.lower())
-        return ' '.join(pieces)
+        return '+'.join(pieces)
     return re.sub(r'[A-Z]+', replace, phrase.upper())
+
+
+def validate_phrase(phrase):
+    phrase = phrase.strip()
+    if not phrase:
+        raise WakeError('wake_phrase_empty', 'Set a wake phrase first.')
+    if not 2 <= len(phrase) <= 48 or not re.fullmatch(r'[A-Za-z\u4e00-\u9fff ]+', phrase):
+        raise WakeError('wake_phrase_invalid', 'Use 2–48 Chinese or English characters and spaces for the wake phrase.')
+    return phrase
 
 
 def validate_config(config):
     if not isinstance(config, dict) or not isinstance(config.get('phrase'), str):
         raise ValueError('Invalid wake configuration')
-    phrase = config['phrase'].strip()
-    if not phrase:
-        raise WakeError('wake_phrase_empty', 'Set a wake phrase first.')
-    if not 2 <= len(phrase) <= 48 or not re.fullmatch(r'[A-Za-z\u4e00-\u9fff ]+', phrase):
-        raise WakeError('wake_phrase_invalid', 'Use 2–48 Chinese or English characters and spaces for the wake phrase.')
+    phrase = validate_phrase(config['phrase'])
     threshold = config.get('kws_threshold', 0.25)
     speaker_threshold = config.get('speaker_threshold', 0.35)
     if (not isinstance(threshold, (int, float)) or not math.isfinite(threshold)
@@ -205,6 +226,22 @@ class WakeKws:
                     (staged / name).replace(self.path / name)
             return self.status()
 
+    def pronounce(self, phrase):
+        """What the detector would listen for, without loading the engine."""
+        text, tokens = self._pronounce(validate_phrase(phrase))
+        return dict(text=text, tokens=tokens)
+
+    def _pronounce(self, phrase):
+        if not all((self.path / f).is_file() for f in FILES):
+            raise WakeError('wake_model_missing', 'Download the wake model in Settings first.')
+        lexicon = str(self.path / 'en.phone')
+        text = pronounceable_text(phrase, _lexicon_words(lexicon))
+        tokens = text2token(text, str(self.path / 'tokens.txt'), lexicon)
+        if not tokens:
+            raise WakeError('wake_phrase_unpronounceable', 'Unable to convert this wake phrase to pronunciations',
+                            word=phrase)
+        return text, tokens
+
     def _model(self, config):
         key = (config['phrase'], config['kws_threshold'])
         if key in self.models:
@@ -214,14 +251,8 @@ class WakeKws:
         if error is not None:
             raise error
         import sherpa_onnx
-        if not all((self.path / f).is_file() for f in FILES):
-            raise WakeError('wake_model_missing', 'Download the wake model in Settings first.')
-        lexicon = str(self.path / 'en.phone')
-        text = pronounceable_text(config['phrase'], _lexicon_words(lexicon))
-        tokens = text2token(text, str(self.path / 'tokens.txt'), lexicon)
-        if not tokens:
-            raise WakeError('wake_phrase_unpronounceable', 'Unable to convert this wake phrase to pronunciations',
-                            word=config['phrase'])
+        text, tokens = self._pronounce(config['phrase'])
+        print(f'[wake] phrase "{config["phrase"]}" -> {text} -> {" ".join(tokens)}', file=sys.stderr, flush=True)
         keyword = ' '.join(tokens) + ' @' + config['phrase'].replace(' ', '_')
         # KeywordSpotter reads the file during construction only. The file is
         # closed before sherpa opens it: Windows refuses a second open of a
