@@ -1,10 +1,13 @@
 <script lang="ts">
   import { characterState, type CharacterState } from '../stores/character';
+  import { settingsStore } from '../stores/settings';
+  import { convLabelsLang } from '../i18n';
 
   export let skinType: 'default-css' | 'rive' | 'lottie' = 'default-css';
 
   let state: CharacterState;
   $: state = $characterState;
+  $: labels = convLabelsLang($settingsStore.ui_lang);
 
   // will-change 只在动画活跃时开启，idle 时释放 GPU 合成层
   // 旧款 Intel Mac 显存有限，持续占用合成层会拖慢整机
@@ -16,7 +19,7 @@
   style:will-change={willChange}
 
   role="img"
-  aria-label="Pocket Agent 角色 — 当前状态: {state}"
+  aria-label={labels.characterStatus(state)}
 >
   {#if skinType === 'default-css'}
     <div class="body-wrap">

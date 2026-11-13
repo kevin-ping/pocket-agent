@@ -10,6 +10,11 @@
 
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { listen as tauriListen, type Event, type EventCallback, type UnlistenFn } from '@tauri-apps/api/event';
+import { get } from 'svelte/store';
+import { convLabelsLang } from './i18n';
+// Circular (settings.ts imports invoke from here); both sides only use the
+// other inside functions. Before the settings load, ui_lang is the default 'en'.
+import { settingsStore } from './stores/settings';
 
 export type { UnlistenFn };
 
@@ -32,6 +37,10 @@ function socketUrl(): string {
   return `${scheme}://${location.host}/ui/ws?token=${encodeURIComponent(token)}`;
 }
 
+function noticeLabels() {
+  return convLabelsLang(get(settingsStore).ui_lang);
+}
+
 function showNotice(text: string) {
   let el = document.getElementById('ipc-notice');
   if (!el) {
@@ -46,7 +55,7 @@ function showNotice(text: string) {
 
 /** Wait until the Mac answers again, then reload: the page's state missed events while away. */
 async function reloadWhenReachable() {
-  showNotice('与 Pocket Agent 的连接已断开，正在重连…');
+  showNotice(noticeLabels().noticeDisconnected);
   for (;;) {
     try {
       const res = await fetch(location.href, { cache: 'no-store' });
@@ -83,12 +92,12 @@ function connect(): Promise<WebSocket> {
       for (const p of pending.values()) p.reject('connection closed');
       pending.clear();
       if (e.code === CLOSE_REPLACED) {
-        showNotice('Pocket Agent 已在另一台设备上打开');
+        showNotice(noticeLabels().noticeReplaced);
         return; // reconnecting would kick the newer page right back
       }
       if (opened) { void reloadWhenReachable(); return; }
       // Never opened: Mac unreachable or the key was refused (401 looks the same here).
-      showNotice('无法连接 Pocket Agent(检查地址和 key),稍后重试…');
+      showNotice(noticeLabels().noticeUnreachable);
       socket = null;
       setTimeout(() => { void connect().then(resolve); }, RETRY_MS);
     };

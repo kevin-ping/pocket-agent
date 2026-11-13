@@ -4,6 +4,7 @@
   import { chatStore, statusVisible } from '../../stores/chat';
   import { settingsStore } from '../../stores/settings';
   import { avatarGradient } from '../../avatarColors';
+  import { convLabelsLang } from '../../i18n';
   import MobileAvatar from './MobileAvatar.svelte';
   import DynamicIsland from '../DynamicIsland.svelte';
   import ChatPanel from '../ChatPanel.svelte';
@@ -39,8 +40,7 @@
   // chat.ts keeps 🔧 steps until the reply finishes, so a turn counts as
   // replying as soon as the reply starts, even with steps still listed.
   let replying = $derived($characterState === 'speaking' || $chatStore.streamingContent !== '');
-  let sttPlaceholder = $derived($settingsStore.ui_lang === 'en' ? 'What you say shows up here' : '你说的话会显示在这里');
-  let toolsPlaceholder = $derived($settingsStore.ui_lang === 'en' ? 'Tools and reasoning show up here' : '工具和思考过程会显示在这里');
+  let labels = $derived(convLabelsLang($settingsStore.ui_lang));
 
   // Page 0: reply + transcript; page 1: tools + reasoning.
   let pager: HTMLDivElement | undefined = $state();
@@ -182,16 +182,16 @@
       class="toggle left"
       class:armed={parkArmed}
       onclick={moveToDesktop}
-      aria-label={parkArmed ? '再点一次移到电脑' : '移到电脑'}
+      aria-label={parkArmed ? labels.moveToDesktopConfirm : labels.moveToDesktop}
     ><Icon name="monitor" size={20} color="rgba(232, 232, 240, 0.92)" /></button>
-    {#if parkArmed}<span class="park-hint" role="status">再点一次移到电脑</span>{/if}
+    {#if parkArmed}<span class="park-hint" role="status">{labels.moveToDesktopConfirm}</span>{/if}
     {#if camera}
       <button
         type="button"
         class="toggle"
         class:on={cameraOn}
         onclick={toggleCamera}
-        aria-label={cameraOn ? '关闭相机' : '打开相机'}
+        aria-label={cameraOn ? labels.cameraClose : labels.cameraOpen}
         aria-pressed={cameraOn}
       ><Icon name="camera" size={20} color="rgba(232, 232, 240, 0.92)" /></button>
     {/if}
@@ -199,10 +199,10 @@
 
   <section class="dock">
     {#if cameraOn}
-      <div class="viewfinder" bind:this={viewfinder} aria-label="相机取景"></div>
-      <button type="button" class="flip" onclick={flipCamera} aria-label="切换前后摄像头">
+      <div class="viewfinder" bind:this={viewfinder} aria-label={labels.cameraViewfinder}></div>
+      <button type="button" class="flip" onclick={flipCamera} aria-label={labels.cameraFlip}>
         <Icon name="switch-camera" size={18} color="rgba(232, 232, 240, 0.92)" />
-        <span>翻转</span>
+        <span>{labels.cameraFlipShort}</span>
       </button>
     {:else}
     <div class="pager" bind:this={pager} onscroll={onPagerScroll}>
@@ -213,7 +213,7 @@
           {#if $chatStore.sttText !== null}
             {#key $chatStore.sttText}<span class="stt-text">{$chatStore.sttText}</span>{/key}
           {:else}
-            <span class="stt-text">{sttPlaceholder}</span>
+            <span class="stt-text">{labels.mobileSttPlaceholder}</span>
           {/if}
         </div>
       </div>
@@ -224,7 +224,7 @@
             <div class="reasoning"><ReasoningPanel visible={reasoningVisible} /></div>
           {/if}
         {:else}
-          <div class="tools-empty">{toolsPlaceholder}</div>
+          <div class="tools-empty">{labels.mobileToolsPlaceholder}</div>
         {/if}
       </div>
     </div>
@@ -235,7 +235,7 @@
           class="dot"
           class:on={page === i}
           onclick={() => goTo(i)}
-          aria-label={i === 0 ? '对话' : '工具和理由'}
+          aria-label={i === 0 ? labels.pageChat : labels.pageTools}
           aria-current={page === i}
         ></button>
       {/each}

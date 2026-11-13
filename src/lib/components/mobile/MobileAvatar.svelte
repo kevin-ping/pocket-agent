@@ -2,6 +2,8 @@
   import { characterState, type CharacterState } from '../../stores/character';
   import MeshFace, { MESH_SUPPORTED } from '../MeshFace.svelte';
   import AvatarIcon from '../AvatarIcon.svelte';
+  import { settingsStore } from '../../stores/settings';
+  import { convLabelsLang } from '../../i18n';
 
   // The phone's avatar: no circle, frame or rings — the whole picture, as large
   // as the stage allows. Same inputs as AvatarIcon.
@@ -48,10 +50,11 @@
     const src = mediaSkins[$characterState] ?? avatarImage ?? '';
     return src === failedSrc ? '' : src;
   });
+  let labels = $derived(convLabelsLang($settingsStore.ui_lang));
   let isVideo = $derived(mediaSrc.startsWith('data:video') || mediaSrc.endsWith('.mp4') || mediaSrc.endsWith('.webm'));
 </script>
 
-<div class="mobile-avatar" aria-label="Pocket Agent — 状态: {$characterState}">
+<div class="mobile-avatar" aria-label={labels.avatarStatus($characterState)}>
   {#if meshStatus !== 'failed'}
     <MeshFace variant="fill" state={$characterState} {emotion} {interrupted} mouth={mouthActive}
       expressions={meshExpressions} emotions={meshEmotions} customSource={meshCustom} bind:status={meshStatus} />
@@ -59,7 +62,7 @@
     <!-- svelte-ignore a11y_media_has_caption -->
     <video class="media" src={mediaSrc} autoplay loop muted playsinline onerror={() => (failedSrc = mediaSrc)}></video>
   {:else if mediaSrc}
-    <img class="media" src={mediaSrc} alt="头像" draggable="false" onerror={() => (failedSrc = mediaSrc)} />
+    <img class="media" src={mediaSrc} alt={labels.avatarAlt} draggable="false" onerror={() => (failedSrc = mediaSrc)} />
   {:else}
     <!-- No picture at all: the desktop's drawn face, enlarged. -->
     <div class="drawn">

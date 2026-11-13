@@ -2,7 +2,7 @@
   import { fly } from 'svelte/transition';
   import { chatStore } from '../stores/chat';
   import { settingsStore } from '../stores/settings';
-  import { idleHint } from '../i18n';
+  import { convLabelsLang, idleHint } from '../i18n';
   import StatusStrip from './StatusStrip.svelte';
 
   let { side = 'right', onCollapse }: { side?: 'left' | 'right'; onCollapse: () => void } = $props();
@@ -89,6 +89,7 @@
     }
   });
 
+  let labels = $derived(convLabelsLang($settingsStore.ui_lang));
   let isError = $derived(!$chatStore.isStreaming && !!$chatStore.error);
   let isStreaming = $derived($chatStore.isStreaming);
 </script>
@@ -100,7 +101,7 @@
   out:fly={{ x: side === 'right' ? -12 : 12, duration: 160, opacity: 0 }}
 >
   <!-- Close button (floating, no title bar) -->
-  <button class="close-btn" onclick={onCollapse} title="收起" aria-label="收起聊天窗口">✕</button>
+  <button class="close-btn" onclick={onCollapse} title={labels.collapse} aria-label={labels.collapseChat}>✕</button>
 
   <!-- Content area -->
   <div class="content-area" bind:this={contentEl} class:error={isError}>

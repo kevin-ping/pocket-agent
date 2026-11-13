@@ -20,7 +20,7 @@
   import { settingsStore } from './lib/stores/settings';
   import { layoutStore } from './lib/stores/layout';
   import { onBackgroundSubagents, onSpeechDetected, onTurnEnd, onTurnStart, onTurnStep, refreshComputerStatus, settleSubagents } from './lib/stores/status';
-  import { STATUS_PHRASES, langFromVoice, detectLang, convLabels, convLabelsLang, type LangKey } from './lib/i18n';
+  import { STATUS_PHRASES, langFromVoice, detectLang, convLabelsLang, type LangKey } from './lib/i18n';
   import { wakeErrorMessage } from './lib/wakeErrors';
   import { createSetupSequencer, type SetupSnapshot } from './lib/voiceSetup';
   import { PRESET_AVATAR_IMAGE, PRESET_AVATAR_GIF } from './lib/avatarPresets';
@@ -78,7 +78,7 @@
         ttsEnabled: get(settingsStore).tts_enabled,
       });
     } catch (e) {
-      chatStore.setError(`请求未完成: ${e}`);
+      chatStore.setError(ui().requestFailed(String(e)));
       onTurnEnd();
       characterState.toIdle();
       spiritPhase = 0;
@@ -147,6 +147,7 @@
   // ─── Media skins: avatar content per state ───
   // Unset pictures fall back to the bundled presets; a custom static picture
   // without a custom animation keeps showing while thinking / speaking.
+  $: labels = convLabelsLang($settingsStore.ui_lang);
   $: avatarImage = $settingsStore.avatar_image ?? PRESET_AVATAR_IMAGE;
   $: avatarAnimation = $settingsStore.avatar_gif ?? $settingsStore.avatar_image ?? PRESET_AVATAR_GIF;
   $: mediaSkins = {
@@ -173,7 +174,8 @@
   let conversationCueEpoch = 0;
   let interruptedReply = false;
   // Hermes compacts the session context before some turns (can take a couple of minutes).
-  const COMPACTING_STEP = '🗜️ 正在整理之前的对话，可能要一两分钟…';
+  // Kept so the step can be removed even if ui_lang changed since it was added.
+  let compactingStep = '';
   let compactingThisTurn = false;
   // Long turns: after 45s with no sound, say "still working" (at most once per 90s).
   let lastSoundAt = 0;
@@ -280,13 +282,18 @@
           conversationActive = false;
           characterState.toIdle();
           islandMode = 'idle';
-          chatStore.setError(`连续对话启动失败: ${e}`);
+          chatStore.setError(ui().conversationStartFailed(String(e)));
         });
     });
   }
 
+  // Labels in the current UI language, read when the text is shown.
+  function ui() {
+    return convLabelsLang(get(settingsStore).ui_lang);
+  }
+
   function voiceListeningText(): string {
-    return `🎤 ${convLabels(get(settingsStore).tts_primary_voice).voiceListening}`;
+    return `🎤 ${ui().voiceListening}`;
   }
 
   function clearBridgeFallbackTimer() {
@@ -317,11 +324,11 @@
     enterThinkingVisuals();
     chatStore.clearThinkingSteps();
     chatStore.clearReasoning();
-    chatStore.addThinkingStep('🤔 正在思考...');
+    chatStore.addThinkingStep(ui().thinkingStep);
     cancelPendingStatusSpeech();
     pendingStatusSpeech = setTimeout(() => speakStatus({ kind: 'thinking' }), 250);
     bridgeFallbackTimer = setTimeout(() => {
-      stopBridgeThinking('暂时还没有收到 Hermes 回推');
+      stopBridgeThinking(ui().bridgeNoReply);
     }, 30000);
   }
 
@@ -347,7 +354,7 @@
     const text = typeof preview === 'string'
       ? preview.replace(/\s+/g, ' ').trim().replace(/(\.\.\.|…)$/, '')
       : '';
-    if (!text) return `🔧 查询 ${toolName}...`;
+    if (!text) return ui().toolStep(toolName);
     return `🔧 ${toolName}: ${[...text].slice(0, 60).join('')}...`;
   }
 
@@ -698,7 +705,7 @@
         enterThinkingVisuals();
         chatStore.clearThinkingSteps();
         chatStore.clearReasoning();
-        chatStore.addThinkingStep('🤔 正在思考...');
+        chatStore.addThinkingStep(ui().thinkingStep);
         cancelPendingStatusSpeech();
         pendingStatusSpeech = setTimeout(() => speakStatus({ kind: 'thinking' }), 250);
         debugState('chat-thinking-start');
@@ -835,11 +842,12 @@
         if (e.payload) {
           if (compactingThisTurn) return;
           compactingThisTurn = true;
-          chatStore.addThinkingStep(COMPACTING_STEP);
+          compactingStep = ui().compactingStep;
+          chatStore.addThinkingStep(compactingStep);
           speakStatus({ kind: 'compacting' });
         } else {
           compactingThisTurn = false;
-          chatStore.removeThinkingStep(COMPACTING_STEP);
+          chatStore.removeThinkingStep(compactingStep);
         }
       }),
 
@@ -866,7 +874,7 @@
           chatStore.addThinkingStep(toolStepLabel(toolName, payload.preview));
           if (toolName) speakStatus({ kind: 'querying', name: toolName });
         } catch {
-          chatStore.addThinkingStep(`🔧 正在执行操作...`);
+          chatStore.addThinkingStep(ui().executingStep);
           speakStatus({ kind: 'executing' });
         }
       }),
@@ -932,20 +940,20 @@
           chatStore.addThinkingStep(toolStepLabel(toolName, payload.preview));
           if (toolName) speakStatus({ kind: 'querying', name: toolName });
         } catch {
-          chatStore.addThinkingStep("🔧 正在执行操作...");
+          chatStore.addThinkingStep(ui().executingStep);
           speakStatus({ kind: 'executing' });
         }
       }),
       listen('bridge-turn-finished', () => {
         debugState('bridge-turn-finished');
         if (bridgeThinkingActive) {
-          stopBridgeThinking('暂时还没有收到 Hermes 回推');
+          stopBridgeThinking(ui().bridgeNoReply);
         }
         autoCloseBreakConfirm();
       }),
       listen<string>('bridge-turn-error', (e) => {
         debugState('bridge-turn-error', { error: e.payload });
-        stopBridgeThinking(`Hermes 转发失败: ${e.payload}`);
+        stopBridgeThinking(ui().bridgeFailed(e.payload));
         autoCloseBreakConfirm();
       }),
 
@@ -954,7 +962,7 @@
         const cfg = get(settingsStore);
         const setupState = get(chatStore).voiceSetupState;
         if (setupState === 'installing' || setupState === 'error') {
-          chatStore.setError(convLabels(cfg.tts_primary_voice).voiceSetupNotReady);
+          chatStore.setError(ui().voiceSetupNotReady);
           return;
         }
         if (cfg.continuous_conversation) {
@@ -982,7 +990,7 @@
             conversationActive = false;
             characterState.toIdle();
             islandMode = 'idle';
-            chatStore.setError(`录音启动失败: ${e}`);
+            chatStore.setError(ui().recordStartFailed(String(e)));
           });
         });
       }),
@@ -1009,7 +1017,7 @@
           islandMode = 'idle';
           spiritPhase = 0;
           characterState.toIdle();
-          chatStore.setError(`录音停止失败: ${e}`);
+          chatStore.setError(ui().recordStopFailed(String(e)));
         });
       }),
       listen('voice-cancel', () => {
@@ -1036,7 +1044,7 @@
         } else {
           spiritPhase = 0;
           characterState.toIdle();
-          chatStore.setError('语音识别结果为空，请重试');
+          chatStore.setError(ui().sttEmpty);
           if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
         }
       }),
@@ -1046,7 +1054,7 @@
         spiritPhase = 0;
         console.warn('[STT]', e.payload.error);
         chatStore.setSttText(null);
-        chatStore.setError(`语音识别失败: ${e.payload.error}`);
+        chatStore.setError(ui().sttFailed(e.payload.error));
         characterState.toIdle();
         if (audioLevelTimer) { clearInterval(audioLevelTimer); audioLevelTimer = null; }
       }),
@@ -1464,13 +1472,13 @@
   <!-- Accessibility guide overlay -->
   {#if showAccessibilityGuide}
     <div class="permission-guide" role="alert">
-      <p class="guide-title"><Icon name="alert-triangle" size={14} color="rgba(255, 200, 80, 0.95)" /> 需要辅助功能权限</p>
+      <p class="guide-title"><Icon name="alert-triangle" size={14} color="rgba(255, 200, 80, 0.95)" /> {labels.a11yTitle}</p>
       <p class="guide-body">
-        🍎 左上角苹果菜单 → 系统设置 → 隐私与安全性 → 辅助功能<br />
-        在右侧列表中找到 Pocket Agent 并打开开关，然后重启应用
+        {labels.a11yPath}<br />
+        {labels.a11yAction}
       </p>
       <button class="guide-btn" on:click={() => (showAccessibilityGuide = false)}>
-        我知道了
+        {labels.gotIt}
       </button>
     </div>
   {/if}

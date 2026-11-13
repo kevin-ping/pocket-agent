@@ -4,6 +4,8 @@
   import { createEventDispatcher } from 'svelte';
   import MeshFace, { MESH_SUPPORTED } from './MeshFace.svelte';
   import { avatarGradient } from '../avatarColors';
+  import { settingsStore } from '../stores/settings';
+  import { convLabelsLang } from '../i18n';
 
   export let avatarImage: string | null = null;
   export let spiritPhase = 0;
@@ -36,6 +38,7 @@
 
   let state: CharacterState;
   $: state = $characterState;
+  $: labels = convLabelsLang($settingsStore.ui_lang);
 
   const STATE_COLORS: Record<CharacterState, { glow: string; ring: string }> = {
     idle:      { glow: 'rgba(107,140,255,0)',    ring: 'rgba(107,140,255,0.35)' },
@@ -74,7 +77,7 @@
   role="button"
   tabindex="0"
   on:keydown={(e) => e.key === 'Enter' && dispatch('expand')}
-  aria-label="Pocket Agent — 状态: {state}"
+  aria-label={labels.avatarStatus(state)}
 >
   <!-- SVG angular corner frame (covers the 96×96 avatar area) -->
   <div class="tech-frame" aria-hidden="true">
@@ -104,7 +107,7 @@
       on:mousedown|stopPropagation
       role="button"
       tabindex="0"
-      aria-label="展开对话"
+      aria-label={labels.expandChat}
     >💬</div>
     <!-- Sound wave rings — 3 layers, staggered delay, scale from center -->
     <div class="wave-ring w1" aria-hidden="true"></div>
@@ -147,7 +150,7 @@
           <!-- svelte-ignore a11y-media-has-caption -->
           <video class="avatar-media" src={mediaSrc} autoplay loop muted playsinline on:error={() => (failedSrc = mediaSrc)}></video>
         {:else}
-          <img class="avatar-media" src={mediaSrc} alt="头像" draggable="false" on:error={() => (failedSrc = mediaSrc)} />
+          <img class="avatar-media" src={mediaSrc} alt={labels.avatarAlt} draggable="false" on:error={() => (failedSrc = mediaSrc)} />
         {/if}
       {:else}
         <div class="css-face" class:talking={mouthActive && !interrupted} style:will-change={willChange}>

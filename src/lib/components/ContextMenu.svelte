@@ -4,11 +4,15 @@
   import Icon from './Icon.svelte';
   import { invoke, isRemote } from '../ipc';
   import { chatStore } from '../stores/chat';
+  import { settingsStore } from '../stores/settings';
+  import { convLabelsLang } from '../i18n';
 
   export let x = 0;
   export let y = 0;
   export let visible = false;
   export let muted = false;
+
+  $: labels = convLabelsLang($settingsStore.ui_lang);
 
   const dispatch = createEventDispatcher<{
     'toggle-mute': void;
@@ -53,16 +57,16 @@
     role="menu"
   >
     <button class="item" role="menuitem" on:click={() => handleAction('clear')}>
-      <Icon name="trash-2" size={14} /> 清空对话
+      <Icon name="trash-2" size={14} /> {labels.menuClear}
     </button>
     <button class="item" role="menuitem" on:click={() => handleAction('mute')}>
-      {muted ? '<Icon name="bell" size={14} /> 取消静音' : '<Icon name="bell-off" size={14} /> 静音'}
+      <Icon name={muted ? 'bell' : 'bell-off'} size={14} /> {muted ? labels.menuUnmute : labels.menuMute}
     </button>
     {#if !isRemote}
       <!-- Quitting PA is a Mac-side action; the phone has no quit. -->
       <div class="divider"></div>
       <button class="item danger" role="menuitem" on:click={() => handleAction('quit')}>
-        <Icon name="x" size={14} /> 退出
+        <Icon name="x" size={14} /> {labels.menuQuit}
       </button>
     {/if}
   </div>

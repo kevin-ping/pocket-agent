@@ -76,7 +76,7 @@
             <span class="step single-line">{step}</span>
           {/each}
         {:else if $characterState === 'thinking'}
-          <span class="step placeholder">🤔 正在思考...</span>
+          <span class="step placeholder">{labels.thinkingStep}</span>
         {/if}
       </div>
     </div>

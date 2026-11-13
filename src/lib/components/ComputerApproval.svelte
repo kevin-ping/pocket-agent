@@ -3,14 +3,17 @@
   import { get } from 'svelte/store';
   import { invoke, listen, type UnlistenFn } from '../ipc';
   import { layoutStore } from '../stores/layout';
+  import { settingsStore } from '../stores/settings';
+  import { convLabelsLang } from '../i18n';
 
   type Approval = { run_id: string; request_id: string; command?: string; description?: string; choices: string[] };
   let pending = $state<Approval[]>([]);
   let busy = $state(false);
   let error = $state('');
   let current = $derived(pending[0]);
+  let labels = $derived(convLabelsLang($settingsStore.ui_lang));
   // Relay exactly the choices Hermes offered; deny first, the rest in Hermes' order.
-  const labels = new Map([['once', '本次允许'], ['session', '本会话允许'], ['always', '始终允许'], ['deny', '拒绝']]);
+  let choiceLabels = $derived(new Map([['once', labels.approvalOnce], ['session', labels.approvalSession], ['always', labels.approvalAlways], ['deny', labels.approvalDeny]]));
   let choices = $derived.by(() => {
     const unique = [...new Set(current?.choices ?? [])];
     return [...unique.filter(c => c === 'deny'), ...unique.filter(c => c !== 'deny')];
@@ -58,20 +61,20 @@
 </script>
 
 {#if current || error}
-  <div class="approval-backdrop" role="dialog" aria-modal="true" aria-label="操作确认">
+  <div class="approval-backdrop" role="dialog" aria-modal="true" aria-label={labels.approvalDialog}>
     <div class="approval">
       {#if current}
-        <strong>Hermes 请求执行操作</strong>
-        <p class="details">{[current.description, current.command || '未提供操作说明'].filter(Boolean).join('\n')}</p>
+        <strong>{labels.approvalTitle}</strong>
+        <p class="details">{[current.description, current.command || labels.approvalNoDetails].filter(Boolean).join('\n')}</p>
       {/if}
       {#if error}<p role="alert">{error}</p>{/if}
       <div class="actions">
         {#if current}
           {#each choices as choice (choice)}
-            <button onclick={() => respond(choice)} disabled={busy}>{labels.get(choice) ?? choice}</button>
+            <button onclick={() => respond(choice)} disabled={busy}>{choiceLabels.get(choice) ?? choice}</button>
           {/each}
         {:else}
-          <button onclick={() => error = ''}>我知道了</button>
+          <button onclick={() => error = ''}>{labels.gotIt}</button>
         {/if}
       </div>
     </div>

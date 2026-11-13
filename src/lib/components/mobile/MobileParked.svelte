@@ -1,11 +1,18 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { invoke } from '../../ipc';
+  import { settingsStore } from '../../stores/settings';
+  import { convLabelsLang } from '../../i18n';
 
   // The phone is parked (FEAT-DEV1): PA moved to the desktop and this page
   // drives nothing. The button takes PA back; the server then sends
   // ui-parked and src/main.ts reloads into the full phone UI.
   let busy = $state(false);
   let failed = $state(false);
+  let labels = $derived(convLabelsLang($settingsStore.ui_lang));
+
+  // The parked page doesn't mount App, so nothing else loads the settings.
+  onMount(() => { settingsStore.load(); });
 
   async function takeOver() {
     busy = true;
@@ -20,10 +27,10 @@
 </script>
 
 <div class="parked">
-  <p class="title">PA 在电脑上</p>
-  <p class="hint">要在手机上继续，点下面的按钮</p>
-  <button type="button" onclick={takeOver} disabled={busy}>{busy ? '正在切回…' : '切回手机'}</button>
-  {#if failed}<p class="error">没有切回来，请再试一次</p>{/if}
+  <p class="title">{labels.parkedTitle}</p>
+  <p class="hint">{labels.parkedHint}</p>
+  <button type="button" onclick={takeOver} disabled={busy}>{busy ? labels.parkedSwitching : labels.parkedTakeOver}</button>
+  {#if failed}<p class="error">{labels.parkedFailed}</p>{/if}
 </div>
 
 <style>
