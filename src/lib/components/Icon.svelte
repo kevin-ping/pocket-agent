@@ -1,5 +1,5 @@
 <script lang="ts">
-  export let name: 'message-square' | 'chat' | 'settings' | 'trash-2' | 'bell' | 'bell-off' | 'x' | 'alert-triangle' | 'audio-lines' | 'lightbulb' | 'camera' | 'switch-camera' = 'x';
+  export let name: 'message-square' | 'chat' | 'settings' | 'trash-2' | 'bell' | 'bell-off' | 'x' | 'alert-triangle' | 'audio-lines' | 'lightbulb' | 'camera' | 'switch-camera' | 'tablet' | 'monitor' = 'x';
   export let size: number = 16;
   export let color: string = 'currentColor';
   export let strokeWidth: number = 2;
@@ -70,5 +70,8 @@
     <circle cx="12" cy="12" r="3" />
     <path d="m18 22-3-3 3-3" />
     <path d="m6 2 3 3-3 3" />
+  {:else if name === 'tablet'}
+    <rect x="4" y="2" width="16" height="20" rx="2" />
+    <line x1="12" y1="18" x2="12.01" y2="18" />
   {/if}
 </svg>

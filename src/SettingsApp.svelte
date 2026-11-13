@@ -13,6 +13,7 @@
   } from './lib/stores/settings';
   import type { CharacterState } from './lib/stores/character';
   import MeshFace, { MESH_SUPPORTED } from './lib/components/MeshFace.svelte';
+  import Icon from './lib/components/Icon.svelte';
   import { avatarGradient } from './lib/avatarColors';
   import Field from './lib/components/settings/Field.svelte';
   import Toggle from './lib/components/settings/Toggle.svelte';
@@ -419,8 +420,16 @@
     }
   }
 
+  // Unsaved changes need a second click (WKWebView has no window.confirm).
+  let discarding = $state(false);
   async function cancel() {
-    if (dirty && !window.confirm(text.dirtyConfirm)) return;
+    if (dirty && !discarding) {
+      discarding = true;
+      error = ''; notice = text.dirtyConfirm;
+      setTimeout(() => { discarding = false; if (notice === text.dirtyConfirm) notice = ''; }, 4000);
+      return;
+    }
+    discarding = false;
     pendingWakeDeletes = [];
     baseline = local ? JSON.stringify(local) : '';
     if (!appWindow) {
@@ -807,7 +816,7 @@
               {@const blocked = source === 'phone' && !phoneIsSource}
               <div class="sample">
                 <div>
-                  <strong>{source === 'phone' ? `📱 ${vpText.phone}` : `💻 ${vpText.desktop}`}</strong>
+                  <strong><Icon name={source === 'phone' ? 'tablet' : 'monitor'} size={13} /> {source === 'phone' ? vpText.phone : vpText.desktop}</strong>
                   <p>{sample ? vpText.recorded(new Date(sample.recorded_at).toLocaleString()) : vpText.notRecorded}</p>
                   {#if blocked}<p>{vpText.phoneUnavailable}</p>{/if}
                 </div>
@@ -905,7 +914,7 @@
       </div>
       <footer>
         <div class="message" role="status" aria-live="polite"><span class:error>{error || notice}</span></div>
-        <button class="ghost" onclick={cancel}>{text.cancel}</button>
+        <button class="ghost" onclick={cancel}>{discarding ? text.discard : text.cancel}</button>
         <button class="primary" onclick={save} disabled={!dirty || saving || enrolling || modelLoading}>{saving ? text.saving : text.save}</button>
       </footer>
     {:else}
@@ -946,7 +955,7 @@
 .wake-tag.pending-delete{opacity:.5;text-decoration:line-through}
 .wake-del{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;padding:0;border:none;background:transparent;color:#8a91a6;font-size:14px;line-height:1;border-radius:8px;cursor:pointer;text-decoration:none}
 .wake-del:hover{background:#dce0ea;color:#c0392b}
-.wake-empty{margin:0;font-size:11px;color:#8a91a6}.sample{padding:16px;display:flex;align-items:center;justify-content:space-between;gap:16px}.sample strong{font-size:12px;color:#1e2235}.sample p{font-size:10px;color:#7a8298;margin-top:4px}.actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.center{height:100%;display:grid;place-items:center;color:#8e97aa}.spinner{width:22px;height:22px;border:2px solid #d4d8e0;border-top-color:#7589f4;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.error{color:#e53e5c}
+.wake-empty{margin:0;font-size:11px;color:#8a91a6}.sample{padding:16px;display:flex;align-items:center;justify-content:space-between;gap:16px}.sample strong{font-size:12px;color:#1e2235}.sample strong :global(svg){vertical-align:-2px}.sample p{font-size:10px;color:#7a8298;margin-top:4px}.actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.center{height:100%;display:grid;place-items:center;color:#8e97aa}.spinner{width:22px;height:22px;border:2px solid #d4d8e0;border-top-color:#7589f4;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.error{color:#e53e5c}
   .error-state{align-content:center;justify-items:center;gap:12px;padding:24px;text-align:center}.error-state p{max-width:480px;line-height:1.5}
   @media(max-width:740px){.shell{grid-template-columns:170px 1fr}.content,header,footer{padding-left:18px;padding-right:18px}.field{gap:12px}.control,select,input[type=range]{min-width:0;width:190px}.asset-grid{grid-template-columns:1fr}.asset+.asset{border-left:0;border-top:1px solid #e2e5ed}}
   }
