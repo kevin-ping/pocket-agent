@@ -674,10 +674,12 @@ def _load_enrolled_voiceprints():
 
 
 @app.post("/speaker/enroll")
-async def speaker_enroll(file: UploadFile = File(...), name: str = Form("Me")):
+async def speaker_enroll(file: UploadFile = File(...), name: str = Form("Me"),
+                         source: str = Form("desktop")):
     """Enroll voice identity independently of the configured wake phrase.
     
-    Saves {name}.bin (speaker embedding). Existing legacy keywords are untouched.
+    Saves {name}.bin (desktop mic) or {name}.phone.bin (phone mic). Existing
+    legacy keywords are untouched.
     """
     import base64
 
@@ -686,6 +688,10 @@ async def speaker_enroll(file: UploadFile = File(...), name: str = Form("Me")):
 
     if not NAME_RE.match(name):
         raise HTTPException(status_code=400, detail="name must match [A-Za-z0-9_-]{1,32}")
+    # The source picks the file, so only the allowlisted names reach a path.
+    emb_path = voiceprint_file(VOICEPRINTS_DIR, name, source)
+    if emb_path is None:
+        raise HTTPException(status_code=422, detail="source must be desktop or phone")
 
     tmp_path = None
     try:
@@ -703,12 +709,11 @@ async def speaker_enroll(file: UploadFile = File(...), name: str = Form("Me")):
 
         # Save embedding to disk
         VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
-        emb_path = VOICEPRINTS_DIR / f"{name}.bin"
         emb_path.write_bytes(emb_bytes)
 
         # Enrollment stores voice identity only; KWS keywords are explicit settings.
 
-        print(f"[stt-server] enrolled '{name}' (dim={len(embedding)}, dur={duration_s:.1f}s)",
+        print(f"[stt-server] enrolled '{name}' from {source} (dim={len(embedding)}, dur={duration_s:.1f}s)",
               file=sys.stderr, flush=True)
 
         return {
@@ -736,13 +741,13 @@ async def speaker_train():
 
 
 # KWS uses unique temporary files only when extracting an owner embedding.
-from wake_kws import WakeError, WakeKws, engine_error
+from wake_kws import WakeError, WakeKws, effective_voiceprint, engine_error, voiceprint_file
 from starlette.concurrency import run_in_threadpool
 
 
-def _kws_verify(samples, speaker):
-    ref_path = VOICEPRINTS_DIR / f"{speaker}.bin"
-    if not NAME_RE.fullmatch(speaker) or not ref_path.is_file() or len(samples) < 8000:
+def _kws_verify(samples, speaker, source):
+    ref_path = effective_voiceprint(VOICEPRINTS_DIR, speaker, source)
+    if ref_path is None or len(samples) < 8000:
         return 0.0
     ref = np.frombuffer(ref_path.read_bytes(), dtype=np.float32)
     # Closed before wave and the embedder reopen it: Windows refuses a second

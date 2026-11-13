@@ -25,13 +25,17 @@
     wakeSettingsText,
     meshSettingsText,
     phoneSettingsText,
+    voiceprintSettingsText,
     type SettingsLang,
   } from './lib/settingsI18n';
   import { convLabelsLang } from './lib/i18n';
   import { PRESET_AVATAR_IMAGE, PRESET_AVATAR_GIF } from './lib/avatarPresets';
   import { parseWakeError, wakeErrorMessage, wakeSaveNotice } from './lib/wakeErrors';
 
-  type Section = 'general' | 'avatar' | 'voice' | 'conversation' | 'interruption' | 'wake' | 'phones';
+  type Section = 'general' | 'avatar' | 'voice' | 'conversation' | 'interruption' | 'voiceprint' | 'wake' | 'phones';
+  type VoiceSource = 'desktop' | 'phone';
+  type VoiceSample = { source: VoiceSource; recorded_at: string };
+  type VoiceprintTest = { scores: { source: VoiceSource; score: number }[]; used: VoiceSource | null; threshold: number; passed: boolean };
   type PairingQr = { svg: string; expires_in: number; generation: number };
   type PairedPhone = { phone_id: string; name: string; created_at: string; last_seen_at: string | null; online: boolean };
   type McpStatus =
@@ -98,8 +102,6 @@
   let meshInput = $state<HTMLInputElement>(undefined!);
   let capturing = $state(false);
   let captureTimer = $state<ReturnType<typeof setInterval> | null>(null);
-  let enrollName = $state('Me');
-  let showNameDialog = $state(false);
   let enrolling = $state(false);
   let enrollCountdown = $state(0);
   let variantCount = $state(0);
@@ -117,6 +119,31 @@
   let wakeText = $derived(wakeSettingsText(local?.ui_lang ?? 'en'));
   let meshText = $derived(meshSettingsText(local?.ui_lang ?? 'en'));
   let phoneText = $derived(phoneSettingsText(local?.ui_lang ?? 'en'));
+  let vpText = $derived(voiceprintSettingsText(local?.ui_lang ?? 'en'));
+
+  // Voiceprint: one sample per microphone for the one speaker PA knows. The
+  // phone sample is recorded through the phone, so only while it is the
+  // audio source (audio-source-changed keeps this current).
+  const VOICE_SOURCES: VoiceSource[] = ['desktop', 'phone'];
+  const speakerName = $derived(local?.last_enrolled_speaker || 'Me');
+  let samples = $state<VoiceSample[]>([]);
+  let hasVoiceprint = $derived(samples.length > 0);
+  let phoneIsSource = $state(false);
+  let recordingWhat = $state<VoiceSource | 'test' | null>(null);
+  let voiceprintTestResult = $state('');
+  async function refreshSamples(name: string) {
+    if (!isTauri) return;
+    try { samples = await invoke<VoiceSample[]>('voiceprint_samples', { name }); }
+    catch (e) { console.warn('[settings] voiceprint samples:', e); samples = []; }
+  }
+  $effect(() => { void refreshSamples(speakerName); });
+  if (isTauri) {
+    let sourceEventSeen = false;
+    void listen<{ remote: boolean }>('audio-source-changed', (e) => { sourceEventSeen = true; phoneIsSource = e.payload.remote; });
+    invoke<boolean>('audio_source_is_phone')
+      .then((phone) => { if (!sourceEventSeen) phoneIsSource = phone; })
+      .catch((e) => console.warn('[settings] audio source:', e));
+  }
 
   // Devices (FEAT-MP2 / FEAT-QR1). 「添加手机」 shows a QR code (desktop-only
   // command); pairing-ended (paired, voided, cancelled) takes it down if it
@@ -295,6 +322,7 @@
     { id: 'voice' as Section, icon: '◖', label: text.voice },
     { id: 'conversation' as Section, icon: '◫', label: text.conversation },
     { id: 'interruption' as Section, icon: '↯', label: text.interruption },
+    { id: 'voiceprint' as Section, icon: '◍', label: vpText.section },
     { id: 'wake' as Section, icon: '◎', label: text.wake },
     { id: 'phones' as Section, icon: '▯', label: phoneText.section },
   ]);
@@ -540,34 +568,81 @@
       : [...pendingWakeDeletes, word];
   }
 
-  function requestEnrollment(rename = false) {
-    if (!local) return;
-    enrollName = rename ? (local.last_enrolled_speaker || 'Me') : (local.last_enrolled_speaker || 'Me');
-    showNameDialog = true;
+  // `seconds` of audio from the phone (it must be the audio source) or from
+  // this computer's microphone, with a countdown. Returns a temp WAV path.
+  async function recordClip(phone: boolean, seconds: number): Promise<string> {
+    enrollCountdown = seconds;
+    const timer = setInterval(() => { if (enrollCountdown > 1) enrollCountdown--; }, 1000);
+    try {
+      if (phone) return await invoke<string>('record_phone_clip', { seconds });
+      await invoke('start_enroll_recording');
+      await new Promise(resolve => setTimeout(resolve, seconds * 1000));
+      return await invoke<string>('stop_enroll_recording');
+    } finally {
+      clearInterval(timer);
+    }
   }
 
-  async function beginEnrollment() {
-    if (!/^[A-Za-z0-9_-]{1,32}$/.test(enrollName)) {
-      error = text.validationName; return;
-    }
-    showNameDialog = false; enrolling = true; enrollCountdown = 5; error = ''; notice = '';
+  async function recordSample(source: VoiceSource) {
+    if (!local || enrolling) return;
+    const name = speakerName;
+    enrolling = true; recordingWhat = source; error = ''; notice = ''; voiceprintTestResult = '';
     try {
       await invoke('stop_wake_word_listening').catch(() => {});
-      await invoke('start_enroll_recording');
-      const timer = setInterval(() => enrollCountdown--, 1000);
-      await new Promise(resolve => setTimeout(resolve, 5000));
-      clearInterval(timer);
-      const wavPath = await invoke<string>('stop_enroll_recording');
-      await invoke('enroll_speaker', { name: enrollName, audioPath: wavPath });
-      const saved = await persistImmediate({ last_enrolled_speaker: enrollName });
+      const wavPath = await recordClip(source === 'phone', 5);
+      await invoke('enroll_speaker', { name, audioPath: wavPath, source });
+      const saved = await persistImmediate({ last_enrolled_speaker: name });
       await refreshVariantCount();
-      notice = wakeText.voiceSaved;
+      await refreshSamples(name);
+      notice = vpText.saved;
       // The voiceprint is saved either way; only the wake restart failed.
-      if (saved.wake_error) error = `${wakeText.voiceSaved} ${wakeErrorMessage(lang(), saved.wake_error)}`;
+      if (saved.wake_error) error = `${vpText.saved} ${wakeErrorMessage(lang(), saved.wake_error)}`;
     } catch (e) {
       error = wakeErrorMessage(lang(), e);
     } finally {
-      enrolling = false; enrollCountdown = 0;
+      enrolling = false; recordingWhat = null; enrollCountdown = 0;
+      await resumeSavedWake();
+    }
+  }
+
+  // The second click deletes (WKWebView has no window.confirm); checks on the
+  // mobile device then fall back to the computer sample.
+  let removingSample = $state(false);
+  async function removePhoneSample() {
+    if (!removingSample) {
+      removingSample = true;
+      setTimeout(() => { removingSample = false; }, 4000);
+      return;
+    }
+    removingSample = false;
+    error = ''; notice = ''; voiceprintTestResult = '';
+    try {
+      await invoke('remove_voiceprint_sample', { name: speakerName, source: 'phone' });
+      notice = vpText.removed;
+    } catch (e) { error = String(e); }
+    await refreshSamples(speakerName);
+  }
+
+  // Records on the current audio source, scores it against every sample and
+  // passes or fails it on the sample a real check there would use.
+  async function testVoiceprint() {
+    if (!local || enrolling) return;
+    if (!hasVoiceprint) { error = vpText.needsSample; return; }
+    enrolling = true; recordingWhat = 'test'; error = ''; notice = ''; voiceprintTestResult = '';
+    try {
+      await invoke('stop_wake_word_listening').catch(() => {});
+      const source: VoiceSource = phoneIsSource ? 'phone' : 'desktop';
+      const audioPath = await recordClip(source === 'phone', 4);
+      const r = await invoke<VoiceprintTest>('test_voiceprint', { name: speakerName, audioPath, source });
+      const label = (source: VoiceSource) => source === 'phone' ? vpText.phoneShort : vpText.desktopShort;
+      const scores = r.scores.map((s) => `${label(s.source)} ${s.score.toFixed(2)}`).join(' · ');
+      voiceprintTestResult = r.used
+        ? vpText.testResult(scores, label(r.used), r.passed, r.threshold.toFixed(2))
+        : vpText.testNoSample(scores);
+    } catch (e) {
+      error = wakeErrorMessage(lang(), e);
+    } finally {
+      enrolling = false; recordingWhat = null; enrollCountdown = 0;
       await resumeSavedWake();
     }
   }
@@ -715,12 +790,41 @@
             <RangeField label={text.silenceTimeout} hint={text.hintSilenceTimeout} value={local.silence_timeout_secs} min={3} max={10} step={1} display={`${local.silence_timeout_secs} ${text.seconds}`} change={(v) => local && (local.silence_timeout_secs = v)} />
             <RangeField label={text.pauseTolerance} hint={text.hintPauseTolerance} value={local.pause_tolerance_ms} min={500} max={5000} step={100} display={`${local.pause_tolerance_ms} ${text.milliseconds}`} change={(v) => local && (local.pause_tolerance_ms = v)} />
             <RangeField label={text.micSensitivity} hint={text.hintMicSensitivity} value={local.speech_rms_threshold} min={0.003} max={0.020} step={0.001} display={local.speech_rms_threshold.toFixed(3)} change={(v) => local && (local.speech_rms_threshold = v)} />
-            <Toggle label={text.conversationOwnerOnly} hint={local.last_enrolled_speaker ? text.hintConversationOwnerOnly : text.hintConversationOwnerNeedsVoice} value={local.conversation_owner_only} disabled={!local.last_enrolled_speaker && !local.conversation_owner_only} change={() => local && (local.conversation_owner_only = !local.conversation_owner_only)} />
+            <Toggle label={text.conversationOwnerOnly} hint={hasVoiceprint ? text.hintConversationOwnerOnly : text.hintConversationOwnerNeedsVoice} value={local.conversation_owner_only} disabled={!hasVoiceprint && !local.conversation_owner_only} change={() => local && (local.conversation_owner_only = !local.conversation_owner_only)} />
           </section>
         {:else if active === 'interruption'}
           <section class="card">
             <Toggle label={text.allowInterruption} hint={text.hintAllowInterruption} value={local.barge_in_enabled} change={() => local && (local.barge_in_enabled = !local.barge_in_enabled)} />
             <Toggle label={text.skipConfirmation} hint={text.hintSkipConfirmation} value={local.skip_interrupt_confirmation} change={() => local && (local.skip_interrupt_confirmation = !local.skip_interrupt_confirmation)} />
+          </section>
+        {:else if active === 'voiceprint'}
+          <section class="card">
+            <div class="sample">
+              <div><strong>{vpText.speaker}</strong><p>{speakerName}</p></div>
+            </div>
+            {#each VOICE_SOURCES as source}
+              {@const sample = samples.find((s) => s.source === source)}
+              {@const blocked = source === 'phone' && !phoneIsSource}
+              <div class="sample">
+                <div>
+                  <strong>{source === 'phone' ? `📱 ${vpText.phone}` : `💻 ${vpText.desktop}`}</strong>
+                  <p>{sample ? vpText.recorded(new Date(sample.recorded_at).toLocaleString()) : vpText.notRecorded}</p>
+                  {#if blocked}<p>{vpText.phoneUnavailable}</p>{/if}
+                </div>
+                <div class="actions">
+                  {#if source === 'phone' && sample}
+                    <button class="ghost danger" onclick={removePhoneSample} disabled={enrolling}>{removingSample ? vpText.removeConfirm : vpText.remove}</button>
+                  {/if}
+                  <button class="secondary" onclick={() => recordSample(source)} disabled={enrolling || blocked}>{recordingWhat === source ? vpText.recording(enrollCountdown) : sample ? vpText.rerecord : vpText.record}</button>
+                </div>
+              </div>
+            {/each}
+            <p class="wake-help">{vpText.recordHint} {vpText.explain}</p>
+            <RangeField label={vpText.strictness} hint={vpText.strictnessHint} value={local.wake_word_threshold} min={0.30} max={0.90} step={0.05} display={`${Math.round(local.wake_word_threshold * 100)}%`} change={(v) => local && (local.wake_word_threshold = v)} />
+            <div class="sample">
+              <button class="secondary" onclick={testVoiceprint} disabled={enrolling || !hasVoiceprint}>{recordingWhat === 'test' ? vpText.testing(enrollCountdown) : vpText.test}</button>
+            </div>
+            <p class="wake-help" role="status" aria-live="polite">{voiceprintTestResult}</p>
           </section>
         {:else if active === 'wake'}
           <section class="card">
@@ -743,14 +847,7 @@
             </div>
             <RangeField label={wakeText.kws} hint={wakeText.thresholdHint} value={local.wake_kws_threshold} min={0.05} max={0.90} step={0.05} display={`${Math.round(local.wake_kws_threshold * 100)}%`} change={(v) => local && (local.wake_kws_threshold = v)} />
             <Toggle label={wakeText.owner} hint={wakeText.ownerHint} value={local.wake_owner_only} change={() => local && (local.wake_owner_only = !local.wake_owner_only)} />
-            {#if local.wake_owner_only}
-              <RangeField label={wakeText.strictness} hint={wakeText.thresholdHint} value={local.wake_word_threshold} min={0.30} max={0.90} step={0.05} display={`${Math.round(local.wake_word_threshold * 100)}%`} change={(v) => local && (local.wake_word_threshold = v)} />
-              <div class="sample">
-                <div><strong>{wakeText.voice}</strong><p>{local.last_enrolled_speaker || text.noSample}</p></div>
-                <button class="secondary" onclick={() => requestEnrollment()} disabled={enrolling}>{enrolling ? `${text.recording} ${enrollCountdown}` : wakeText.record}</button>
-              </div>
-              <p class="wake-help">{wakeText.voiceHint}</p>
-            {/if}
+            <p class="wake-help">{vpText.wakePointer}</p>
             <div class="sample">
               <button class="secondary" onclick={testWakePhrase} disabled={enrolling || !modelReady || !local.wake_phrase.trim()}>{enrolling ? `${wakeText.testing} · ${enrollCountdown}` : wakeText.test}</button>
             </div>
@@ -820,16 +917,6 @@
   </main>
 </div>
 
-{#if showNameDialog}
-  <div class="backdrop">
-    <div class="modal">
-      <h3>{text.sample}</h3><p>{wakeText.voiceHint}</p>
-      <label>{text.speakerName}<input bind:value={enrollName} maxlength="32" /></label>
-      <div class="modal-actions"><button class="ghost" onclick={() => showNameDialog = false}>{text.cancel}</button><button class="primary" onclick={() => beginEnrollment(false)}>{text.startRecording}</button></div>
-    </div>
-  </div>
-{/if}
-
 <style>
   .mesh-card{margin-bottom:14px}.mesh-body{border:0;margin:0;padding:0;min-width:0}.mesh-body:disabled{opacity:.45}
   .mesh-preview{display:flex;align-items:center;gap:18px;padding:16px;border-bottom:1px solid #e8eaf0}
@@ -850,7 +937,7 @@
   h1,h2,h3,p{margin:0}.brand h1{font-size:14px;color:#1e2235}.brand p,header p{font-size:10px;color:#6a7185;margin-top:3px}nav{display:flex;flex-direction:column;gap:3px}nav button{border:0;background:transparent;color:#5a6178;padding:8px 10px;border-radius:8px;text-align:left;cursor:pointer;display:flex;gap:10px;align-items:center;font-size:12px}nav button span{width:18px;text-align:center;color:#8890a8;font-size:13px}nav button:hover{background:#0000000a;color:#2a2f42}nav button.active{background:#788cff18;color:#3a4566;box-shadow:inset 0 0 0 1px #8294ff30}nav button.active span{color:#7080ff}.immediate{margin-top:auto;padding:10px;font-size:9px;line-height:1.5;color:#939aab}
   main{min-width:0;min-height:0;height:100%;display:grid;grid-template-rows:58px minmax(0,1fr) 52px;overflow:hidden}header{padding:14px 28px;border-bottom:1px solid #e2e5ed;display:flex;align-items:center}header h2{font-size:17px;color:#1e2235}.content{min-height:0;padding:18px 28px;overflow:auto;overscroll-behavior:contain}.card{max-width:680px;border:1px solid #e2e5ed;border-radius:12px;background:#ffffff;overflow:hidden;box-shadow:0 3px 14px #0000000a}
   .field{min-height:46px;padding:9px 16px;display:flex;align-items:center;justify-content:space-between;gap:20px;border-bottom:1px solid #e8eaf0}.field:last-child{border-bottom:0}.field-label{font-size:12px;color:#2a2f42}.field small{display:block;color:#7a8298;margin-top:3px;font-size:10px;font-weight:500}.field-hint{display:block;color:#9aa3b8;margin-top:3px;font-size:10px;font-style:normal;line-height:1.4}.control{min-width:220px;display:flex;justify-content:flex-end}
-  select,input[type=text],.modal input{width:220px;border:1px solid #d4d8e0;background:#ffffff;color:#1e2235;border-radius:7px;padding:6px 10px;outline:none;font-size:12px}select:focus,input:focus{border-color:#7589f4}input[type=range]{width:220px;accent-color:#7589f4}input[type=color]{width:44px;height:26px;border:1px solid #d4d8e0;border-radius:7px;padding:2px;background:#fff;cursor:pointer}.toggle{width:38px;height:22px;padding:2px;border:0;border-radius:18px;background:#d4d8e0;cursor:pointer;transition:.15s}.toggle span{display:block;width:18px;height:18px;border-radius:50%;background:#ffffff;transition:.15s;box-shadow:0 1px 3px #00000030}.toggle.on{background:#7589f4}.toggle.on span{transform:translateX(16px);background:white}
+  select,input[type=text]{width:220px;border:1px solid #d4d8e0;background:#ffffff;color:#1e2235;border-radius:7px;padding:6px 10px;outline:none;font-size:12px}select:focus,input:focus{border-color:#7589f4}input[type=range]{width:220px;accent-color:#7589f4}input[type=color]{width:44px;height:26px;border:1px solid #d4d8e0;border-radius:7px;padding:2px;background:#fff;cursor:pointer}.toggle{width:38px;height:22px;padding:2px;border:0;border-radius:18px;background:#d4d8e0;cursor:pointer;transition:.15s}.toggle span{display:block;width:18px;height:18px;border-radius:50%;background:#ffffff;transition:.15s;box-shadow:0 1px 3px #00000030}.toggle.on{background:#7589f4}.toggle.on span{transform:translateX(16px);background:white}
   button.primary,button.secondary,button.ghost{border-radius:7px;padding:6px 12px;cursor:pointer;border:1px solid transparent;color:#1e2235;font-size:12px}button.primary{background:#7589f4;color:#fff}button.primary:hover{background:#6478e8}button.primary:disabled{opacity:.4;cursor:default}button.secondary{background:#f0f2f8;border-color:#d4d8e0;color:#1e2235}button.secondary:disabled{opacity:.5;cursor:default}button:focus-visible{outline:2px solid #6478e8;outline-offset:3px}button.secondary:hover{background:#e8eaf2}button.ghost{background:transparent;border-color:#d4d8e0;color:#5a6178}button.ghost:hover{background:#0000000a}.danger{color:#e53e5c!important}.working{color:#c99700!important}
   footer{min-height:52px;border-top:1px solid #e2e5ed;padding:10px 28px;display:flex;gap:8px;align-items:center;justify-content:flex-end;background:#ffffff;position:relative;z-index:2}.message{margin-right:auto;color:#1a9d63;font-size:11px}.message .error{color:#e53e5c}
   .voice-field{border-bottom:1px solid #e8eaf0}.voice-field .field{border:0;padding-bottom:5px}.voice-control{display:flex;align-items:center;gap:6px}.voice-control select{width:165px}.preview-button{width:84px;min-width:84px;max-width:84px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid #d4d8e0;background:#f0f2f8;color:#1e2235;border-radius:7px;padding:6px 6px;cursor:pointer;font-size:11px}.preview-button:hover{background:#e8eaf2}.preview-button:disabled{opacity:.45;cursor:default}.check{display:flex;justify-content:flex-end;align-items:center;gap:6px;padding:0 16px 9px;color:#7a8298;font-size:10px}.check input{accent-color:#7589f4}.asset-grid{display:grid;grid-template-columns:1fr 1fr;gap:0}.asset{padding:18px;text-align:center}.asset+ .asset{border-left:1px solid #e2e5ed}.preview{width:84px;height:84px;margin:0 auto 12px;border-radius:18px;background:linear-gradient(145deg,#f0f2f8,#e8eaf2);border:1px solid #d4d8e0;display:grid;place-items:center;overflow:hidden;color:#7589f4;font-weight:800}.preview img{width:100%;height:100%;object-fit:cover}.asset h3{font-size:13px;color:#1e2235}.asset p{height:32px;margin:5px 0 10px;color:#7a8298;font-size:10px;line-height:1.5}.asset button+button{margin-left:6px}
@@ -861,7 +948,6 @@
 .wake-del:hover{background:#dce0ea;color:#c0392b}
 .wake-empty{margin:0;font-size:11px;color:#8a91a6}.sample{padding:16px;display:flex;align-items:center;justify-content:space-between;gap:16px}.sample strong{font-size:12px;color:#1e2235}.sample p{font-size:10px;color:#7a8298;margin-top:4px}.actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.center{height:100%;display:grid;place-items:center;color:#8e97aa}.spinner{width:22px;height:22px;border:2px solid #d4d8e0;border-top-color:#7589f4;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.error{color:#e53e5c}
   .error-state{align-content:center;justify-items:center;gap:12px;padding:24px;text-align:center}.error-state p{max-width:480px;line-height:1.5}
-  .backdrop{position:fixed;inset:0;background:#00000033;display:grid;place-items:center;z-index:20}.modal{width:360px;background:#ffffff;border:1px solid #e2e5ed;border-radius:12px;padding:20px;box-shadow:0 20px 60px #00000030}.modal h3{font-size:15px;color:#1e2235}.modal p{color:#6a7185;font-size:11px;line-height:1.5;margin:6px 0 16px}.modal label{display:grid;gap:6px;font-size:11px;color:#2a2f42}.modal input{width:100%}.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
   @media(max-width:740px){.shell{grid-template-columns:170px 1fr}.content,header,footer{padding-left:18px;padding-right:18px}.field{gap:12px}.control,select,input[type=range]{min-width:0;width:190px}.asset-grid{grid-template-columns:1fr}.asset+.asset{border-left:0;border-top:1px solid #e2e5ed}}
   }
   .pairing{padding:16px;display:flex;align-items:center;gap:20px}.pairing p{font-size:11px;color:#7a8298;margin:0 0 8px}

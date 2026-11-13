@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use base64::Engine;
 
@@ -34,6 +34,83 @@ pub fn voiceprints_dir() -> std::path::PathBuf {
         .unwrap_or_default()
         .join(".pocket-agent")
         .join("voiceprints")
+}
+
+/// The microphone a voiceprint sample was recorded on. A speaker holds at most
+/// one sample per source; checks use the one effective_voiceprint picks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VoiceSource {
+    Desktop,
+    Phone,
+}
+
+impl VoiceSource {
+    pub const ALL: [VoiceSource; 2] = [VoiceSource::Desktop, VoiceSource::Phone];
+
+    /// Where wake and conversation listen right now.
+    pub fn current() -> VoiceSource {
+        if crate::voice::remote::is_online() {
+            VoiceSource::Phone
+        } else {
+            VoiceSource::Desktop
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VoiceSource::Desktop => "desktop",
+            VoiceSource::Phone => "phone",
+        }
+    }
+
+    /// `{name}.bin` (the original, desktop) or `{name}.phone.bin`. Names
+    /// cannot contain '.', so `Me.phone` is never a speaker of its own.
+    fn suffix(self) -> &'static str {
+        match self {
+            VoiceSource::Desktop => ".bin",
+            VoiceSource::Phone => ".phone.bin",
+        }
+    }
+}
+
+/// The samples `name` has in `dir`, desktop first. Empty = no voiceprint
+/// (including an invalid name).
+pub fn voiceprint_paths(dir: &std::path::Path, name: &str) -> Vec<(VoiceSource, std::path::PathBuf)> {
+    if validate_speaker_name(name).is_err() {
+        return Vec::new();
+    }
+    VoiceSource::ALL
+        .iter()
+        .map(|&source| (source, dir.join(format!("{}{}", name, source.suffix()))))
+        .filter(|(_, path)| path.is_file())
+        .collect()
+}
+
+/// The one sample to score against while listening on `source`: the phone
+/// sample on the phone when there is one, otherwise the desktop sample. None
+/// means no voiceprint, and owner-only checks fail closed.
+pub fn effective_voiceprint(
+    dir: &std::path::Path,
+    name: &str,
+    source: VoiceSource,
+) -> Option<(VoiceSource, std::path::PathBuf)> {
+    let samples = voiceprint_paths(dir, name);
+    let pick = |want: VoiceSource| samples.iter().find(|(s, _)| *s == want).cloned();
+    match source {
+        VoiceSource::Phone => pick(VoiceSource::Phone).or_else(|| pick(VoiceSource::Desktop)),
+        VoiceSource::Desktop => pick(VoiceSource::Desktop),
+    }
+}
+
+/// Which speaker and source a voiceprint file belongs to.
+fn speaker_of(file_name: &str) -> Option<(String, VoiceSource)> {
+    let (name, source) = match file_name.strip_suffix(VoiceSource::Phone.suffix()) {
+        Some(name) => (name, VoiceSource::Phone),
+        None => (file_name.strip_suffix(VoiceSource::Desktop.suffix())?, VoiceSource::Desktop),
+    };
+    validate_speaker_name(name).ok()?;
+    Some((name.to_string(), source))
 }
 
 // ── Global state ─────────────────────────────────────────────────────────────
@@ -203,34 +280,41 @@ pub fn start_wake_listener(app: AppHandle, _threshold: f32, _speaker_name: Optio
         return Err("wake listener already active".into());
     }
 
-    let setup = (|| {
-        let config = crate::commands::settings_repository::load()?;
-        // Settled config, not a transient failure: say so without a request.
-        if config.wake_phrase.trim().is_empty() {
-            return Err(wake_error("wake_phrase_empty", serde_json::json!({})));
-        }
-        let config = kws_config(&config);
-        let client = kws_client(5)?;
-        let session = kws_open(&client, &config)?;
-        Ok::<_, String>((config, client, session))
-    })();
-    let (config, client, session) = match setup {
-        Ok(v) => v,
-        Err(e) => { WAKE_ACTIVE.store(false, Ordering::Release); return Err(e); }
-    };
     let (tx, rx) = mpsc::sync_channel::<Vec<i16>>(16);
     let overflow = Arc::new(AtomicBool::new(false));
     let overflow_capture = overflow.clone();
-    let stream_handle = match start_streaming_capture(OWNER_WAKE, move |samples, _sr| {
-        if tx.try_send(samples.to_vec()).is_err() { overflow_capture.store(true, Ordering::Release); }
-    }) {
-        Ok(h) => h,
-        Err(e) => {
+    let started = open_then_capture(
+        |source| {
+            let config = crate::commands::settings_repository::load()?;
+            // Settled config, not a transient failure: say so without a request.
+            if config.wake_phrase.trim().is_empty() {
+                return Err(wake_error("wake_phrase_empty", serde_json::json!({})));
+            }
+            // Fixed for the session: a source switch restarts the listener.
+            let config = kws_config(&config, source);
+            let client = kws_client(5)?;
+            let session = kws_open(&client, &config)?;
+            Ok((config, client, session))
+        },
+        || {
+            start_streaming_capture(OWNER_WAKE, move |samples, _sr| {
+                if tx.try_send(samples.to_vec()).is_err() { overflow_capture.store(true, Ordering::Release); }
+            })
+            .map_err(|e| {
+                eprintln!("[wake] mic capture: {}", e);
+                wake_error("wake_mic_unavailable", serde_json::json!({}))
+            })
+        },
+        |(_, client, session), handle| {
+            if let Some(handle) = handle {
+                stop_streaming_capture(handle);
+            }
             let _ = client.delete(format!("{}/kws/session/{}", STT_SERVER_URL, session)).send();
-            WAKE_ACTIVE.store(false, Ordering::Release);
-            eprintln!("[wake] mic capture: {}", e);
-            return Err(wake_error("wake_mic_unavailable", serde_json::json!({})));
-        }
+        },
+    );
+    let ((config, client, session), stream_handle) = match started {
+        Ok(v) => v,
+        Err(e) => { WAKE_ACTIVE.store(false, Ordering::Release); return Err(e); }
     };
 
     let device_sr = stream_handle.sample_rate;
@@ -283,6 +367,33 @@ pub fn start_wake_listener(app: AppHandle, _threshold: f32, _speaker_name: Optio
     let _ = app.emit("wake-listener-started", ());
     eprintln!("[wake] local KWS listener started");
     Ok(())
+}
+
+/// Opens a session configured for the current audio source, then starts the
+/// capture. A source switch in between would leave the old source's session
+/// (and voiceprint sample) listening on the new source, and the capture would
+/// not look stale; it is undone instead and the caller retries.
+fn open_then_capture<S, H>(
+    open: impl FnOnce(VoiceSource) -> Result<S, String>,
+    capture: impl FnOnce() -> Result<H, String>,
+    close: impl FnOnce(&S, Option<H>),
+) -> Result<(S, H), String> {
+    // Read before the source: a switch stores the source, then bumps the epoch.
+    let epoch = crate::voice::remote::source_epoch();
+    let session = open(VoiceSource::current())?;
+    let handle = match capture() {
+        Ok(h) => h,
+        Err(e) => {
+            close(&session, None);
+            return Err(e);
+        }
+    };
+    if crate::voice::remote::source_epoch() != epoch {
+        eprintln!("[wake] audio source switched while starting, undoing");
+        close(&session, Some(handle));
+        return Err("audio source switched while starting the wake listener".into());
+    }
+    Ok((session, handle))
 }
 
 pub fn stop_wake_listener() {
@@ -410,10 +521,11 @@ fn kws_response(response: Result<reqwest::blocking::Response, reqwest::Error>) -
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
-pub fn kws_config(config: &crate::commands::config::AppConfig) -> serde_json::Value {
+/// `source` picks which voiceprint sample the detector scores against.
+pub fn kws_config(config: &crate::commands::config::AppConfig, source: VoiceSource) -> serde_json::Value {
     serde_json::json!({"phrase": config.wake_phrase, "kws_threshold": config.wake_kws_threshold,
         "owner_only": config.wake_owner_only, "speaker": config.last_enrolled_speaker,
-        "speaker_threshold": config.wake_word_threshold})
+        "speaker_threshold": config.wake_word_threshold, "voice_source": source.as_str()})
 }
 
 fn kws_open(client: &reqwest::blocking::Client, config: &serde_json::Value) -> Result<String, String> {
@@ -442,7 +554,8 @@ pub fn test_wake_audio(path: &str, config: &crate::commands::config::AppConfig) 
     let spec = reader.spec();
     let samples: Vec<i16> = reader.samples::<i16>().collect::<Result<_, _>>().map_err(|e| e.to_string())?;
     let samples = Resampler16k::new(spec.sample_rate).process(&downmix_to_mono(&samples, spec.channels));
-    let config = kws_config(config);
+    // The settings page records the test on this computer's microphone.
+    let config = kws_config(config, VoiceSource::Desktop);
     let v = kws_check_samples(&samples, &config)?;
     if v["keyword_match"].as_bool() == Some(true) {
         log_speaker_score(&v, &config, spec.sample_rate);
@@ -499,7 +612,7 @@ fn wake_http_check(
     let config = crate::commands::settings_repository::load()?;
     let mono = downmix_to_mono(raw_samples, device_ch);
     let samples = Resampler16k::new(device_sr).process(&mono);
-    let mut config = kws_config(&config);
+    let mut config = kws_config(&config, VoiceSource::current());
     config["speaker_threshold"] = serde_json::json!(threshold);
     let v = kws_check_samples(&samples, &config)?;
     Ok(WakeCheckResult {
@@ -564,6 +677,22 @@ pub struct VerifyResult {
 pub struct SpeakerInfo {
     pub name: String,
     pub enrolled_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SampleInfo {
+    pub source: VoiceSource,
+    pub recorded_at: String,
+}
+
+fn modified_at(path: &std::path::Path) -> String {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|t| {
+            let dt: chrono::DateTime<chrono::Utc> = t.into();
+            dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+        })
+        .unwrap_or_default()
 }
 
 
@@ -636,7 +765,7 @@ fn extract_embedding_http(wav_path: &str) -> Result<Vec<f32>, String> {
 }
 
 /// Enroll voice identity; explicit KWS settings define the wake phrase.
-pub fn enroll_speaker(name: &str, wav_path: &str) -> Result<EnrollResult, String> {
+pub fn enroll_speaker(name: &str, wav_path: &str, source: VoiceSource) -> Result<EnrollResult, String> {
     validate_speaker_name(name)?;
     let duration_s = wav_duration_from_header(wav_path);
 
@@ -661,7 +790,8 @@ pub fn enroll_speaker(name: &str, wav_path: &str) -> Result<EnrollResult, String
 
     let form = reqwest::blocking::multipart::Form::new()
         .part("file", file_part)
-        .text("name", name.to_string());
+        .text("name", name.to_string())
+        .text("source", source.as_str());
 
     let resp = client
         .post(format!("{}/speaker/enroll", STT_SERVER_URL))
@@ -683,8 +813,8 @@ pub fn enroll_speaker(name: &str, wav_path: &str) -> Result<EnrollResult, String
         .map_err(|e| format!("enroll JSON: {}", e))?;
 
     eprintln!(
-        "[sherpa] enrolled '{}' (dur={:.1}s) — voice identity saved",
-        name, duration_s
+        "[sherpa] enrolled '{}' from {} (dur={:.1}s) — voice identity saved",
+        name, source.as_str(), duration_s
     );
 
     Ok(EnrollResult {
@@ -793,18 +923,45 @@ pub fn remove_wake_word(name: &str, word: &str) -> Vec<String> {
     words
 }
 
-/// Cosine similarity between a WAV and one selected speaker's voiceprint.
-/// A missing voiceprint is an error so owner-only callers can fail closed.
-pub fn owner_similarity(wav_path: &str, speaker: &str) -> Result<f32, String> {
-    validate_speaker_name(speaker)?;
-    let ref_path = voiceprints_dir().join(format!("{}.bin", speaker));
-    let bytes = std::fs::read(&ref_path).map_err(|e| format!("voiceprint {}: {}", speaker, e))?;
-    let ref_emb: Vec<f32> = bytes
+fn read_voiceprint(path: &std::path::Path) -> Result<Vec<f32>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("voiceprint {}: {}", path.display(), e))?;
+    Ok(bytes
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
+        .collect())
+}
+
+/// Cosine similarity between a WAV and each of one speaker's samples, from a
+/// single embedding request. No sample is an error.
+pub fn owner_scores(wav_path: &str, speaker: &str) -> Result<Vec<(VoiceSource, f32)>, String> {
+    validate_speaker_name(speaker)?;
+    let paths = voiceprint_paths(&voiceprints_dir(), speaker);
+    if paths.is_empty() {
+        return Err(format!("no voiceprint for {}", speaker));
+    }
+    let mut refs = Vec::new();
+    for (source, path) in paths {
+        refs.push((source, read_voiceprint(&path)?));
+    }
     let probe = extract_embedding_http(wav_path)?;
-    Ok(cosine_similarity(&probe, &ref_emb))
+    Ok(refs.iter().map(|(source, emb)| (*source, cosine_similarity(&probe, emb))).collect())
+}
+
+/// Cosine similarity between a WAV and one sample chosen by effective_voiceprint.
+pub fn owner_similarity(wav_path: &str, sample: &(VoiceSource, std::path::PathBuf)) -> Result<f32, String> {
+    let ref_emb = read_voiceprint(&sample.1)?;
+    let score = cosine_similarity(&extract_embedding_http(wav_path)?, &ref_emb);
+    eprintln!("[voice] speaker score ({} sample)={:.3}", sample.0.as_str(), score);
+    Ok(score)
+}
+
+/// A speaker's samples with when each was recorded.
+pub fn voiceprint_samples(name: &str) -> Result<Vec<SampleInfo>, String> {
+    validate_speaker_name(name)?;
+    Ok(voiceprint_paths(&voiceprints_dir(), name)
+        .into_iter()
+        .map(|(source, path)| SampleInfo { source, recorded_at: modified_at(&path) })
+        .collect())
 }
 
 /// Verify: extract embedding from WAV, compare with all enrolled.
@@ -830,14 +987,10 @@ pub fn verify_speaker(wav_path: &str, threshold: Option<f32>) -> Result<VerifyRe
     for entry in std::fs::read_dir(&vp_dir).map_err(|e| format!("readdir: {}", e))? {
         let entry = entry.map_err(|e| format!("dirent: {}", e))?;
         let path = entry.path();
-        if path.extension().map_or(true, |e| e != "bin") {
+        // Both samples of a speaker count as that speaker.
+        let Some((name, _)) = speaker_of(&entry.file_name().to_string_lossy()) else {
             continue;
-        }
-        let name = path
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+        };
 
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
@@ -865,33 +1018,29 @@ pub fn verify_speaker(wav_path: &str, threshold: Option<f32>) -> Result<VerifyRe
 
 /// List enrolled speakers.
 pub fn list_speakers() -> Result<Vec<SpeakerInfo>, String> {
-    let vp_dir = voiceprints_dir();
+    list_speakers_in(&voiceprints_dir())
+}
+
+/// One entry per speaker, whichever samples it has; dated by the newest.
+fn list_speakers_in(vp_dir: &std::path::Path) -> Result<Vec<SpeakerInfo>, String> {
     if !vp_dir.exists() {
         return Ok(vec![]);
     }
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(&vp_dir).map_err(|e| format!("readdir: {}", e))? {
+    let mut out: Vec<SpeakerInfo> = Vec::new();
+    for entry in std::fs::read_dir(vp_dir).map_err(|e| format!("readdir: {}", e))? {
         let entry = entry.map_err(|e| format!("dirent: {}", e))?;
-        let path = entry.path();
-        if path.extension().map_or(true, |e| e != "bin") {
+        let Some((name, _)) = speaker_of(&entry.file_name().to_string_lossy()) else {
             continue;
+        };
+        let mtime = modified_at(&entry.path());
+        match out.iter_mut().find(|s| s.name == name) {
+            Some(known) => {
+                if mtime > known.enrolled_at {
+                    known.enrolled_at = mtime;
+                }
+            }
+            None => out.push(SpeakerInfo { name, enrolled_at: mtime }),
         }
-        let name = path
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let mtime = std::fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .map(|t| {
-                let dt: chrono::DateTime<chrono::Utc> = t.into();
-                dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
-            })
-            .unwrap_or_default();
-        out.push(SpeakerInfo {
-            name,
-            enrolled_at: mtime,
-        });
     }
     Ok(out)
 }
@@ -910,18 +1059,37 @@ fn validate_speaker_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove an enrolled speaker.
+/// Remove an enrolled speaker: every sample it has.
 pub fn remove_speaker(name: &str) -> Result<(), String> {
+    remove_speaker_in(&voiceprints_dir(), name)
+}
+
+fn remove_speaker_in(base: &std::path::Path, name: &str) -> Result<(), String> {
+    remove_samples_in(base, name, &VoiceSource::ALL)
+}
+
+/// Remove one of a speaker's samples; checks then fall back as
+/// effective_voiceprint describes.
+pub fn remove_voiceprint_sample(name: &str, source: VoiceSource) -> Result<(), String> {
+    remove_samples_in(&voiceprints_dir(), name, &[source])
+}
+
+fn remove_samples_in(base: &std::path::Path, name: &str, sources: &[VoiceSource]) -> Result<(), String> {
     validate_speaker_name(name)?;
-    let base = voiceprints_dir();
-    let path = base.join(format!("{}.bin", name));
-    // Canonicalize both sides to ensure we stay inside voiceprints/
-    let canon = std::fs::canonicalize(&path).map_err(|e| format!("resolve: {}", e))?;
-    let base_canon = std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
-    if !canon.starts_with(&base_canon) {
-        return Err("path escapes voiceprints directory".into());
+    let paths: Vec<_> = voiceprint_paths(base, name).into_iter().filter(|(s, _)| sources.contains(s)).collect();
+    if paths.is_empty() {
+        return Err(format!("resolve: no voiceprint for {}", name));
     }
-    std::fs::remove_file(&canon).map_err(|e| format!("remove: {}", e))
+    let base_canon = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+    for (_, path) in paths {
+        // Canonicalize both sides to ensure we stay inside voiceprints/
+        let canon = std::fs::canonicalize(&path).map_err(|e| format!("resolve: {}", e))?;
+        if !canon.starts_with(&base_canon) {
+            return Err("path escapes voiceprints directory".into());
+        }
+        std::fs::remove_file(&canon).map_err(|e| format!("remove: {}", e))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -938,6 +1106,33 @@ mod tests {
     fn rms(samples: &[i16]) -> f64 {
         let mid = &samples[samples.len() / 4..samples.len() * 3 / 4];
         (mid.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / mid.len() as f64).sqrt()
+    }
+
+    /// Review round 2: a switch while the KWS session opens must not leave
+    /// the old source's session listening on the new source.
+    #[test]
+    fn source_switch_during_open_undoes_the_start() {
+        let _t = crate::voice::remote::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let closed = std::cell::Cell::new(None);
+        let result = open_then_capture(
+            |source| {
+                crate::voice::remote::switch_source_for_test(source == VoiceSource::Desktop);
+                Ok(source)
+            },
+            || Ok("capture"),
+            |source, handle| closed.set(Some((*source, handle))),
+        );
+        let opened_on = if crate::voice::remote::is_online() { VoiceSource::Desktop } else { VoiceSource::Phone };
+        crate::voice::remote::switch_source_for_test(false);
+        assert!(result.unwrap_err().contains("switched"));
+        assert_eq!(closed.get(), Some((opened_on, Some("capture"))));
+
+        let result = open_then_capture(|source| Ok(source), || Ok("capture"), |_, _| panic!("closed without a switch"));
+        assert_eq!(result.unwrap(), (VoiceSource::Desktop, "capture"));
+
+        let result = open_then_capture(|source| Ok(source), || Err::<(), _>("busy".to_string()), |source, handle| closed.set(Some((*source, handle.map(|_| "capture")))));
+        assert_eq!(result.unwrap_err(), "busy");
+        assert_eq!(closed.get(), Some((VoiceSource::Desktop, None)));
     }
 
     #[test]
@@ -979,11 +1174,116 @@ mod tests {
     }
 
     #[test]
-    fn owner_similarity_rejects_invalid_or_missing_voiceprints() {
-        assert!(owner_similarity("/nonexistent.wav", "../etc").is_err());
-        assert!(owner_similarity("/nonexistent.wav", "").is_err());
+    fn owner_similarity_rejects_a_missing_sample() {
         // Must fail before reaching the embedding service.
-        assert!(owner_similarity("/nonexistent.wav", "zz_missing_owner_test_7f3a").is_err());
+        let gone = (VoiceSource::Desktop, std::path::PathBuf::from("/nonexistent/zz_missing_owner_test_7f3a.bin"));
+        assert!(owner_similarity("/nonexistent.wav", &gone).is_err());
+        assert!(owner_scores("/nonexistent.wav", "../etc").is_err());
+        assert!(owner_scores("/nonexistent.wav", "zz_missing_owner_test_7f3a").is_err());
+    }
+
+    fn temp_voiceprints(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pa-voiceprints-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn voiceprint_paths_cover_each_combination() {
+        let dir = temp_voiceprints("paths");
+        let desktop = dir.join("Me.bin");
+        let phone = dir.join("Me.phone.bin");
+        assert!(voiceprint_paths(&dir, "Me").is_empty());
+        std::fs::write(&desktop, b"x").unwrap();
+        assert_eq!(voiceprint_paths(&dir, "Me"), vec![(VoiceSource::Desktop, desktop.clone())]);
+        std::fs::write(&phone, b"x").unwrap();
+        assert_eq!(
+            voiceprint_paths(&dir, "Me"),
+            vec![(VoiceSource::Desktop, desktop.clone()), (VoiceSource::Phone, phone.clone())]
+        );
+        std::fs::remove_file(&desktop).unwrap();
+        assert_eq!(voiceprint_paths(&dir, "Me"), vec![(VoiceSource::Phone, phone)]);
+        assert!(voiceprint_paths(&dir, "Me.phone").is_empty(), "a sample is not a speaker");
+        assert!(voiceprint_paths(&dir, "../Me").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn effective_voiceprint_follows_the_audio_source() {
+        use VoiceSource::{Desktop, Phone};
+        let dir = temp_voiceprints("effective");
+        let desktop = dir.join("Me.bin");
+        let phone = dir.join("Me.phone.bin");
+        let d = Some((Desktop, desktop.clone()));
+        let p = Some((Phone, phone.clone()));
+        // (desktop sample, phone sample) -> (on the desktop, on the phone)
+        let cases = [
+            ((false, false), (None, None)),
+            ((true, false), (d.clone(), d.clone())),
+            ((false, true), (None, p.clone())),
+            ((true, true), (d.clone(), p.clone())),
+        ];
+        for ((has_desktop, has_phone), expected) in cases {
+            for (path, present) in [(&desktop, has_desktop), (&phone, has_phone)] {
+                let _ = std::fs::remove_file(path);
+                if present {
+                    std::fs::write(path, b"x").unwrap();
+                }
+            }
+            let got = (effective_voiceprint(&dir, "Me", Desktop), effective_voiceprint(&dir, "Me", Phone));
+            assert_eq!(got, expected, "desktop={has_desktop} phone={has_phone}");
+        }
+        assert_eq!(effective_voiceprint(&dir, "Me.phone", Desktop), None, "a sample is not a speaker");
+        assert_eq!(effective_voiceprint(&dir, "../Me", Phone), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn phone_sample_is_part_of_its_speaker() {
+        let dir = temp_voiceprints("speakers");
+        for file in ["Me.bin", "Me.phone.bin", "Ann.phone.bin", "bad.name.bin", "notes.txt"] {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+        let mut names: Vec<String> = list_speakers_in(&dir).unwrap().into_iter().map(|s| s.name).collect();
+        names.sort();
+        assert_eq!(names, ["Ann", "Me"]);
+        assert_eq!(speaker_of("Me.phone.bin"), Some(("Me".into(), VoiceSource::Phone)));
+        assert_eq!(speaker_of("Me.bin"), Some(("Me".into(), VoiceSource::Desktop)));
+        assert_eq!(speaker_of("a.b.bin"), None);
+
+        remove_speaker_in(&dir, "Me").unwrap();
+        assert!(!dir.join("Me.bin").exists() && !dir.join("Me.phone.bin").exists());
+        assert!(dir.join("Ann.phone.bin").exists());
+        assert!(remove_speaker_in(&dir, "Me").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removing_one_sample_keeps_the_other() {
+        let dir = temp_voiceprints("remove-one");
+        for file in ["Me.bin", "Me.phone.bin", "Ann.phone.bin"] {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+        remove_samples_in(&dir, "Me", &[VoiceSource::Phone]).unwrap();
+        assert!(dir.join("Me.bin").exists() && !dir.join("Me.phone.bin").exists());
+        assert!(dir.join("Ann.phone.bin").exists());
+        assert!(remove_samples_in(&dir, "Me", &[VoiceSource::Phone]).is_err(), "already gone");
+        assert!(remove_samples_in(&dir, "../Me", &[VoiceSource::Desktop]).is_err());
+        assert!(remove_samples_in(&dir, "Me.phone", &[VoiceSource::Desktop]).is_err());
+        assert!(dir.join("Me.bin").exists());
+        assert_eq!(effective_voiceprint(&dir, "Me", VoiceSource::Phone), Some((VoiceSource::Desktop, dir.join("Me.bin"))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn voice_source_serializes_to_two_fixed_values() {
+        assert_eq!(serde_json::to_value(VoiceSource::Desktop).unwrap(), "desktop");
+        assert_eq!(serde_json::to_value(VoiceSource::Phone).unwrap(), "phone");
+        for bad in ["\"tablet\"", "\"../x\"", "\"Phone\"", "\"\""] {
+            assert!(serde_json::from_str::<VoiceSource>(bad).is_err(), "{bad}");
+        }
+        assert_eq!(serde_json::from_str::<VoiceSource>("\"phone\"").unwrap(), VoiceSource::Phone);
     }
 
     #[test]

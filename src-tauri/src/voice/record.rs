@@ -17,9 +17,11 @@
 //     NONE         SINGLE_SHOT      ✓
 //     NONE         CONVERSATION     ✓
 //     NONE         WAKE             ✓
+//     NONE         VOICE_CLIP       ✓      settings: a phone voiceprint clip
 //     SINGLE_SHOT  NONE             ✓      on stop / cancel / RAII drop
 //     CONVERSATION NONE             ✓      on idle-end / stop
 //     WAKE         NONE             ✓      on stop_wake_listener
+//     VOICE_CLIP   NONE             ✓      when the clip's capture stops
 //     WAKE         SINGLE_SHOT      ✓      hotkey pre-empts wake. wake_word
 //                                          self-recovers after single-shot stop
 //                                          iff wake_word_enabled (frontend re-arm).
@@ -122,6 +124,7 @@ pub const OWNER_NONE: u8 = 0;
 pub const OWNER_SINGLE_SHOT: u8 = 1;
 pub const OWNER_CONVERSATION: u8 = 2;
 pub const OWNER_WAKE: u8 = 3;
+pub const OWNER_VOICE_CLIP: u8 = 4;
 
 /// Current owner of the capture device. See the state-machine comment above.
 pub static CAPTURE_OWNER: AtomicU8 = AtomicU8::new(OWNER_NONE);
@@ -132,6 +135,7 @@ pub fn owner_name(o: u8) -> &'static str {
         OWNER_SINGLE_SHOT => "single_shot",
         OWNER_CONVERSATION => "conversation",
         OWNER_WAKE => "wake",
+        OWNER_VOICE_CLIP => "voice_clip",
         _ => "?",
     }
 }
@@ -248,7 +252,9 @@ impl CaptureShared {
 
 enum DaemonCmd {
     Start(Option<Sender<Result<(), String>>>),
-    Stop(Sender<Result<String, String>>),
+    /// With a destination, the finished WAV is moved there before the daemon
+    /// takes its next Start.
+    Stop(Sender<Result<String, String>>, Option<PathBuf>),
 }
 
 struct Daemon {
@@ -517,10 +523,17 @@ pub fn start_recording() -> Result<RecordingHandle, String> {
 
 /// Stop recording without requiring a handle (for race-safe stop)
 pub fn stop_recording_no_handle() -> Result<String, String> {
-    stop_recording_internal()
+    stop_recording_internal(None)
 }
 
-fn stop_recording_internal() -> Result<String, String> {
+/// Stop recording and move the WAV to `dest`. The move happens on the daemon
+/// thread before any later recording can recreate the shared file, so the
+/// caller owns `dest` even after the capture slot is released.
+pub fn stop_recording_into(dest: PathBuf) -> Result<String, String> {
+    stop_recording_internal(Some(dest))
+}
+
+fn stop_recording_internal(dest: Option<PathBuf>) -> Result<String, String> {
     // Release the single-shot ownership regardless of whether the daemon
     // succeeds — once stop is requested, the slot is no longer ours.
     release_capture(OWNER_SINGLE_SHOT);
@@ -529,7 +542,7 @@ fn stop_recording_internal() -> Result<String, String> {
     let (resp_tx, resp_rx) = mpsc::channel();
     daemon
         .cmd_tx
-        .send(DaemonCmd::Stop(resp_tx))
+        .send(DaemonCmd::Stop(resp_tx, dest))
         .map_err(|_| WORKER_STOPPED.to_string())?;
     // Daemon may still be in Phase 1 (build_stream ~200ms) when Stop arrives —
     // give it enough headroom to walk through Phase 1 → Phase 2 → Phase 3 → finalize.
@@ -630,15 +643,12 @@ fn daemon_loop(
                 // -- Phase 3: Wait for Stop command --
                 loop {
                     match cmd_rx.recv() {
-                        Ok(DaemonCmd::Stop(stop_resp)) => {
+                        Ok(DaemonCmd::Stop(stop_resp, dest)) => {
                             shared.recording.store(false, Ordering::Release);
                             let result = {
                                 let mut g = shared.writer.lock().unwrap();
                                 match g.take() {
-                                    Some(w) => w
-                                        .finalize()
-                                        .map(|_| recording_path().to_string_lossy().into_owned())
-                                        .map_err(|e| format!("finalize: {}", e)),
+                                    Some(w) => finish_recording(w, recording_path(), dest.as_deref()),
                                     None => Err("no writer".into()),
                                 }
                             };
@@ -659,12 +669,30 @@ fn daemon_loop(
                 // stream dropped here -> audio hardware released
                 // Loop back to Phase 1 to pre-build next stream
             }
-            DaemonCmd::Stop(resp) => {
+            DaemonCmd::Stop(resp, _) => {
                 let _ = resp.send(Err("not recording".into()));
             }
         }
     }
     eprintln!("[record] daemon exit");
+}
+
+/// Finalizes the WAV at `path` and, with `dest`, moves it there. Returns the
+/// path the caller should read.
+pub(crate) fn finish_recording(
+    writer: WavWriter<BufWriter<File>>,
+    path: &Path,
+    dest: Option<&Path>,
+) -> Result<String, String> {
+    writer.finalize().map_err(|e| format!("finalize: {}", e))?;
+    let out = match dest {
+        Some(dest) => {
+            std::fs::rename(path, dest).map_err(|e| format!("move recording: {}", e))?;
+            dest
+        }
+        None => path,
+    };
+    Ok(out.to_string_lossy().into_owned())
 }
 
 fn stream_error(e: cpal::StreamError) {
@@ -738,7 +766,7 @@ impl Drop for ReleaseOnDrop {
 /// Begin a long-lived capture session. The callback fires on cpal's audio
 /// thread for every input buffer — keep it lightweight (e.g., push to a queue).
 ///
-/// `owner` must be one of OWNER_CONVERSATION or OWNER_WAKE. The function
+/// `owner` must be one of OWNER_CONVERSATION, OWNER_WAKE or OWNER_VOICE_CLIP. The function
 /// holds CAPTURE_GATE briefly while acquiring the owner; on success the
 /// streaming thread owns release-on-exit.
 pub fn start_streaming_capture<F>(owner: u8, callback: F) -> Result<StreamingHandle, String>
@@ -1001,8 +1029,8 @@ mod tests {
                 let published = CELL.get().expect("published before the worker runs");
                 assert!(std::ptr::eq(published, daemon));
                 let (tx, _rx) = mpsc::channel();
-                daemon.cmd_tx.send(DaemonCmd::Stop(tx)).expect("receiver connected");
-                assert!(matches!(cmd_rx.try_recv(), Ok(DaemonCmd::Stop(_))));
+                daemon.cmd_tx.send(DaemonCmd::Stop(tx, None)).expect("receiver connected");
+                assert!(matches!(cmd_rx.try_recv(), Ok(DaemonCmd::Stop(..))));
             })
             .join()
             .unwrap();

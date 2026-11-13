@@ -1,9 +1,10 @@
 use chrono;
 use crate::voice::record::{
-    current_owner, lock_capture_gate, release_capture, start_recording, stop_recording_no_handle,
+    current_owner, lock_capture_gate, release_capture, start_recording, stop_recording_into, stop_recording_no_handle,
     take_pre_started, try_acquire_capture, RecordingHandle,
-    OWNER_CONVERSATION, OWNER_NONE, OWNER_SINGLE_SHOT, OWNER_WAKE,
+    OWNER_CONVERSATION, OWNER_NONE, OWNER_SINGLE_SHOT, OWNER_VOICE_CLIP, OWNER_WAKE,
 };
+use crate::voice::sherpa_wake::VoiceSource;
 use crate::voice::stt::transcribe;
 use std::sync::Mutex;
 use std::sync::Arc;
@@ -485,9 +486,9 @@ pub fn is_app_ready() -> bool {
     crate::voice::stt::is_app_ready()
 }
 
-// Speaker-enrollment recording path: same WAV file as the single-shot voice
-// recorder, but the matching stop command returns the path and skips Whisper
-// STT so the chat flow is not contaminated by enrollment audio.
+// Speaker-enrollment recording: same recorder as single-shot dictation, but the
+// matching stop command skips Whisper STT and hands the WAV over to a file of
+// its own, which the consuming command deletes when done.
 #[tauri::command]
 pub fn start_enroll_recording(
     state: State<'_, RecordingState>,
@@ -555,9 +556,14 @@ pub async fn stop_enroll_recording(
         guard.take();
     }
 
-    let wav_path = tokio::task::spawn_blocking(move || stop_recording_no_handle())
+    // Not the shared recording file: a dictation started while the voiceprint
+    // request is in flight would reuse that name and be deleted with it.
+    let dest = exclusive_clip_path("enroll");
+    let dest_clone = dest.clone();
+    let wav_path = tokio::task::spawn_blocking(move || stop_recording_into(dest_clone))
         .await
         .map_err(|e| format!("停止录音失败: {}", e))?
+        .inspect_err(|_| remove_temp_recording(&dest))
         // The wake settings page shows only coded errors; a silent mic is one
         // the user can fix, so give it a code instead of "wake service error".
         .map_err(|e| {
@@ -572,9 +578,11 @@ pub async fn stop_enroll_recording(
     let path_clone = wav_path.clone();
     let duration_secs = tokio::task::spawn_blocking(move || wav_duration_secs(&path_clone))
         .await
-        .map_err(|e| format!("时长检查失败: {}", e))??;
+        .map_err(|e| format!("时长检查失败: {}", e))?
+        .inspect_err(|_| remove_temp_recording(&dest))?;
 
     if duration_secs < MIN_RECORDING_SECS {
+        remove_temp_recording(&dest);
         return Err(format!("录音时间太短 ({:.1}s)", duration_secs));
     }
 
@@ -590,11 +598,180 @@ pub async fn stop_enroll_recording(
 pub async fn enroll_speaker(
     name: String,
     audio_path: String,
+    source: Option<VoiceSource>,
 ) -> Result<crate::voice::sherpa_wake::EnrollResult, String> {
+    let source = source.unwrap_or(VoiceSource::Desktop);
     // Off the main thread: enrollment is a blocking HTTP request.
-    tokio::task::spawn_blocking(move || crate::voice::sherpa_wake::enroll_speaker(&name, &audio_path))
+    tokio::task::spawn_blocking(move || {
+        let result = crate::voice::sherpa_wake::enroll_speaker(&name, &audio_path, source);
+        remove_temp_recording(std::path::Path::new(&audio_path));
+        result
+    })
+    .await
+    .map_err(|e| format!("enroll task failed: {e}"))?
+}
+
+#[tauri::command]
+pub fn voiceprint_samples(name: String) -> Result<Vec<crate::voice::sherpa_wake::SampleInfo>, String> {
+    crate::voice::sherpa_wake::voiceprint_samples(&name)
+}
+
+/// Whether wake and conversation listen on the phone right now; changes are
+/// announced by `audio-source-changed`.
+#[tauri::command]
+pub fn audio_source_is_phone() -> bool {
+    crate::voice::remote::is_online()
+}
+
+/// Delete one of `name`'s samples; the other stays.
+#[tauri::command]
+pub fn remove_voiceprint_sample(name: String, source: VoiceSource) -> Result<(), String> {
+    crate::voice::sherpa_wake::remove_voiceprint_sample(&name, source)
+}
+
+static CLIP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A temp WAV path no other recording uses: `pocket-agent-<kind>-<pid>-<n>.wav`.
+fn exclusive_clip_path(kind: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "pocket-agent-{kind}-{}-{}.wav",
+        std::process::id(),
+        CLIP_ID.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+/// Record `seconds` (1–10) from the phone for a voiceprint sample or a test,
+/// through the same 16 kHz path conversations use on the phone. Returns a temp
+/// WAV path. Wake is paused like start_enroll_recording; the caller resumes it.
+#[tauri::command]
+pub async fn record_phone_clip(seconds: u32) -> Result<String, String> {
+    let seconds = seconds.clamp(1, 10);
+    tokio::task::spawn_blocking(move || record_phone_clip_blocking(seconds))
         .await
-        .map_err(|e| format!("enroll task failed: {e}"))?
+        .map_err(|e| format!("phone clip task failed: {e}"))?
+}
+
+fn record_phone_clip_blocking(seconds: u32) -> Result<String, String> {
+    let not_source = || crate::voice::sherpa_wake::wake_error("phone_not_source", serde_json::json!({}));
+    {
+        let _gate = lock_capture_gate();
+        match current_owner() {
+            OWNER_CONVERSATION => return Err("连续对话进行中，无法录制手机样本".into()),
+            OWNER_SINGLE_SHOT | OWNER_VOICE_CLIP => return Err("录音进行中，无法录制手机样本".into()),
+            OWNER_WAKE => {
+                crate::voice::sherpa_wake::stop_wake_listener();
+                for _ in 0..50 {
+                    if current_owner() == OWNER_NONE {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+            _ => {}
+        }
+    }
+    // Epoch first: a switch after this read is caught below, one before it
+    // shows here as the phone no longer being the source.
+    let epoch = crate::voice::remote::source_epoch();
+    if !crate::voice::remote::is_online() {
+        return Err(not_source());
+    }
+    crate::commands::chat::stop_audio_queue("phone clip start");
+
+    let samples = Arc::new(Mutex::new(Vec::<i16>::new()));
+    let sink = samples.clone();
+    // Its own owner: a hotkey dictation or another recording started meanwhile
+    // is refused as busy instead of sharing (and later losing) the slot.
+    let handle = crate::voice::record::start_streaming_capture(OWNER_VOICE_CLIP, move |chunk, _sr| {
+        if let Ok(mut buf) = sink.lock() {
+            buf.extend_from_slice(chunk);
+        }
+    })?;
+    let sample_rate = handle.sample_rate;
+    std::thread::sleep(std::time::Duration::from_secs(seconds as u64));
+    let switched = handle.is_stale() || crate::voice::remote::source_epoch() != epoch;
+    crate::voice::record::stop_streaming_capture(handle);
+    let samples = std::mem::take(&mut *samples.lock().map_err(|_| "phone clip lock".to_string())?);
+    if switched || samples.is_empty() {
+        eprintln!("[voice] phone clip discarded (source switched={}, samples={})", switched, samples.len());
+        return Err(not_source());
+    }
+
+    let path = exclusive_clip_path("phone-clip");
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(&path, spec).map_err(|e| format!("wav create: {}", e))?;
+    for &s in &samples {
+        writer.write_sample(s).map_err(|e| format!("wav write: {}", e))?;
+    }
+    writer.finalize().map_err(|e| format!("wav finalize: {}", e))?;
+    eprintln!("[voice] phone clip recorded, {:.1}s", samples.len() as f32 / sample_rate as f32);
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[derive(serde::Serialize)]
+pub struct SampleScore {
+    source: VoiceSource,
+    score: f32,
+}
+
+#[derive(serde::Serialize)]
+pub struct VoiceprintTest {
+    scores: Vec<SampleScore>,
+    /// The sample a real check on `source` would use; None = it would refuse.
+    used: Option<VoiceSource>,
+    threshold: f32,
+    passed: bool,
+}
+
+/// Score a test clip recorded on `source` against each of `name`'s samples,
+/// pass or fail it on the sample a real check would use (effective_voiceprint)
+/// with the saved strictness, then delete the clip.
+#[tauri::command]
+pub async fn test_voiceprint(name: String, audio_path: String, source: VoiceSource) -> Result<VoiceprintTest, String> {
+    tokio::task::spawn_blocking(move || {
+        let scores = crate::voice::sherpa_wake::owner_scores(&audio_path, &name);
+        remove_temp_recording(std::path::Path::new(&audio_path));
+        let scores = scores?;
+        let threshold = crate::commands::settings_repository::load()?.wake_word_threshold;
+        let used = crate::voice::sherpa_wake::effective_voiceprint(
+            &crate::voice::sherpa_wake::voiceprints_dir(),
+            &name,
+            source,
+        )
+        .map(|(used, _)| used);
+        let score = |want| scores.iter().find(|(s, _)| Some(*s) == want).map(|&(_, score)| score);
+        Ok(VoiceprintTest {
+            passed: score(used).is_some_and(|score| score >= threshold),
+            scores: scores.into_iter().map(|(source, score)| SampleScore { source, score }).collect(),
+            used,
+            threshold,
+        })
+    })
+    .await
+    .map_err(|e| format!("voiceprint test task failed: {e}"))?
+}
+
+/// Deletes `path` only when it is one of PA's own recordings: directly in the
+/// temp dir (after resolving links) and named `pocket-agent-*.wav`.
+fn remove_temp_recording(path: &std::path::Path) {
+    if is_pa_temp_recording(path) {
+        let _ = std::fs::remove_file(path);
+    } else {
+        eprintln!("[voice] not deleting {}: not a PA recording", path.display());
+    }
+}
+
+fn is_pa_temp_recording(path: &std::path::Path) -> bool {
+    let (Ok(file), Ok(temp)) = (std::fs::canonicalize(path), std::fs::canonicalize(std::env::temp_dir())) else {
+        return false;
+    };
+    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    file.parent() == Some(temp.as_path()) && name.starts_with("pocket-agent-") && name.ends_with(".wav")
 }
 
 
@@ -675,6 +852,83 @@ pub async fn install_wake_model() -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 pub async fn test_wake_word(audio_path: String, config: crate::commands::config::AppConfig) -> Result<serde_json::Value, String> {
-    tokio::task::spawn_blocking(move || crate::voice::sherpa_wake::test_wake_audio(&audio_path, &config))
-        .await.map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || {
+        let result = crate::voice::sherpa_wake::test_wake_audio(&audio_path, &config);
+        remove_temp_recording(std::path::Path::new(&audio_path));
+        result
+    })
+    .await.map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review round 1: a voiceprint request finishing after the next dictation
+    /// began must not delete that dictation's recording.
+    #[test]
+    fn voiceprint_cleanup_spares_a_dictation_started_meanwhile() {
+        let pid = std::process::id();
+        let shared = std::env::temp_dir().join(format!("pocket-agent-recording-test-{pid}.wav"));
+        let spec = hound::WavSpec { channels: 1, sample_rate: 16000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let record = |samples: &[i16]| {
+            let mut w = hound::WavWriter::create(&shared, spec).unwrap();
+            for &x in samples {
+                w.write_sample(x).unwrap();
+            }
+            w
+        };
+
+        // Voiceprint recording stops; the daemon hands it to its own file.
+        let dest = exclusive_clip_path("enroll");
+        let enrolled = crate::voice::record::finish_recording(record(&[1; 160]), &shared, Some(&dest)).unwrap();
+        assert_eq!(std::path::Path::new(&enrolled), dest.as_path());
+        // While the HTTP request is in flight, the next dictation records.
+        let next = crate::voice::record::finish_recording(record(&[7; 320]), &shared, None).unwrap();
+        // The voiceprint request completes and cleans up.
+        remove_temp_recording(std::path::Path::new(&enrolled));
+
+        assert!(!dest.exists());
+        let samples: Vec<i16> = hound::WavReader::open(&next).unwrap().samples().map(|x| x.unwrap()).collect();
+        assert_eq!(samples, vec![7; 320]);
+        let _ = std::fs::remove_file(&shared);
+    }
+
+    #[test]
+    fn only_pa_recordings_in_the_temp_dir_are_deletable() {
+        let temp = std::env::temp_dir();
+        let pid = std::process::id();
+        let ours = temp.join(format!("pocket-agent-phone-clip-test-{pid}.wav"));
+        let foreign = temp.join(format!("other-{pid}.wav"));
+        let not_wav = temp.join(format!("pocket-agent-test-{pid}.txt"));
+        let sub = temp.join(format!("pa-voice-test-{pid}"));
+        std::fs::create_dir_all(&sub).unwrap();
+        let nested = sub.join("pocket-agent-recording.wav");
+        let outside = sub.join("target.wav");
+        let link = temp.join(format!("pocket-agent-link-{pid}.wav"));
+        for f in [&ours, &foreign, &not_wav, &nested, &outside] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        remove_temp_recording(&ours);
+        assert!(!ours.exists());
+        for kept in [&foreign, &not_wav, &nested, &outside] {
+            remove_temp_recording(kept);
+            assert!(kept.exists(), "{} must stay", kept.display());
+        }
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            remove_temp_recording(&link);
+            assert!(outside.exists(), "a link out of the temp dir is not followed");
+            let _ = std::fs::remove_file(&link);
+        }
+        assert!(!is_pa_temp_recording(std::path::Path::new("/etc/hosts")));
+        assert!(!is_pa_temp_recording(&temp.join("pocket-agent-missing.wav")));
+
+        for f in [&foreign, &not_wav] {
+            let _ = std::fs::remove_file(f);
+        }
+        let _ = std::fs::remove_dir_all(&sub);
+    }
 }

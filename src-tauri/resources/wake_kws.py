@@ -155,6 +155,30 @@ def validate_phrase(phrase):
     return phrase
 
 
+# One speaker may hold a sample per microphone; scoring uses the one for the
+# current audio source (see effective_voiceprint).
+VOICE_SOURCES = {'desktop': '.bin', 'phone': '.phone.bin'}
+
+
+def voiceprint_file(voiceprints, speaker, source):
+    """Where `source`'s sample of `speaker` lives; None for names or sources off the allowlist."""
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,32}', speaker or '') or source not in VOICE_SOURCES:
+        return None
+    return Path(voiceprints) / (speaker + VOICE_SOURCES[source])
+
+
+def effective_voiceprint(voiceprints, speaker, source):
+    """The one sample to score against while listening on `source`: the phone
+    sample on the phone when there is one, otherwise the desktop sample; None
+    means no voiceprint (fail closed)."""
+    candidates = ['phone', 'desktop'] if source == 'phone' else ['desktop']
+    for candidate in candidates:
+        path = voiceprint_file(voiceprints, speaker, candidate)
+        if path is not None and path.is_file():
+            return path
+    return None
+
+
 def validate_config(config):
     if not isinstance(config, dict) or not isinstance(config.get('phrase'), str):
         raise ValueError('Invalid wake configuration')
@@ -170,11 +194,14 @@ def validate_config(config):
     owner_only = config.get('owner_only', True)
     if not isinstance(owner_only, bool):
         raise ValueError('Invalid owner-only setting')
+    voice_source = config.get('voice_source', 'desktop')
+    if voice_source not in VOICE_SOURCES:
+        raise ValueError('Invalid voice source')
     speaker = config.get('speaker', '')
     if not isinstance(speaker, str) or (owner_only and not re.fullmatch(r'[A-Za-z0-9_-]{1,32}', speaker)):
         raise WakeError('voiceprint_missing', 'Enroll your voice before enabling owner-only wake.')
     return dict(phrase=phrase, kws_threshold=threshold, speaker_threshold=speaker_threshold,
-                owner_only=owner_only, speaker=speaker)
+                owner_only=owner_only, speaker=speaker, voice_source=voice_source)
 
 
 class WakeKws:
@@ -276,7 +303,8 @@ class WakeKws:
     def create(self, config):
         with self.lock:
             config = validate_config(config)
-            if config['owner_only'] and not (self.voiceprints / (config['speaker'] + '.bin')).is_file():
+            if config['owner_only'] and not effective_voiceprint(self.voiceprints, config['speaker'],
+                                                                 config['voice_source']):
                 raise WakeError('voiceprint_missing', 'No voiceprint for the selected speaker. Record your voice first.')
             now = time.monotonic()
             self.sessions = {k: v for k, v in self.sessions.items() if now - v['time'] < 30}
@@ -333,7 +361,7 @@ class WakeKws:
                     timestamps = model.timestamps(stream)
                     duration = (timestamps[-1] - timestamps[0] + 0.6) if timestamps else 3.0
                     phrase_audio = s['audio'][-int(min(5.0, max(0.5, duration)) * 16000):]
-                    score = float(self.verify(phrase_audio, config['speaker']))
+                    score = float(self.verify(phrase_audio, config['speaker'], config['voice_source']))
                     matched = math.isfinite(score) and score >= config['speaker_threshold']
                 model.reset_stream(stream)
                 s['audio'] = np.empty(0, dtype=np.float32)

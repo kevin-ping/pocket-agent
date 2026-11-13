@@ -447,7 +447,7 @@ Check each layer before moving on; when one fails, the layers below it are not w
 2. **Dictation** — press the hotkey shown in the chat panel (default `RightShift`), speak, press it again; your words appear and are sent.
 3. **TTS** — the reply is spoken (Voice Output is on in Settings).
 4. **Interrupt** — while PA is speaking, press the hotkey: playback stops at once and recording starts. `Escape` during recording cancels it.
-5. *(Optional)* **Wake word and voiceprint** — enable and enroll in Settings → Voice (see [Wake-Word Configuration](#wake-word-configuration)).
+5. *(Optional)* **Wake word and voiceprint** — enable it in Settings → Wake word and record your voice in Settings → Voiceprint (see [Wake-Word Configuration](#wake-word-configuration)).
 6. *(Optional)* **Computer tools** — see [docs/computer-interaction.md](docs/computer-interaction.md).
 
 If Accessibility was denied initially, re-enable it and restart the app. If local dev hotkeys still do nothing after that, check the terminal app's Input Monitoring permission before debugging the code.
@@ -496,9 +496,14 @@ Configured in **Settings → Voice** (not via `.env`):
 - **Wake phrase** — the keyword the spotter listens for
 - **KWS threshold** (`wake_kws_threshold`) — keyword match confidence; raise it if the phrase fires on similar-sounding speech
 - **Owner only** (`wake_owner_only`) — when on, a keyword hit must also pass speaker verification against your enrolled voiceprint
-- **Speaker threshold** (`wake_word_threshold`) — how close the voice must match the enrolled voiceprint
 
-Voiceprint enrollment and the KWS model download are driven from the same settings page; they call the resident voice service's `/speaker/*` and `/kws/*` endpoints.
+The KWS model download is driven from the same settings page; it calls the resident voice service's `/kws/*` endpoints.
+
+Voiceprints have their own page, **Settings → Voiceprint**:
+
+- **Samples** — the computer microphone (`voiceprints/{name}.bin`) and, optionally, the mobile device microphone (`voiceprints/{name}.phone.bin`, recorded from the computer's settings page while the mobile device is the audio source; it can be deleted). Wake, interruption and owner-only conversation compare with one sample chosen by the current audio source: on the computer the computer sample; on a mobile device its own sample if present, otherwise the computer sample. When that sample is missing they refuse (fail closed). Enrollment calls `/speaker/enroll` with `source=desktop|phone`.
+- **Speaker threshold** (`wake_word_threshold`) — how close the voice must match; shared by wake, interruption and owner-only conversation
+- **Test my voice** — records 4 seconds on the current audio source and shows the score for each sample, which sample a real check would use, and whether it passes on that one
 
 English words missing from the model's pronunciation dictionary are split into dictionary words for pronunciation only (for example `hey mimikyu` is pronounced as `hey mimi-kyu`); the saved phrase is unchanged. A final `y` after a consonant is read as "-ee" rather than the letter name (`hey pocky` → `hey pock-y`, "pock-ee"). The settings page shows what the detector actually listens for under the wake phrase box. If wake cannot start (empty or unpronounceable phrase, missing voiceprint, unsupported macOS), the other settings are still saved and the settings page explains what to fix.
 

@@ -7,7 +7,8 @@ from unittest.mock import Mock, patch
 import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src-tauri/resources'))
 import wake_kws
-from wake_kws import WakeError, WakeKws, pronounceable_text, split_word, validate_config
+from wake_kws import (WakeError, WakeKws, effective_voiceprint, pronounceable_text, split_word,
+                      validate_config, voiceprint_file)
 
 
 class FakeStream:
@@ -42,7 +43,15 @@ class WakeTests(unittest.TestCase):
         sid = self.kws.create(self.config())
         r = self.kws.feed(sid, np.ones(16000), 0)
         self.assertTrue(r['speaker_match'])
-        self.assertEqual(self.verify.call_args.args[1], 'Me')
+        self.assertEqual(self.verify.call_args.args[1:], ('Me', 'desktop'))
+
+    def test_voice_source_is_allowlisted_and_reaches_verify(self):
+        sid = self.kws.create(self.config(voice_source='phone'))
+        self.kws.feed(sid, np.ones(16000), 0)
+        self.assertEqual(self.verify.call_args.args[2], 'phone')
+        for bad in ['tablet', '', None, '../x']:
+            with self.subTest(source=bad), self.assertRaises(ValueError):
+                validate_config(self.config(voice_source=bad))
 
     def test_other_voice_is_rejected(self):
         self.verify.return_value = 0.2
@@ -110,6 +119,45 @@ class WakeTests(unittest.TestCase):
             self.assertEqual(cm.exception.code, code)
         with self.assertRaises(WakeError) as cm:
             self.kws.create(dict(phrase='桃子桃子', owner_only=True, speaker='Other'))
+        self.assertEqual(cm.exception.code, 'voiceprint_missing')
+
+
+class VoiceprintTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def test_effective_sample_for_each_combination_and_source(self):
+        desktop, phone = self.dir / 'Me.bin', self.dir / 'Me.phone.bin'
+        # (desktop sample, phone sample) -> (on the desktop, on the phone)
+        cases = {(False, False): (None, None), (True, False): (desktop, desktop),
+                 (False, True): (None, phone), (True, True): (desktop, phone)}
+        for (has_desktop, has_phone), expected in cases.items():
+            for path, present in [(desktop, has_desktop), (phone, has_phone)]:
+                path.unlink(missing_ok=True)
+                if present:
+                    path.write_bytes(b'x')
+            with self.subTest(desktop=has_desktop, phone=has_phone):
+                self.assertEqual((effective_voiceprint(self.dir, 'Me', 'desktop'),
+                                  effective_voiceprint(self.dir, 'Me', 'phone')), expected)
+
+    def test_source_and_name_must_be_allowlisted(self):
+        self.assertEqual(voiceprint_file(self.dir, 'Me', 'phone'), self.dir / 'Me.phone.bin')
+        for name, source in [('Me', 'tablet'), ('Me', '../x'), ('Me', ''), ('../Me', 'desktop'), ('Me.phone', 'desktop')]:
+            with self.subTest(name=name, source=source):
+                self.assertIsNone(voiceprint_file(self.dir, name, source))
+        (self.dir / 'Me.phone.bin').write_bytes(b'x')
+        self.assertIsNone(effective_voiceprint(self.dir, 'Me.phone', 'desktop'), 'a sample is not a speaker')
+
+    def test_phone_sample_alone_enables_owner_wake_only_on_the_phone(self):
+        (self.dir / 'Me.phone.bin').write_bytes(b'x')
+        kws = WakeKws(self.dir, self.dir, Mock(return_value=0.8))
+        kws._model = Mock(return_value=FakeModel())
+        config = dict(phrase='桃子桃子', owner_only=True, speaker='Me')
+        self.assertTrue(kws.create(dict(config, voice_source='phone')))
+        with self.assertRaises(WakeError) as cm:
+            kws.create(config)
         self.assertEqual(cm.exception.code, 'voiceprint_missing')
 
 

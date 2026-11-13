@@ -490,6 +490,16 @@ pub fn sync_source(app: &AppHandle) {
 #[cfg(test)]
 pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
 
+/// What sync_source does to the source state, without the AppHandle side effects.
+#[cfg(test)]
+pub(crate) fn switch_source_for_test(online: bool) {
+    let _gate = lock_capture_gate();
+    if ONLINE.load(Ordering::Acquire) != online {
+        ONLINE.store(online, Ordering::Release);
+        SOURCE_EPOCH.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

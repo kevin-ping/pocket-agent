@@ -153,6 +153,9 @@ pub fn start_conversation(
         return Err("conversation already active".into());
     }
 
+    // The gate picks a sample for the current source; checked again once the
+    // capture has started (see below).
+    let gate_epoch = crate::voice::remote::source_epoch();
     let owner_gate = match owner_gate() {
         Ok(gate) => gate,
         Err(e) => {
@@ -199,6 +202,13 @@ pub fn start_conversation(
             return Err(format!("streaming capture failed: {}", e));
         }
     };
+    // A switch between the gate and the capture would start a live session
+    // on the new source with the old source's sample.
+    if crate::voice::remote::source_epoch() != gate_epoch {
+        stop_streaming_capture(stream_handle);
+        ACTIVE.store(false, Ordering::Release);
+        return Err("音频源刚刚切换，请重试".into());
+    }
 
     // Reserve a fresh generation id; the worker uses it to scope its cleanup so a
     // late-exiting old worker can't clobber the slot of a newly-started session.
@@ -283,7 +293,7 @@ fn worker_loop(
     single_shot: bool,
     wake_threshold: f32,
     barge_in_enabled: bool,
-    owner_gate: Option<(String, f32)>,
+    owner_gate: Option<(OwnerSample, f32)>,
 ) {
     let device_channels = stream_handle.channels.max(1);
     let mut mode = if single_shot {
@@ -648,25 +658,29 @@ fn worker_loop(
     eprintln!("[conv] worker exit");
 }
 
-/// `(speaker, threshold)` when every utterance must match the owner's voiceprint.
-fn owner_gate() -> Result<Option<(String, f32)>, String> {
+/// The owner's sample for the current audio source, and the threshold, when
+/// every utterance must match. A source switch ends the conversation, so the
+/// sample picked here holds for the whole session.
+fn owner_gate() -> Result<Option<(OwnerSample, f32)>, String> {
+    use crate::voice::sherpa_wake::{effective_voiceprint, voiceprints_dir, VoiceSource};
     let config = crate::commands::settings_repository::load()?;
     if !config.conversation_owner_only {
         return Ok(None);
     }
-    let voiceprint = crate::voice::sherpa_wake::voiceprints_dir()
-        .join(format!("{}.bin", config.last_enrolled_speaker));
-    if config.last_enrolled_speaker.is_empty() || !voiceprint.is_file() {
+    let Some(sample) = effective_voiceprint(&voiceprints_dir(), &config.last_enrolled_speaker, VoiceSource::current())
+    else {
         return Err("已开启「连续对话仅识别本人」，请先录制声纹".into());
-    }
-    Ok(Some((config.last_enrolled_speaker, config.wake_word_threshold)))
+    };
+    Ok(Some((sample, config.wake_word_threshold)))
 }
+
+type OwnerSample = (crate::voice::sherpa_wake::VoiceSource, std::path::PathBuf);
 
 fn spawn_transcribe(
     samples: Vec<i16>,
     sample_rate: u32,
     tx: Sender<Msg>,
-    owner_gate: Option<(String, f32)>,
+    owner_gate: Option<(OwnerSample, f32)>,
 ) {
     // Taken on the worker, while the session is live: ending the session
     // cancels this transcription in any stage, including the speaker check.
@@ -691,8 +705,8 @@ fn spawn_transcribe(
                 }
             };
 
-            if let Some((speaker, threshold)) = owner_gate {
-                let score = crate::voice::sherpa_wake::owner_similarity(wav_path, &speaker)
+            if let Some((sample, threshold)) = owner_gate {
+                let score = crate::voice::sherpa_wake::owner_similarity(wav_path, &sample)
                     .unwrap_or_else(|e| {
                         eprintln!("[conv] speaker check failed: {}", e);
                         0.0

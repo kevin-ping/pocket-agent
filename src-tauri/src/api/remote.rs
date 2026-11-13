@@ -1274,7 +1274,9 @@ mod tests {
         for cmd in ["quit_app", "open_settings_window", "save_window_position", "save_config",
                     "open_chat_history", "save_settings_page_config", "install_wake_model",
                     "remove_speaker", "start_enroll_recording", "update_hotkey",
-                    "start_pairing", "cancel_pairing", "list_paired_phones", "remove_paired_phone"] {
+                    "start_pairing", "cancel_pairing", "list_paired_phones", "remove_paired_phone",
+                    "voiceprint_samples", "audio_source_is_phone", "record_phone_clip", "test_voiceprint",
+                    "remove_voiceprint_sample"] {
             assert!(!UI_COMMANDS.contains(&cmd), "{cmd} must not be reachable from /ui");
         }
     }
